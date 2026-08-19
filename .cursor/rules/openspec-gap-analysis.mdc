@@ -1,0 +1,161 @@
+---
+description: "OpenSpec gap analysis — honest multiagent loop (max 5 iter), GAPS.md, no implementation. NL triggers: gap analysis, analiza gaps, revisar gaps, casuísticas faltantes, huecos en la spec, spec gaps, missing casuistics, GAPS.md"
+globs: openspec/changes/**/GAPS.md, openspec/changes/**/proposal.md, openspec/changes/**/specs/**/spec.md, openspec/changes/**/design.md, openspec/changes/**/tasks.md, openspec/changes/**/VERIFY.md, openspec/changes/**/OPERATOR.md
+alwaysApply: false
+---
+
+# OpenSpec — gap analysis (honest multiagent loop)
+
+Operational rule for discovering **useful spec gaps** the user did not specify — gaps that change the APPLY contract when backed by evidence. **Does not authorize implementation.**
+
+Canonical reference: `openspec/changes/archive/2026-06-24-inbound-external-orders/GAPS.md`.
+
+## When to run
+
+**Mandatory skill load:** when **any** trigger below matches, the agent **MUST** read and follow **`.cursor/skills/openspec-gap-analysis/SKILL.md`** (full workflow — Mode A/B, honest loop, `GAPS.md` output). Slash command **not** required.
+
+### Trigger phrases (NL + slash)
+
+| Category | Phrases (EN / ES) |
+|----------|-------------------|
+| Slash / alias | `/gaps-spec`, `gaps-spec` |
+| Gap analysis | `gap analysis`, `spec gaps`, `missing casuistics`, `what gaps are left` |
+| Spanish NL | `analiza gaps`, `revisar gaps`, `revisa los gaps`, `casuísticas faltantes`, `qué casuísticas faltantes hay`, `huecos en la spec`, `qué falta en la spec`, `gaps antes de aplica-tarea` |
+| Artefact | `GAPS.md`, `genera GAPS.md`, `actualiza GAPS.md` |
+| With change-id | `analiza gaps stats-net`, `gap analysis stats-net`, `gaps en polling rider` (Mode A if slug present; else Mode B) |
+
+### Workflow timing
+
+- After **PROPOSE / HYDRATE** (`/prepara-tarea`, `/mejora-tarea`) and **before APPLY** (`/aplica-tarea`).
+- As **phase 1 or 4** of **`/repasa-spec <slug>`** (sequential pipeline — see `repasa-spec-openspec-pipeline.mdc`).
+- When `openspec/changes/<change-id>/GAPS.md` is missing or stale vs current spec/code.
+- **Mode B (ad-hoc):** NL or `/gaps-spec` with a **review objective** and no change-id — no prior spec required.
+
+**Do not run** when the user clearly requests **implementation** (`/aplica-tarea`, "implementa", "aplica el change") — use apply skill instead.
+
+**Hard stop:** gap phase only — no edits to application source outside `openspec/changes/<slug>/`, or flipping product `tasks.md` checkboxes (see `00-openspec-stack-agnostic.mdc`).
+
+## Input modes
+
+### Mode A — change-id (existing)
+
+| Input | Example | Output |
+|-------|---------|--------|
+| Slug | `/gaps-spec stats-net` | `openspec/changes/stats-net/GAPS.md` |
+| Spec path | `/gaps-spec openspec/changes/stats-net/specs/stats-net/spec.md` | Same folder as slug |
+
+Requires `openspec/changes/<change-id>/`. Reads existing artefacts when present.
+
+### Mode B — ad-hoc / on-the-fly (NEW)
+
+| Input | Example | Output |
+|-------|---------|--------|
+| Objective on next line(s) | `/gaps-spec` + newline + review text | `openspec/changes/<derived-slug>/GAPS.md` |
+
+- Parse **review objective** verbatim from all lines after the command (multiline allowed).
+- Derive **slug**: English kebab-case from objective (max ~40 chars), or `adhoc-YYYY-MM-DD-<short-hash>` if too vague.
+- Create minimal scaffold if missing: `GAPS.md` + `proposal.md` stub (`Created by /gaps-spec ad-hoc`).
+- **Do not** require full `spec.md` before review — scope = objective + codebase evidence.
+- **`GAPS.md` must include `## Review objective`** quoting user text verbatim.
+
+### Parsing rules
+
+1. Message contains slug (`stats-net`, `SWT1234`) or path (`openspec/changes/...`, `*.md`) as change target → **Mode A** (slash or NL, e.g. `analiza gaps stats-net`).
+2. Gap-analysis intent without slug/path — objective in same or following lines → **Mode B** (slash or NL, e.g. `revisar gaps en polling rider`).
+3. Neither slug nor objective → ask once: *"Indica change-id o escribe el objetivo de la revisión en la línea siguiente"* — stop.
+4. Do **not** ask if objective is clearly present (NL or next line after `/gaps-spec`).
+
+## Trigger with multiagent mode
+
+Combine with **`hazlo-en-modo-multiagente.mdc`**: orchestrator **delegates discovery** via `Task` subagents; subagents **read/search only** (no production fixes). Orchestrator **does not implement** — only validates evidence and updates `GAPS.md`.
+
+## Roles
+
+| Role | Does | Does not |
+|------|------|----------|
+| **Orchestrator** | Picks iter focus, spawns subagents, verifies claims, writes `GAPS.md` | Write product code, hydrate REQ into spec without user follow-up |
+| **Subagent (`explore`)** | Code/config search, file reads, grep, readonly CLI | Invent gaps, edit spec/code |
+| **Subagent (`shell`)** | Readonly CLI (`grep`, project health check, `openspec validate`) | DB import, destructive ops |
+
+## Loop — max 5 iterations (early stop allowed)
+
+Each iteration has **one distinct focus**. Stop before iter 5 when no new **FACT** gaps remain.
+
+| Iter | Focus (suggested) |
+|------|-------------------|
+| **1** | Primary code paths (spec REQ **or** Mode B objective keywords) — async, queues, locks, webhooks |
+| **2** | Adjacent modules, IDs, provider-specific branches, edge cases in code |
+| **3** | Ops / security / coexistence | Read `OPERATOR.md` if present; permissions, admin vs CLI | Search admin UIs, recovery paths, locks |
+| **4** | Cross-verify spec/objective ↔ code ↔ existing `GAPS.md` — reject false hydration claims |
+| **5** | **STOP check** — any remaining candidate is FACT? If not → **STOP** |
+
+**Early stop (iter 5 criterion):** no casuistics **demonstrable in code/config** that would change APPLY without speculation. Remaining items → **INFERENCE**, **REJECTED** (product policy), or **UNKNOWN**.
+
+## Taxonomy (mandatory per row)
+
+| Label | Meaning |
+|-------|---------|
+| **FACT** | Directly supported by file path, line, config key, or command output |
+| **INFERENCE** | Useful recommendation; not a hard gap — note in matrix, no new REQ |
+| **REJECTED** | Invented, duplicate of existing REQ, product-policy-only, or unverifiable |
+| **ALREADY** | Covered by existing Requirement or spec edge case |
+| **UNKNOWN** | Not enough evidence (e.g. PRO runtime) — do not promote to REQ |
+| **HYDRATED** | FACT gap already reflected in spec (cite REQ id) |
+
+Align with `30-openspec-anti-hallucination/SKILL.md`: unverified identifiers → **NOT VERIFIABLE** / **UNKNOWN**, never **FACT**.
+
+## Honesty rules (non-negotiable)
+
+1. **FACT requires evidence** — path + symbol/line or command output in the matrix `Evidencia` column.
+2. **INFERENCE** — mark explicitly; do not count as gaps blocking APPLY.
+3. **REJECT** invented, duplicate, or policy-only "gaps" to pad the list.
+4. **No cheating** — do not reclassify INFERENCE as FACT to continue the loop.
+5. If prior `GAPS.md` claims **HYDRATED**, re-verify with `grep` on `spec.md` before trusting (Mode A).
+
+## Output artifact
+
+Path: **`openspec/changes/<slug>/GAPS.md`** (Mode A: existing change-id; Mode B: derived slug).
+
+Minimum sections (structure only when bootstrapping — fill during analysis, not with invented rows):
+
+1. Header — date, change id / mode, hydration status (honest).
+2. **Review objective** — **mandatory in Mode B** (verbatim user text); optional in Mode A.
+3. **Metodología** — iteration table (1–5) with honest result per iter.
+4. **Matriz consolidada** — columns: ID, Sev, Gap, Evidencia (FACT), Estado, Req (if HYDRATED).
+5. **Casuísticas útiles** — documentation notes, not always new REQ.
+6. **Fuera de v1** — explicitly out of scope.
+7. **Pending count** — metric table + canonical last line (see below).
+8. **Verification (this document)** — commands run; **Not verified** where blocked.
+
+### Pending count (mandatory)
+
+After the matrix is final, add **`## Pending count`** with the metric table and end the section with this **exact** line (integer substituted):
+
+```text
+Gaps pending (mejora + apply): <N>
+```
+
+**`gaps_pending` (`<N>`)** = consolidated-matrix rows whose **Estado/Status** is `FACT`, `PENDING`, or empty **and** Evidence column is non-empty — excluding `HYDRATED`, `ALREADY`, `REJECTED`, `INFERENCE`, `UNKNOWN`.
+
+Chat report **must** end with the **same line** as the last line of the message (no trailing text).
+
+Mode B also creates **`proposal.md`** stub if the folder did not exist.
+
+Optional follow-up (separate turn): propose spec deltas or run `/mejora-tarea` — **not in gap phase**.
+
+## Integration
+
+| Related | Role |
+|---------|------|
+| `hazlo-en-modo-multiagente.mdc` | Orchestrator + Task subagents |
+| `openspec-extract-spec-from-doc.mdc` | Source doc → spec; gaps run after hydrate |
+| `30-openspec-anti-hallucination/SKILL.md` | FACT / UNKNOWN discipline |
+| Skill `.cursor/skills/openspec-gap-analysis/SKILL.md` | Executable steps |
+| Command `.cursor/commands/gaps-spec.md` | `/gaps-spec` entry point |
+
+## Agent close (gap phase)
+
+- Deliver **mode** (A/B), updated `GAPS.md` path, derived slug (Mode B), and iteration stop reason.
+- Count: FACT found | HYDRATED | INFERENCE | REJECTED | UNKNOWN; copy **`## Pending count`** table from `GAPS.md`.
+- **Mandatory last line of chat (verbatim, integer only on the line):** `Gaps pending (mejora + apply): <N>` — must match `GAPS.md`; **nothing after this line**.
+- **Stop line (before last line):** run `/mejora-tarea <slug>` if `<N> > 0`, else `/aplica-tarea <slug>` — only after user decides; not in the same turn unless explicitly requested.

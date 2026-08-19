@@ -1,0 +1,56 @@
+---
+description: Use OpenSpec as the source of truth for E2E regression protection. Never weaken E2E assertions to make tests pass; surface conflicts instead of resolving them silently.
+globs: tests/**,openspec/**
+alwaysApply: false
+---
+
+# OpenSpec + E2E Regression Guard
+
+OpenSpec is the **source of truth** for expected application behavior. E2E tests are the **executable verification** of OpenSpec behavior. This rule protects against silently weakening tests to hide regressions.
+
+Resolve the project's E2E suite paths and run commands from its stack rule (`00-openspec-stack-agnostic.mdc`) — do not assume Drupal/DDEV layout.
+
+## Mandatory workflow when changing application code
+
+1. Identify affected user flows, screens, routes, forms, permissions, async paths and side effects.
+2. Find the related OpenSpec spec (`openspec/changes/*/specs/**/spec.md` or promoted `openspec/specs/**`). If none exists for the affected behavior, **create or propose one before** changing E2E tests.
+3. Run or reason about the relevant E2E tests.
+4. If an E2E test fails, classify the failure as exactly one of:
+   - **application regression**
+   - **legitimate behavior change already reflected in OpenSpec**
+   - **outdated or incomplete test**
+   - **ambiguous case requiring user confirmation**
+
+## Strict rules
+
+1. Never weaken, delete, skip, or rewrite E2E assertions only to make tests pass.
+2. Never update E2E tests in a way that contradicts OpenSpec.
+3. Never change OpenSpec silently to match a broken implementation.
+4. If code behavior differs from OpenSpec, **assume regression** unless there is explicit evidence of an intended change.
+5. If behavior is intentionally changed: update OpenSpec **first**, then the E2E tests.
+6. If the expected behavior is unclear, **stop and ask** the user.
+7. If there is doubt, do not guess — ask.
+8. Do not remove E2E coverage unless equivalent or stronger coverage is added.
+9. Prefer stable selectors: `data-testid`, accessible roles, labels, ARIA — framework-specific stable hooks when documented.
+10. Avoid fragile selectors: CSS classes alone, DOM tree depth/nth, generated ids, purely visual text as the sole anchor.
+
+## Coverage (maximum, measurable)
+
+- The inventory of flows must be **exhaustive** (derived from project routing/form/permission sources documented in the stack rule); a **drift guard** fails if a source surface is missing from inventory when the project defines one.
+- The audit passes only when **every applicable in-scope dimension** has a passing scenario, and every exclusion is listed with a reason. No silent gaps.
+
+## Required report after changes
+
+Always report: affected OpenSpec specs, affected E2E tests, behavior added/removed, assertions added/removed, possible regressions, and questions requiring user confirmation.
+
+## Golden rule
+
+Implementation must conform to OpenSpec. Tests must verify OpenSpec. If implementation, tests and OpenSpec disagree, **do not silently resolve the conflict** — identify the disagreement and ask the user unless the fix is obvious.
+
+## Related rules
+
+- `tdd-spec-driven-tests.mdc` — tests encode the spec; code adapts to correct tests, not the reverse.
+- `browser-devtools-use.mdc` — browser automation channel when applicable.
+- `ai-verify-result-before-response.mdc` — Verification block with real evidence.
+- `openspec-fix-changes-gitignore.mdc` — version product regression specs; gitignore fix/evidence-only specs.
+- `00-openspec-stack-agnostic.mdc` — resolve E2E paths/commands per project.

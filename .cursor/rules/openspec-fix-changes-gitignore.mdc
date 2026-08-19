@@ -1,0 +1,60 @@
+---
+description: OpenSpec and E2E fix artifacts — gitignore by content (optional; adapt paths in your app repo)
+globs: openspec/**,tests/**,.gitignore
+alwaysApply: false
+---
+
+# OpenSpec and E2E fix artifacts — gitignore by content (optional)
+
+**Optional rule.** Copy into an **application repo** and adapt E2E paths (`tests/e2e/`, Playwright root, etc.). Not required for the toolkit itself.
+
+Decide **version** vs **ignore** by reading content:
+
+1. Changes under `openspec/changes/<slug>/`
+2. E2E specs under your project's test tree when they are **ticket-scoped fix evidence**, not canonical product regression.
+
+When in doubt → ask the developer. Do not assume from slug alone (`fix-*`, `mejora-*`, `add-*`).
+
+## OpenSpec — read first
+
+1. `openspec/changes/<slug>/proposal.md`
+2. `openspec/changes/<slug>/specs/**/spec.md`
+3. `design.md`, `tasks.md`, `VERIFY.md` when present
+
+## E2E — read first
+
+1. The full `.spec.ts` (or equivalent) body
+2. Matching OpenSpec change for the same ticket
+3. Project README distinguishing **canonical CI suite** vs **local ticket evidence**
+
+## Classify as **fix** → gitignore
+
+**OpenSpec change** when it restores broken behavior, does not add a new product capability, and cites QA/defects.
+
+**E2E spec** when it is primarily ticket evidence (screenshots, DOM dumps, one-off env vars), not a reusable CI contract.
+
+```gitignore
+/openspec/changes/<slug>/
+/tests/e2e/<ticket-scoped>.spec.ts
+```
+
+## Classify as **feature** → version
+
+New capability, stable API/flow, canonical E2E regression for CI.
+
+## Always local (typical)
+
+- `openspec/changes/**/evidence/`
+- `test-results/`, `playwright-report/`, output JSON
+
+## Agent obligation
+
+Before `git add` under classified paths: read content, update `.gitignore` for fix-only artefacts, ask when mixed fix+feature.
+
+## Example table
+
+| Artefact | Signal | Decision |
+|----------|--------|----------|
+| `add-rest-api` + spec | New public API | Feature → version |
+| `fix-checkout-validation` | QA defects, existing flow | Fix → ignore (optional) |
+| `checkout-happy-path.spec.ts` | Canonical CI flow | Feature → version |

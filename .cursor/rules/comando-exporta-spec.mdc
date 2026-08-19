@@ -1,0 +1,96 @@
+---
+description: "Export Cursor command/skill/rule bundle to all OpenSpec projects — /exporta-spec, exporta spec, propaga bundle (L2)"
+globs: .cursor/commands/**,.cursor/skills/**,.cursor/rules/**
+alwaysApply: false
+---
+
+# Comando exporta-spec (L2)
+
+Loads on **`/exporta-spec`** or trigger phrases. Propagates a **command**, **skill**, **rule**, **bundle**, or **all bundles** from the current repo to all OpenSpec projects under `PROJECTS_BASE`.
+
+## Triggers
+
+| Language | Phrases |
+|----------|---------|
+| Slash | `/exporta-spec`, `exporta-spec` |
+| ES | `exporta spec`, `exporta el comando`, `exporta la skill`, `exporta la rule`, `exporta todos`, `propaga a los proyectos`, `exporta a los demás proyectos` |
+| EN | `export bundle`, `export spec to projects`, `propagate command`, `export all bundles` |
+
+**Mandatory:** read `.cursor/skills/exporta-spec/SKILL.md` when triggered.
+
+## Human must indicate target
+
+The developer names **what** to export:
+
+- Slug: `html`, `comando-verificar`, `gaps-spec`, `repasa-spec`, …
+- Or type + name: `command html`, `skill html`, `rule comando-html`
+- Or **`all` / `todos`** → deploy every bundle with `bundle.manifest` (includes `exporta-spec` itself)
+
+If omitted → **ask once**: «¿Qué comando, skill o rule exporto? (ej. `html`, `all`)»
+
+## PROJECTS_BASE — ask if missing
+
+Default: `$HOME/projects` (parent of `htdocs/` — includes sibling repos outside `htdocs/`).
+
+Legacy alias: `HTDOCS_BASE` / `--htdocs-base`.
+
+```bash
+test -d "${PROJECTS_BASE}" || # ASK developer — exit 2 from script = ASK_PROJECTS_BASE
+```
+
+**Do not** guess another base path. Re-run with `--projects-base "<developer answer>"`.
+
+## Projects registry (never versioned)
+
+Script writes local-only registry after discovery:
+
+- `<PROJECTS_BASE>/.cursor-local/export-spec/projects-registry.json`
+- Mirror per repo: `.cursor/context/export-spec/projects-registry.json` (gitignored)
+
+**Prohibited:** commit registry files.
+
+## Smart update (default)
+
+Deploy compares bundle vs each target file (`cmp`):
+
+- **NEW** — destination missing → copy
+- **UPDATE** — exists but differs → copy
+- **SKIP** — identical → no write
+
+Report `## EXPORT_STATS` from stdout. Use `--force` only when developer asks for unconditional overwrite.
+
+## Obligation
+
+1. Discover source files in **current repo** (`git rev-parse --show-toplevel`).
+2. Write bundle + `bundle.manifest` under `ai-developer/templates/openspec-cursor/<slug>/`.
+3. Run `bash <ai-developer>/scripts/exporta-spec.sh --slug <slug> --projects-base "$PROJECTS_BASE"` or `--all`.
+4. Report `discovered=N`, **EXPORT_STATS**, **REGISTRY** path, manifest file count, and **full `## EXPORT_TARGETS` directory list** in chat (`## Directorios exportados`).
+
+## Mandatory reply — directory list (always)
+
+After export or dry-run, paste **every** `TARGET:` path from script stdout. Never close with only a count.
+
+## bundle.manifest (contract)
+
+```
+src_in_bundle=dest_in_project
+universal:SKILL.md=skill-dir/SKILL.md
+```
+
+## Prohibited
+
+- Export without manifest on disk.
+- Silent `PROJECTS_BASE` change when default missing.
+- Commit registry under `.cursor-local/` or `.cursor/context/export-spec/`.
+- `git commit` / `git push` without explicit developer request.
+
+## Cross-links
+
+- Skill: `.cursor/skills/exporta-spec/SKILL.md`
+- Command: `.cursor/commands/exporta-spec.md`
+- Script: `ai-developer/scripts/exporta-spec.sh`
+- Discovery: `ai-developer/scripts/export-openspec-discover.sh`
+
+## Index
+
+Registered as **L2 only** in `00-rules-priority-index.mdc` — **not** L1.

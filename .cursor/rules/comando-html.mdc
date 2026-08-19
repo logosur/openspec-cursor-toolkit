@@ -1,0 +1,71 @@
+---
+description: "Open requested artifact as HTML in Chrome — /html, abreme en chrome html, abre el html (L2; complements qa-reports-open-chrome)"
+globs: .cursor/context/**/*.html,.cursor/QAtest/**/*.html,tests/**/evidence/**/*.html,documentacion/**/*.html
+alwaysApply: false
+---
+
+# Comando HTML — abrir en Chrome (L2)
+
+Loads on **`/html`** or trigger phrases below. **Complements** `qa-reports-open-chrome.mdc` (auto-open after generate) and L1 `open-links-in-chrome-not-ide.mdc`.
+
+## Triggers
+
+| Language | Phrases |
+|----------|---------|
+| Slash | `/html`, `html` (as command) |
+| ES | `abreme lo que te he pedido en chrome html`, `abre en chrome`, `abre el html`, `muestra el informe en chrome`, `ábrelo en chrome` |
+| EN | `open html in chrome`, `open the report in chrome`, `show me the html` |
+
+**Mandatory:** read `.cursor/skills/html/SKILL.md` when triggered.
+
+## Obligation
+
+1. **Resolve** target from argument or conversation context (see skill).
+2. **Ensure** `.html` exists — generate twin from `.md` if needed (`documents-md-and-html.mdc`).
+3. **Execute** on host (agent runs it):
+
+```bash
+google-chrome "file:///absolute/path/to/file.html"
+```
+
+Fallbacks: `chromium-browser`, `xdg-open` — same `file://` URL.
+
+4. Reply with absolute path + full `file://` URL + command outcome.
+
+## Prohibited
+
+| Do not | Why |
+|--------|-----|
+| `browser_navigate` / IDE browser for developer viewing | `open-links-in-chrome-not-ide.mdc` |
+| “Recarga / ábrelo tú” without running Chrome | `ai-act-without-asking.mdc` |
+| Open `.md` when HTML twin is the presentation target | `/html` means **HTML in Chrome** |
+| Truncate `file://` URLs in chat | Developer must copy-paste |
+
+## Scope resolution (summary)
+
+| Input | Action |
+|-------|--------|
+| Path to `.html` | Open that file |
+| Path to `.md` | Open/create `<basename>.html` |
+| Basename | Newest match under `.cursor/context/`, `.cursor/QAtest/`, `evidence/`, `documentacion/`, `tmp/` |
+| Omitted | Last artifact requested or produced in the chat |
+
+## Close format
+
+```markdown
+## Verification
+- **Verified:** `test -f <path>`; `google-chrome "file://…"` (exit code)
+```
+
+No display → **Not verified:** headless; cite path only.
+
+## Cross-links
+
+- Skill: `.cursor/skills/html/SKILL.md`
+- Command: `.cursor/commands/html.md`
+- L1: `open-links-in-chrome-not-ide.mdc`, `documents-md-and-html.mdc`
+- Project: `qa-reports-open-chrome.mdc`, `qa-reports-timestamp-mandatory.mdc`
+
+## Index
+
+Registered as **L2 only** in `00-rules-priority-index.mdc` — **not** L1.

@@ -1,0 +1,78 @@
+---
+description: Master OpenSpec workflow for creating strong implementation specifications
+alwaysApply: false
+---
+
+When the user asks to create, improve, audit, hydrate, or implement a feature, bugfix, refactor, test strategy, API behavior, webhook behavior, or backend flow using OpenSpec, follow this workflow:
+
+1. EXPLORE
+2. PROPOSE
+3. HYDRATE
+4. GAP ANALYSIS (recommended before APPLY — `/gaps-spec` → `GAPS.md`)
+5. VERIFY
+6. APPLY
+7. ARCHIVE
+
+Default behavior:
+- Do not implement immediately.
+- First understand the existing project.
+- Create or improve an OpenSpec proposal.
+- Hydrate the specification until it is precise, testable, and safe.
+- Verify the specification before implementation.
+- Apply only after the spec is ready.
+
+EXPLORE:
+- Read existing OpenSpec specs.
+- Read relevant source code.
+- Read relevant tests.
+- Read configuration.
+- Read logs if provided.
+- Find similar implementations.
+- Identify architecture and conventions.
+
+PROPOSE:
+- Create an OpenSpec change with proposal.md, specs, design.md if needed, and tasks.md.
+- Include problem, scope, non-goals, requirements, scenarios, acceptance criteria, risks, testing strategy, and implementation tasks.
+
+HYDRATE:
+- Convert vague requirements into testable requirements.
+- Add GIVEN / WHEN / THEN scenarios.
+- Add edge cases.
+- Add source-of-truth references.
+- Add expected vs observed tables when relevant.
+- Add traceability between requirements, tests, evidence, and tasks.
+- Mark unsupported claims as NOT VERIFIABLE.
+
+GAP ANALYSIS (optional but recommended):
+- Run `/gaps-spec` or natural-language gap triggers after hydrate, before APPLY.
+- Produce or update `openspec/changes/<slug>/GAPS.md` with evidence-backed FACT gaps only.
+- Follow `.cursor/rules/openspec-gap-analysis.mdc` and `.cursor/skills/openspec-gap-analysis/SKILL.md`.
+- Do not implement product code in this phase; hydrate FACT gaps via `/mejora-tarea` in a separate turn.
+
+VERIFY:
+- Check that the spec is complete, evidence-based, testable, and safe.
+- Return one status:
+  - READY TO APPLY
+  - NEEDS HYDRATION
+  - BLOCKED BY UNKNOWN
+  - UNSAFE TO APPLY
+
+APPLY:
+- Implement strictly according to the approved OpenSpec change.
+- Follow tasks.md in order.
+- Do not work outside scope.
+- Do not weaken tests to make them pass.
+- Stop if code contradicts the spec.
+
+ARCHIVE:
+- Consolidate completed behavior into living OpenSpec documentation.
+- Document final behavior, tests added, limitations, and known risks.
+
+Hard rules:
+- Do not invent business rules.
+- Do not invent class names, routes, services, statuses, labels, response codes, database tables, or config keys.
+- Separate FACT, INFERENCE, HYPOTHESIS, UNKNOWN.
+- Mark unsupported claims as NOT VERIFIABLE.
+- Prefer small, reviewable tasks.
+- Do not modify tests just to make them pass.
+- Do not declare success without evidence.

@@ -1,0 +1,62 @@
+---
+description: "Modo multiagente desatendido — orquestar subagentes hasta completar la tarea o exponer un bloqueo real"
+alwaysApply: false
+---
+
+# Hazlo en modo multiagente
+
+**Disparador:** cuando el desarrollador escriba **"Hazlo en modo multiagente"**, **"usa el modo multiagente"**, **"sigue en modo multiagente"**, **`/multiagente`**, o una variante clara con una tarea concreta.
+
+La intención canónica es:
+
+```text
+usa el modo multiagente para [tarea especificada], de forma desatendida. No pares hasta terminarlo todo.
+```
+
+## Objetivo
+
+Cumplir la tarea sin intervención manual entre iteraciones, salvo bloqueo real. El agente principal no debe cerrar por cansancio, por un primer fallo de tests, por errores corregibles, ni por resultados parciales de subagentes.
+
+## Roles
+
+### Agente principal
+
+- Define criterios de aceptación verificables.
+- Inspecciona el estado actual del proyecto antes de editar.
+- Divide el trabajo en tareas concretas y lanza subagentes cuando aporte velocidad, aislamiento o especialización.
+- Verifica los resultados contra evidencia real: tests, comandos del stack, logs, HTTP, navegador, archivos generados o salida de OpenSpec.
+- Si algo falla, convierte el fallo en la siguiente tarea y relanza con el error exacto.
+- Solo declara cierre cuando todo está verificado o el bloqueo es explícito.
+
+### Subagentes
+
+- Ejecutan tareas acotadas: exploración, implementación, investigación de fallos, pruebas, revisión o generación de evidencia.
+- Devuelven archivos tocados, comandos ejecutados, resultado y bloqueos.
+- No deciden el cierre global.
+
+## Flujo
+
+1. Extraer la tarea y convertirla en criterios de aceptación.
+2. Leer reglas y documentación relevantes del proyecto.
+3. Revisar estado actual y riesgos antes de modificar.
+4. Orquestar subagentes para tareas paralelizables o especializadas.
+5. Integrar cambios y verificar en el entorno real.
+6. Iterar sobre cada fallo hasta que pase o exista bloqueo real.
+7. Cerrar con sección de verificación y, si queda algo pendiente, estado parcial explícito.
+
+## Condiciones de parada permitidas
+
+- Todo está implementado y verificado.
+- Falta una credencial, acceso humano, decisión de producto, o autorización explícita para commit, push, merge o rebase.
+- El usuario interrumpe o cambia la tarea.
+
+## OpenSpec
+
+Durante `apply`, `/aplica-tarea`, `/opsx-apply`, `/verifica-tarea` o validaciones OpenSpec:
+
+- No dejar tareas a medias sin decirlo claramente.
+- Usar `openspec status --change "<slug>" --json` e instrucciones OpenSpec disponibles.
+- Leer todos los `contextFiles` antes de implementar.
+- Ejecutar `tasks.md` en orden y marcar checkboxes solo con evidencia.
+- Re-ejecutar validación y pruebas relevantes al final.
+- Si queda pendiente, listar checkboxes incompletos, motivo y siguiente acción exacta.

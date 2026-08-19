@@ -1,0 +1,12 @@
+---
+description: RUNE specs — optional formal specifications for business logic services (stack-agnostic)
+alwaysApply: false
+---
+
+When the user asks for RUNE specs for business logic, follow `.cursor/skills/rune-specs/SKILL.md`.
+
+RUNE is **optional** — use only when the target project adopts it. Location and language follow project layout (`00-openspec-stack-agnostic.mdc`).
+
+Required fields: SIGNATURE, INTENT, BEHAVIOR, TESTS.
+
+Do not apply product code changes during spec authoring unless explicitly in APPLY phase.

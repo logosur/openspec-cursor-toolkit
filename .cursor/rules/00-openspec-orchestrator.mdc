@@ -1,0 +1,51 @@
+---
+description: OpenSpec orchestration layer
+alwaysApply: false
+---
+
+When the user asks for a change, feature, bugfix, refactor, tests, API behavior, webhook behavior, or TDD validation, use the OpenSpec workflow.
+
+Default workflow:
+
+1. EXPLORE
+2. PROPOSE
+3. HYDRATE
+4. GAP ANALYSIS (recommended — `/gaps-spec` → `GAPS.md`)
+5. VERIFY
+6. APPLY
+7. ARCHIVE
+
+Do not implement code immediately unless the user explicitly asks for a trivial direct change.
+
+Definitions:
+
+EXPLORE:
+Understand the existing system before writing a proposal.
+
+PROPOSE:
+Create an OpenSpec change with proposal.md, specs, design.md when needed, and tasks.md.
+
+HYDRATE:
+Enrich the specification until it is precise, testable, traceable, and implementation-ready.
+
+GAP ANALYSIS:
+Discover evidence-backed spec gaps not yet in requirements (`GAPS.md`). Read-only on product code. See `openspec-gap-analysis.mdc`.
+
+VERIFY:
+Check that the spec is internally consistent, evidence-based, and safe to implement.
+
+APPLY:
+Implement strictly according to the approved spec and tasks.
+
+ARCHIVE:
+After completion, merge/consolidate the change into the living specs.
+
+Mandatory rules:
+
+- Never invent business rules.
+- Never invent class names, routes, services, statuses, labels, codes, tables, or config keys.
+- Mark unsupported claims as NOT VERIFIABLE.
+- Separate facts, inferences, hypotheses, and unknowns.
+- Prefer small, reviewable tasks.
+- Do not weaken tests to make them pass.
+- Do not modify production behavior to satisfy unclear tests.

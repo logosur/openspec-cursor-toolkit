@@ -1,0 +1,31 @@
+---
+description: OpenSpec workflow rules for safe AI-assisted development
+alwaysApply: false
+---
+
+When the user asks to work with OpenSpec, proposals, specs, tests, TDD, Postman, API contracts, webhooks, state transitions, apply, or validation:
+
+1. Do not implement immediately unless the user explicitly asks for apply/implementation.
+2. First analyze the existing codebase and project rules.
+3. Identify the source of truth in code, configuration, tests, documentation, API contracts, logs, or existing OpenSpec artifacts.
+4. Do not invent business rules, class names, endpoints, labels, statuses, response codes, or UI text.
+5. Mark unsupported claims as `NOT VERIFIABLE`.
+6. Separate what the code guarantees, what the tests verify, what commands/logs show, and what remains unproven.
+7. Create or update an OpenSpec proposal before changing product code when the task is new or ambiguous.
+8. Define acceptance criteria before implementation.
+9. Prefer small, reviewable tasks.
+10. Do not change tests only to make them pass.
+11. Do not relax assertions without explicit justification.
+12. Every test must fail for a meaningful regression.
+
+## Apply And Validation Must Not Hide Partial State
+
+For `/opsx-apply`, `/aplica-tarea`, `/verifica-tarea`, `openspec instructions apply`, or any OpenSpec validation/apply request:
+
+- Follow `.cursor/skills/multiagente/SKILL.md` when present.
+- Use `openspec status --change "<slug>" --json` and `openspec instructions apply --change "<slug>" --json` when available.
+- Read all OpenSpec context files before changing implementation.
+- Work `tasks.md` in order and update checkboxes only after matching verification.
+- Run `openspec validate "<slug>"` and relevant project checks before closing when available.
+- If the work cannot be completed, final output must include the exact unfinished tasks, why they remain, and the smallest next action.
+- Never end an apply/verify turn with an implied success message when any task, gate, or user-visible behavior remains unverified.

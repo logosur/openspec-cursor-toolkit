@@ -1,0 +1,109 @@
+---
+description: "OpenSpec change verification — /verifica-tarea, 100% scenario matrix, honest evidence (extends 00-verification-gate). Triggers: verifica la tarea, verify openspec change, comprueba el change, verificación honesta openspec."
+globs: .cursor/context/verification/openspec-*/**/*
+alwaysApply: false
+---
+
+# Verifica tarea OpenSpec a fondo (L2)
+
+**Extends** `00-verification-gate.mdc` — does **not** replace or weaken L1. Loads on `/verifica-tarea [<slug>]` or trigger phrases below.
+
+## Triggers
+
+| Language | Phrases |
+|----------|---------|
+| Slash | `/verifica-tarea`, `verifica-tarea` |
+| ES | `verifica la tarea`, `comprueba el change`, `verificación honesta openspec`, `verifica esta tarea`, `verifica lo que acabamos de aplicar` |
+| EN | `verify openspec change`, `openspec change verification`, `honest openspec verification`, `verify this change` |
+
+**Mandatory:** read `.cursor/skills/verifica-tarea/SKILL.md` when triggered.
+
+## Slug resolution (REQ-VT-SLUG-01)
+
+- **Optional** command token — resolve from prompt or conversation when omitted (see skill Phase 0).
+- Record **`slug_source`** in matrix header.
+- Ambiguous → ask once with folder list; do not guess.
+
+## Matrix requirement (REQ-VT-MATRIX-01, COVER-01)
+
+Before overall PASS on an OpenSpec change:
+
+1. Produce `.cursor/context/verification/openspec-<slug>/matrix.md` with timestamp, slug, **`slug_source`**, commit/branch, `strategy:`, coverage `M/N`.
+2. **≥1 row per `#### Scenario:`** in target `specs/**/spec.md` — PASS, BLOCKED, or NOT VERIFIABLE with reason (never silent omit).
+3. Merge **VERIFY.md gates** into rows when target VERIFY exists (REQ-VT-VERIFY-01).
+4. Stable **`row_id`** (`R-01`…) — cite in FAIL summaries and `## Verification` (VR-10).
+5. **>8** data rows → also `matrix.html` twin.
+
+**Trivial scope** (infra/doc-only meta changes): `strategy: trivial`; ≥3 artefact/regression rows; no forced form cartesian.
+
+## Host scope (REQ-VT-SCOPE-HOST-01)
+
+- Default: **local dev** documented for the target project (`00-openspec-stack-agnostic.mdc`).
+- **Do not** verify PRO/staging without explicit host scope in the user message.
+- Remote scope → document in matrix header; BLOCKED/NOT VERIFIABLE when access missing.
+
+## Authentication (REQ-VT-AUTH-01)
+
+- One login attempt per `(target, username)` per chat session.
+- Prefer project E2E auth helper / storage-state reuse when documented.
+- Follow `auth-credential-failure-no-retry.mdc`.
+- Flood → `BLOCKED (credentials)` — no retry.
+
+## URL resolution (REQ-VT-URL-01)
+
+- Resolve base URL from the **target project's** stack rule (Compose, `.env`, smoke script) — never hardcode host/port from another repo.
+- Multi-app / subdomain routes: use project-documented URL map — not a single default host alone.
+
+## Destructive rows (REQ-VT-MATRIX-04)
+
+Tag `destructive: true` for cancel, delete, irreversible submits.
+
+- Default: `BLOCKED (destructive)` unless target scenario explicitly authorizes + disposable local fixtures.
+
+## Row types (REQ-VT-MATRIX-05…07) — align with `/comando-verificar`
+
+| `row_type` | Minimum evidence |
+|------------|------------------|
+| `multistep` | Step navigation before final assert |
+| `partial-ajax-rebuild` | Post-AJAX DOM + console clean (VR-15) |
+| `side-effect` | Observable queue/mail/async after submit |
+| `permission_negative` | Access denied for role without permission |
+| Form combo | **Verified (E2E/form)** — not PHPUnit alone (VR-09) |
+| Interactive | **Verified (interactive)** (VR-13) |
+| JS / libraries | **Verified (JS)** on exact URL (VR-15) |
+
+## Combinatorial policy (REQ-VT-LIMIT-01)
+
+| Size | Strategy |
+|------|----------|
+| ≤ 32 | `combinatorial-full` / `full-scenario` |
+| 33–256 | `pairwise` + edge rows; UNCOVERED in header |
+| > 256 | `equivalence-classes` + pairwise on representatives |
+
+## Anti-patterns (REQ-VT-HONEST-02)
+
+Forbidden in command, skill, and this rule:
+
+- PHPUnit/curl-only for form rows; skip validation rows; host phpunit; «recarga y comprueba»; weaken E2E; «Debería funcionar» / «the code looks correct» without proof.
+
+## Close format (REQ-VT-EXEC-03, NL-REPORT-01)
+
+Final message **must** include, **in order**:
+
+1. **`## Verification`** — technical FACT-backed lines + trace table
+2. **`## Qué se ha verificado`** — 5–12 plain-language bullets (at-a-glance; honest gaps; product vs meta)
+3. **`## Resumen`** — VR-14 compressed
+
+Do not skip the NL section when closing a verification run.
+
+## Cross-links
+
+- L1: `00-verification-gate.mdc`, `ai-verify-result-before-response.mdc`
+- Cousin L2: `comando-verificar-a-fondo.mdc` (diff-scoped)
+- Forms: `testing-browser-parity-and-form-events.mdc`
+- E2E guard: `openspec-e2e-regression-guard.mdc`
+- Phase 1 waiver: `qa-local-no-playwright-phase1.mdc`
+
+## Index
+
+Registered as **L2 only** in `00-rules-priority-index.mdc` — **not** L1.

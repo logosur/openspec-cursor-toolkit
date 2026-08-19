@@ -1,0 +1,95 @@
+---
+description: "Informe QA honesto con capturas mobile→desktop, matriz combinatoria, sin alucinaciones — /qa, informe qa, reporte qa (L2; extends 00-verification-gate)"
+globs: .cursor/QAtest/**/*
+alwaysApply: false
+---
+
+# Comando QA — informe honesto con evidencia visual (L2)
+
+**Extends** `00-verification-gate.mdc` — does **not** replace L1. Loads on `/qa` or trigger phrases below.
+
+## Triggers
+
+| Language | Phrases |
+|----------|---------|
+| Slash | `/qa`, `qa` (as command) |
+| ES | `informe qa`, `reporte qa`, `reporte qa honesto`, `dame un reporte qa`, `qa con capturas`, `informe qa verificado`, `qa sin alucinaciones` |
+| EN | `qa report`, `honest qa report`, `qa with screenshots`, `visual qa report` |
+
+**Mandatory:** read `.cursor/skills/qa/SKILL.md` when triggered.
+
+## Deliverable requirement
+
+Before overall PASS on a `/qa` session:
+
+1. **HTML report:** `.cursor/QAtest/<run-slug>/qa-report-<run-slug>.html` (+ `.md` twin).
+2. **Matrix:** `.cursor/QAtest/<run-slug>/matrix.md` with stable `row_id` per row.
+3. **Captures:** `capturas/R-NN-mobile.png` then `capturas/R-NN-desktop.png` per UI row.
+4. **Timestamp:** seconds + timezone in header (`qa-reports-timestamp-mandatory.mdc`).
+5. **Chrome:** agent opens report same turn (`qa-reports-open-chrome.mdc`).
+
+## Screenshot order and hygiene (REQ-QA-CAPTURE-01)
+
+| Rule | Detail |
+|------|--------|
+| Order in report | **Mobile first**, **desktop second** — per row, per section |
+| Pre-capture | Dismiss cookie banners, modals, debug overlays, toasts blocking subject |
+| Post-capture | Agent validates PNG — subject visible at a glance; re-capture if obstructed |
+| Inline evidence | Each `<figcaption>` in natural language (Spanish) — what the image proves |
+| No detached gallery | Screenshots embedded at the step that references them |
+
+## Combinatorial policy (REQ-QA-LIMIT-01)
+
+Same as `/comando-verificar`:
+
+| Combinations | Strategy |
+|--------------|----------|
+| ≤ 32 | Full cartesian |
+| 33–256 | Pairwise + edge rows; **UNCOVERED** in header |
+| > 256 | Equivalence classes + pairwise |
+
+Always include: happy path, validation errors, permission denied (if applicable).
+
+## Honesty (REQ-QA-HONEST-01)
+
+- Report verdict **must match** matrix `Verdict` for same `row_id`.
+- **No PASS** without filled **Actual** column (browser outcome, HTTP, test exit).
+- **No screenshot** cited without file on disk (`test -f`).
+- Use **BLOCKED** / **NOT VERIFIABLE** instead of inventing coverage.
+- Narrative = observed facts, not assumed behaviour.
+
+## Authentication (REQ-QA-AUTH-01)
+
+- One login attempt per username per chat session.
+- Flood → `BLOCKED (credentials)` — no retry (`auth-credential-failure-no-retry.mdc`).
+
+## URL resolution (REQ-QA-URL-01)
+
+```bash
+BASE=<resolve from project stack rule — Compose, .env, smoke script>
+```
+
+## Close format
+
+```markdown
+## Verification
+- **Verified:** `.cursor/QAtest/<run-slug>/qa-report-<run-slug>.html` — matrix N/M PASS; Chrome open exit 0
+- **Verified (interactive):** row_ids …
+- **Verified (JS):** `<route>` — console clean (VR-15)
+- **Not verified:** BLOCKED rows …
+```
+
+**Resumen** follows VR-14.
+
+## Cross-links
+
+- Skill: `.cursor/skills/qa/SKILL.md`
+- Command: `.cursor/commands/qa.md`
+- Template: `qa-report-template-non-technical.mdc`
+- Inline evidence: `qa-local-natural-language-inline-evidence.mdc`
+- Deep matrix (no HTML): `comando-verificar-a-fondo.mdc`
+- Chrome open: `qa-reports-open-chrome.mdc`, `comando-html.mdc`
+
+## Index
+
+Registered as **L2 only** in `00-rules-priority-index.mdc` — **not** L1.

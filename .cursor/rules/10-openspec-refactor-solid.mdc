@@ -1,0 +1,20 @@
+---
+description: OpenSpec refactor workflow for SOLID, DI, and test-backed internal improvements (stack-agnostic)
+alwaysApply: false
+---
+
+When the user asks to refactor custom code, improve architecture, apply SOLID, improve dependency injection, create interfaces, improve tests, or remove bad practices, use an OpenSpec change before implementation.
+
+Read `.cursor/rules/00-openspec-stack-agnostic.mdc` and the target project's stack rule for source path layout.
+
+Scope by default: application-owned source documented in the project (not vendor/contrib).
+
+Out of scope by default: third-party dependencies, unrequested behavior changes, unjustified schema changes, cosmetic-only refactors.
+
+Required analysis: missing interfaces, concrete coupling, weak mocks, service locators, god classes, logic in entry points, duplicated rules, insufficient tests.
+
+Refactor rules: preserve behavior; minimal diffs; constructor injection; interface-based dependencies in tests and consumers.
+
+Before implementation: OpenSpec proposal, tests, acceptance criteria, rollback, READY TO APPLY gate.
+
+Never apply a SOLID refactor unless the spec is READY TO APPLY.

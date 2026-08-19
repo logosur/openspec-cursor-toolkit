@@ -1,0 +1,40 @@
+---
+description: Safe APPLY phase for OpenSpec — unattended multi-agent execution, scope control, and evidence-backed completion
+alwaysApply: false
+---
+
+Use this rule during the **APPLY** step of OpenSpec, including `/opsx-apply`, `/aplica-tarea`, direct `openspec instructions apply`, or any user request to implement pending OpenSpec tasks.
+
+## Preconditions
+
+- Read `.cursor/skills/multiagente/SKILL.md` when present; OpenSpec apply runs inherit the unattended multi-agent completion contract.
+- Run or inspect `openspec status --change "<slug>" --json` when the CLI is available.
+- Run `openspec instructions apply --change "<slug>" --json` and read every returned `contextFiles` path before implementation.
+- Read `proposal.md`, `tasks.md`, `design.md`, `VERIFY.md`, and affected `specs/**/spec.md` when they exist.
+- Scope and non-goals are explicit; treat anything outside them as out of scope.
+- If VERIFY is not **READY TO APPLY**, implement only what is necessary to unblock verification, or report the readiness blocker clearly.
+
+## Implementation Rules
+
+1. Execute `tasks.md` in order unless the spec says a task is parallelizable.
+2. Use subagents for independent exploration, implementation, testing, or review when it helps finish without stalling.
+3. Do not drive-by refactor unrelated modules.
+4. Do not weaken tests, silence assertions, or delete scenarios to get green CI.
+5. If code contradicts the spec, reconcile spec vs code explicitly before marking tasks complete.
+6. Prefer minimal diffs that satisfy acceptance criteria.
+7. Mark `- [ ]` to `- [x]` only after the implementation and the relevant verification for that task are complete.
+
+## Testing Discipline
+
+- Run the most specific tests for the touched code first.
+- Expand to broader suites when the change crosses boundaries or failures suggest integration risk.
+- For browser-observable behavior, perform browser verification when project tooling allows it.
+- Report failures with command output or file references, then fix forward and re-run.
+
+## Completion Criteria
+
+- All required tasks in `tasks.md` are done, or every incomplete task is explicitly listed with rationale and next action.
+- Acceptance criteria and scenarios are satisfied or explicitly marked `NOT VERIFIABLE` with reason.
+- Relevant automated tests, validation commands, or browser checks pass, or remaining failures are documented as blockers.
+- `openspec validate "<slug>"` has been run when available and relevant.
+- Final response includes a `## Verification` section and never hides partial state.

@@ -1,0 +1,98 @@
+---
+description: "Deep verification — /comando-verificar, combinatorial matrix, casuistics (extends 00-verification-gate). Triggers: verifica a fondo, verify thoroughly, matriz de verificación."
+globs: .cursor/context/verification/**/*
+alwaysApply: false
+---
+
+# Comando verificar a fondo (L2)
+
+**Extends** `00-verification-gate.mdc` — does **not** replace or weaken L1. Loads on `/comando-verificar` or trigger phrases below.
+
+## Triggers
+
+| Language | Phrases |
+|----------|---------|
+| Slash | `/comando-verificar`, `comando-verificar` |
+| ES | `verifica a fondo`, `prueba todas las combinaciones`, `matriz de verificación`, `casuísticas del formulario` |
+| EN | `verify thoroughly`, `combinatorial verification`, `verification matrix`, `test all combinations` |
+
+**Mandatory:** read `.cursor/skills/comando-verificar/SKILL.md` when triggered.
+
+## Matrix requirement
+
+Before overall PASS on a deep-verify session:
+
+1. Produce `.cursor/context/verification/<scope-slug>/matrix.md` with timestamp header (timezone per `qa-reports-timestamp-mandatory.mdc`).
+2. Every data row has stable **`row_id`** (`R-01`, `R-02`, …) — cite in FAIL summaries and `## Verification` (REQ-CV-MATRIX-08).
+3. Verdict per row: `PASS` | `FAIL` | `BLOCKED` | `NOT VERIFIABLE` — no silent skips.
+4. **>8** data rows → also `matrix.html` twin.
+
+**Trivial scope** (CSS/copy only, no discrete factors): matrix may use `strategy: trivial` with ≥3 rows (render, lint, regression) — see skill.
+
+## Scope: current diff (REQ-CV-SCOPE-01)
+
+When scope is `current diff` or omitted:
+
+- Document in matrix header: `git diff HEAD --name-only` (or staged/unstaged strategy — state which).
+- List paths; bound inventory to those paths + direct dependents (routes/forms/services).
+
+## Authentication (REQ-CV-AUTH-01)
+
+- Multi-role rows: **one login attempt** per username per chat session.
+- Prefer project E2E auth helper / storage-state reuse when documented; one attempt per user.
+- Flood / still on login → `BLOCKED (credentials)` — **no retry** (`auth-credential-failure-no-retry.mdc`).
+
+## URL resolution (REQ-CV-URL-01)
+
+- Resolve base URL from the **target project's** stack rule (`00-openspec-stack-agnostic.mdc`) — never hardcode host/port from another repo.
+
+## Destructive rows (REQ-CV-MATRIX-09)
+
+Tag `destructive: true` for cancel, delete, irreversible workflow submits.
+
+- Default: `BLOCKED (destructive)` unless scope explicitly authorizes **and** disposable local fixtures exist.
+- Follow `unsafe-interactive-click-sweep` — no blind destructive click-sweep.
+
+## Layer and evidence (VR-09, VR-11, VR-13, VR-15)
+
+| Row type | Minimum evidence |
+|----------|------------------|
+| Form combo | **Verified (E2E/form)** — fill→submit (project E2E or Browser DevTools MCP) |
+| AJAX / button | **Verified (interactive)** — click → DOM/message (VR-13) |
+| JS / libraries | **Verified (JS)** — console 0 Uncaught on exact URL (VR-15) |
+| Service | Project test command exit 0 or explicit FAIL output |
+| Backend-only | Project lint / tests on touched paths |
+
+Browser automation: prefer **Browser DevTools MCP** per `browser-devtools-use.mdc` when MCP is the chosen layer; project E2E runner when running specs.
+
+## Combinatorial policy (REQ-CV-LIMIT-01)
+
+| Combinations | Strategy |
+|--------------|----------|
+| ≤ 32 | Full cartesian — every row executed or BLOCKED with reason |
+| 33–256 | Pairwise + single-factor edge rows |
+| > 256 | Equivalence classes + pairwise on representatives |
+
+Always include: happy path, validation errors, permission denied (if applicable). List **UNCOVERED** in header when using pairwise.
+
+## Close format (REQ-CV-EXEC-03)
+
+Final message **must** include `## Verification`:
+
+- **Verified:** matrix path + PASS count / mandatory total.
+- **Verified (E2E/form)** / **Verified (interactive)** when UI rows exist.
+- **Verified (JS)** when JS rows exist.
+- **Not verified:** BLOCKED / NOT VERIFIABLE rows with concrete blockers.
+
+**Resumen** follows VR-14 — no success words without matching Verified lines.
+
+## Cross-links
+
+- L1: `00-verification-gate.mdc`, `ai-verify-result-before-response.mdc`
+- Stack: `00-openspec-stack-agnostic.mdc`
+- Forms: `testing-browser-parity-and-form-events.mdc`
+- E2E guard: `openspec-e2e-regression-guard.mdc`
+
+## Index
+
+Registered as **L2 only** in `00-rules-priority-index.mdc` — **not** L1.

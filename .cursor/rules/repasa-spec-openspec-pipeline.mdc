@@ -1,0 +1,94 @@
+---
+description: "OpenSpec full pipeline — /repasa-spec sequential gaps → hydrate → apply → gaps (multiagent). Triggers: repasa la spec, repasa el change, pipeline openspec, full openspec pipeline, ejecuta el ciclo completo del change."
+globs: openspec/changes/**/*
+alwaysApply: false
+---
+
+# Repasa spec — OpenSpec sequential pipeline (L2)
+
+**Extends** `openspec-gap-analysis.mdc`, `openspec-workflow.mdc`, `hazlo-en-modo-multiagente.mdc` — orchestrates existing skills; does **not** replace L1 verification gate.
+
+Loads on `/repasa-spec [<slug>]` or trigger phrases below.
+
+## Triggers
+
+| Language | Phrases |
+|----------|---------|
+| Slash | `/repasa-spec`, `repasa-spec` |
+| ES | `repasa la spec`, `repasa el change`, `pipeline openspec`, `ejecuta el ciclo completo del change`, `ciclo completo openspec` |
+| EN | `run repasa-spec`, `full openspec pipeline`, `review and apply change`, `gaps hydrate apply gaps` |
+
+**Mandatory:** read `.cursor/skills/repasa-spec/SKILL.md` when triggered.
+
+## Slug (required)
+
+- First kebab-case token after `repasa-spec` (optional `/`, whitespace only).
+- Folder: `openspec/changes/<slug>/`.
+- Missing slug → ask once — stop.
+- **Mode A only** — ad-hoc gap Mode B is **not** valid for this pipeline (slug must be known upfront).
+
+## Sequential pipeline (strict order — no parallelism)
+
+Execute phases **one after another**. Wait for each phase exit criteria before starting the next.
+
+| Phase | Delegate skill | Command equivalent | Product code |
+|-------|----------------|-------------------|--------------|
+| 1 | `openspec-gap-analysis` | `/gaps-spec <slug>` | **No** |
+| 2 | `mejora-tarea` | `/mejora-tarea <slug>` | **No** (artefacts only) |
+| 3 | `aplica-tarea` + `multiagente` | `/aplica-tarea <slug>` | **Yes** |
+| 4 | `openspec-gap-analysis` | `/gaps-spec <slug>` | **No** |
+
+### Pipeline override
+
+Individual skills (`gaps-spec`, `mejora-tarea`) normally **stop** and tell the user to run the next command. Inside **`/repasa-spec`**, the orchestrator **continues automatically** to the next phase unless a § Stop condition in `repasa-spec/SKILL.md` applies.
+
+**Prohibited:**
+
+- Running Phase 2 while Phase 1 is in progress.
+- Running Phase 3 while Phase 2 is in progress.
+- Running Phase 4 while Phase 3 is in progress.
+- Launching `mejora-tarea` and `aplica-tarea` subagents in parallel for the same slug.
+
+## Orchestrator roles
+
+| Role | Does | Does not |
+|------|------|----------|
+| **Orchestrator** | Phase gates, phase log, final `## Verification` | Implement product code directly (Phase 3 subagents) |
+| **Subagents** | Per delegated skill — explore, implement, test | Skip phases or declare pipeline complete early |
+
+Combine with **`hazlo-en-modo-multiagente.mdc`**.
+
+## Phase exit gates (summary)
+
+| Phase | Proceed when |
+|-------|--------------|
+| 1 → 2 | `GAPS.md` updated; gap loop finished |
+| 2 → 3 | `openspec validate <slug>` exit 0; `READY-TO-APPLY.md` exists; `tasks.md` present |
+| 3 → 4 | Apply pass complete or blockers documented; verification evidence collected |
+| 4 → end | Post-apply `GAPS.md` updated |
+
+## Stop conditions
+
+| Blocker | Pipeline action |
+|---------|-----------------|
+| No slug | Ask once — stop |
+| Phase 1: change folder missing | Stop before Phase 2 |
+| Phase 2: validate fails, no `tasks.md` | Stop before Phase 3 |
+| Phase 3: mid-apply blocker | Run Phase 4 anyway — report partial |
+| git commit/push/merge/DB import | Requires explicit user authorization |
+
+## Deliverables
+
+- `openspec/changes/<slug>/GAPS.md` — phases 1 and 4
+- Hydrated artefacts + `READY-TO-APPLY.md` — phase 2
+- Implemented tasks + verification — phase 3
+- Chat: `## Pipeline — <slug>` table + `## Verification` + `## Resumen`
+
+## Relation
+
+| Artefact | Role |
+|----------|------|
+| `.cursor/commands/repasa-spec.md` | Slash command |
+| `.cursor/skills/repasa-spec/SKILL.md` | Full orchestration workflow |
+| `/gaps-spec`, `/mejora-tarea`, `/aplica-tarea` | Individual phases |
+| `/verifica-tarea` | Optional **after** pipeline — not part of repasa-spec |

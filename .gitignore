@@ -1,0 +1,22 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Local artifacts — never publish
+*.zip
+openspec-cursor-toolkit.zip
+
+# AI session output (per-project runtime; not part of the toolkit)
+.cursor/context/
+.cursor/QAtest/
+.cursor/postman/
+.cursor/tmp/
+
+# Export-spec registry (machine-local project list)
+**/.cursor/context/export-spec/
+**/.cursor-local/
+
+# Optional: uncomment if you keep OpenSpec changes only in app repos
+# openspec/changes/

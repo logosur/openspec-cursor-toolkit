@@ -2,9 +2,14 @@
 
 Long-form notes for the **OpenSpec gap search** workflow. Executable steps live in:
 
+**Cursor:**
 - Skill: `.cursor/skills/openspec-gap-analysis/SKILL.md`
 - Rule: `.cursor/rules/openspec-gap-analysis.mdc`
 - Command: `.cursor/commands/gaps-spec.md`
+
+**Claude Code:**
+- Skill: `.claude/skills/openspec-gap-analysis/SKILL.md`
+- Command: `.claude/commands/gaps-spec.md`
 
 ## Purpose
 
@@ -58,7 +63,7 @@ Combine with `hazlo-en-modo-multiagente.mdc`: orchestrator writes `GAPS.md`; sub
 | **UNKNOWN** | Insufficient evidence (e.g. production runtime) |
 | **HYDRATED** | FACT gap already in spec (cite REQ id) |
 
-Align with `.cursor/rules/30-openspec-anti-hallucination.mdc`.
+Align with `.cursor/rules/30-openspec-anti-hallucination.mdc` / `.claude/skills/30-openspec-anti-hallucination/SKILL.md`.
 
 ## Templates
 

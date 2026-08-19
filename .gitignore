@@ -13,10 +13,16 @@ openspec-cursor-toolkit.zip
 .cursor/QAtest/
 .cursor/postman/
 .cursor/tmp/
+.claude/context/
+.claude/QAtest/
+.claude/postman/
+.claude/tmp/
 
 # Export-spec registry (machine-local project list)
 **/.cursor/context/export-spec/
 **/.cursor-local/
+**/.claude/context/export-spec/
+**/.claude-local/
 
 # Optional: uncomment if you keep OpenSpec changes only in app repos
 # openspec/changes/

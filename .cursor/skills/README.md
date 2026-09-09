@@ -12,6 +12,7 @@
 | `openspec sync` | `mejora-tarea` | `/mejora-tarea` | Hydrate artefacts until READY TO APPLY. |
 | — | `openspec-gap-analysis` | `/gaps-spec` **or NL** (`analiza gaps`, `casuísticas faltantes`, …) | Honest gap loop (≤5 iter) → `GAPS.md`; Mode A (change-id) or Mode B (ad-hoc objective); no implementation. |
 | — | `repasa-spec` | `/repasa-spec <slug>` **or NL** (`repasa la spec`, `full openspec pipeline`, …) | Sequential pipeline: gaps → hydrate → apply → gaps (multiagent, slug mandatory). |
+| — | `run-spec` | `/run-spec <slug>` + description | **Top layer** — unattended idea → published branch: prepara → repasa → gap-closure loop → confirm review → feature tests → regression → publish, then **stops at a deploy-approval dialog**. |
 | `openspec archive` | `archiva-tarea` | `/archiva-tarea` | Archive a completed change. |
 
 ## OpenSpec CLI skills (`openspec/`)
@@ -40,7 +41,27 @@ Command entry point: [`.cursor/commands/gaps-spec.md`](../commands/gaps-spec.md)
 | [`repasa-spec/`](repasa-spec/SKILL.md) | `/repasa-spec <slug>` **or NL** | Run the full review-and-apply cycle **in strict order**: (1) `/gaps-spec`, (2) `/mejora-tarea`, (3) `/aplica-tarea`, (4) `/gaps-spec`. Unattended multiagent orchestration — **never parallel phases**. Slug required (Mode A only). |
 | `repasa-spec` (command) | `/repasa-spec background-permission` | Shortcut for «repasa la spec» / «full openspec pipeline». |
 
-Command entry point: [`.cursor/commands/repasa-spec.md`](../commands/repasa-spec.md). Rule: [`.cursor/rules/repasa-spec-openspec-pipeline.mdc`](../rules/repasa-spec-openspec-pipeline.mdc).
+Command entry point: [`.cursor/commands/repasa-spec.md`](../commands/repasa-spec.md).
+
+## Top layer (`/run-spec`)
+
+| Folder / command | Invoke | Purpose |
+|------------------|--------|---------|
+| [`run-spec/`](run-spec/SKILL.md) | `/run-spec <slug>` + description | Drive **one** change from a plain description to a deployed feature, unattended: P1 `prepara-tarea` → P2 `repasa-spec` → P3 gap-closure loop (≤ `--max-iter`, default 3) → P4 independent confirm review → P5 feature tests → P6 regression → P7 publish (commit + push current branch) → P8 deploy gate (developer approval, then the project `/deploy`). |
+| `run-spec` (command) | `/run-spec rider-eta --no-deploy` | Same loop, skipping the deploy gate; the branch is still committed and pushed. |
+
+| Mechanism | Detail |
+|-----------|--------|
+| Gate | Read from disk — `Gaps pending (mejora + apply): 0` in `GAPS.md` **and** no unchecked `tasks.md` item. A subagent's claim never decides it; on mismatch the file wins. |
+| `[prod-verify]` | Literal token on a task line verifiable only in production: excluded from the gate, never auto-checked, listed verbatim in the final report. |
+| State | `openspec/changes/<slug>/RUN-LOOP.md` (template: [`RUN-LOOP-template.md`](../../docs/openspec/templates/RUN-LOOP-template.md)) — written after every phase, so the loop resumes across compaction, sessions and `/loop` ticks. |
+| Budget | `--max-iter N` (1–5, default 3), shared with test fix-forward passes; identical counts twice in a row → `NO PROGRESS`. |
+| Paced mode | `/loop /run-spec <slug>` — one phase per tick. |
+| Git | One authorized mutation: commit + push of the **current** branch. No merge, rebase, tag, force-push or other branch; nothing at all on the production branch. |
+| Deploy gate | **Never unattended** — one `AskUserQuestion` (*deploy now* / *stop here*, plus genuine doubts) after the evidence is on the table. Approval is never inferred from the invocation. |
+| Verdict | Last line: `Run-spec verdict: DEPLOYED \| READY TO DEPLOY \| AWAITING DEPLOY APPROVAL \| BLOCKED (<reason>) \| NO PROGRESS`. |
+
+Command entry point: [`.cursor/commands/run-spec.md`](../commands/run-spec.md). Rule: [`.cursor/rules/repasa-spec-openspec-pipeline.mdc`](../rules/repasa-spec-openspec-pipeline.mdc).
 
 ## Related documentation
 

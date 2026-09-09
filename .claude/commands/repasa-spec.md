@@ -68,3 +68,4 @@ Ejecutar **exactamente** estas fases, **una tras otra**, esperando el criterio d
 | `.claude/skills/mejora-tarea/SKILL.md` | Fase 2 |
 | `.claude/skills/aplica-tarea/SKILL.md` + `multiagente` | Fase 3 |
 | `/gaps-spec`, `/mejora-tarea`, `/aplica-tarea` | Fases individuales (no encadenar solas salvo petición explícita) |
+| `/run-spec <slug>` | **Capa superior** — ejecuta este pipeline como fases P2–P4 y sigue hasta tests, regresión y publicación de la rama, parando en la puerta de aprobación del deploy. No encadenar `/repasa-spec` a mano mientras `run-spec` está corriendo. |

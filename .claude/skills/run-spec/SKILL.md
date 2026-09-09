@@ -169,6 +169,7 @@ Then re-evaluate the gate from disk:
 | Ambiguous | Verdict **`BLOCKED (ambiguous test failure)`** — do not guess |
 
 - Project documents no test command → `skipped (no project test command)`.
+- Test command documented but the environment cannot run it (container bound to another working tree, service down, runner missing) → **`blocked`** → `BLOCKED (test environment unavailable)`, naming the command and the reason. **Never a skip**: a run with no test signal must not look like a clean one.
 - **Never** relax, skip or delete an assertion to obtain green.
 
 ### P6 — Regression
@@ -176,7 +177,8 @@ Then re-evaluate the gate from disk:
 - Run the project's **full** test command and E2E suite as documented in its stack rule.
 - Same classification and fix-forward rules as P5.
 - No full test/E2E command documented → `skipped (no regression signal)` **and** P8 is downgraded: the run still publishes (P7) and ends with **`READY TO DEPLOY`** without offering to deploy.
-- The loop **never** reaches P7 or P8 with P5 or P6 red.
+- **Classify every P6 failure against the branch's base commit**: a test that also fails at the base, in code this run never touched, is **pre-existing** — record it, report it verbatim, let P7 publish, and do **not** offer P8. A failure this run introduced blocks both. Prove the classification (the base's own result, or that the failing test depends on nothing the run changed); never assume it.
+- The loop **never** reaches P7 with P5 red or with a regression it introduced, and **never** reaches P8 with any red suite.
 
 ### P7 — Publish (commit + push the current branch, main agent)
 

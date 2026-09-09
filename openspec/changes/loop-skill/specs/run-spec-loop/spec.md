@@ -215,7 +215,7 @@ After P3 `PASS`, P4 SHALL run one `/repasa-spec <slug>` in a **fresh-context sub
 
 ### Requirement: REQ-RS-TESTS-01 — Feature tests with fix-forward, no test weakening
 
-P5 SHALL run `/ejecuta-tests-reporte <slug>` (narrowest project test command per the stack rule). On non-zero exit the loop SHALL classify per `openspec-e2e-regression-guard` and fix forward via `/aplica-tarea <slug>` (budget permitting), re-running the tests; assertions SHALL never be relaxed, skipped or deleted to obtain green. `ambiguous` classification → `BLOCKED (ambiguous test failure)`. When the project documents no test command, P5 SHALL be `skipped (no project test command)`.
+P5 SHALL run `/ejecuta-tests-reporte <slug>` (narrowest project test command per the stack rule). On non-zero exit the loop SHALL classify per `openspec-e2e-regression-guard` and fix forward via `/aplica-tarea <slug>` (budget permitting), re-running the tests; assertions SHALL never be relaxed, skipped or deleted to obtain green. `ambiguous` classification → `BLOCKED (ambiguous test failure)`. When the project documents no test command, P5 SHALL be `skipped (no project test command)`. When a test command **is** documented but cannot execute in this environment — a container bound to another working tree, a service that is down, a missing runner — P5 SHALL be `blocked` and the run SHALL end `BLOCKED (test environment unavailable)` naming the failing command and the reason. An unrunnable environment SHALL NEVER be treated as a skip.
 
 #### Scenario: Tests green
 
@@ -228,6 +228,13 @@ P5 SHALL run `/ejecuta-tests-reporte <slug>` (narrowest project test command per
 - **WHEN** fix-forward runs and the re-run exits 0
 - **THEN** P5 `done`, iteration counter incremented, both commands logged
 
+#### Scenario: Test environment cannot run the documented command
+
+- **GIVEN** the project documents `make test-e2e` but its container is bound to another working tree
+- **WHEN** P5 tries to run it
+- **THEN** P5 is `blocked` and the verdict is `BLOCKED (test environment unavailable)` naming the command and the reason
+- **AND** the run is not reported as a skip, and P6, P7 and P8 do not run
+
 #### Scenario: Ambiguous failure
 
 - **GIVEN** a failing assertion where spec, code and test disagree without evidence of an intended change
@@ -238,12 +245,25 @@ P5 SHALL run `/ejecuta-tests-reporte <slug>` (narrowest project test command per
 
 ### Requirement: REQ-RS-REGRESSION-01 — Regression gate before deploy
 
-P6 SHALL run the project's **full** test command and E2E suite as documented in its stack rule. Failures SHALL be classified and handled as in REQ-RS-TESTS-01. If the project documents no full test/E2E command, P6 SHALL be `skipped (no regression signal)` **and** P7 SHALL be downgraded: the loop ends with `READY TO DEPLOY` instead of deploying unattended. The loop SHALL never reach P7 with P5 or P6 red.
+P6 SHALL run the project's **full** test command and E2E suite as documented in its stack rule. Failures SHALL be classified and handled as in REQ-RS-TESTS-01. If the project documents no full test/E2E command, P6 SHALL be `skipped (no regression signal)` **and** P8 SHALL be downgraded: the loop still publishes (P7) and ends with `READY TO DEPLOY` without offering to deploy. P6 SHALL classify every failure against the branch's **base commit**: a failure already present at the base, in code the run never touched, is a **pre-existing failure** — it SHALL be recorded and reported verbatim, it SHALL NOT block P7, and it SHALL block P8, which is never offered while a suite is red. A failure the run introduced blocks both. The classification SHALL be proven (the base's own result, or that the failing test depends on nothing the run changed), never assumed. The loop SHALL never reach P7 with P5 red or with a regression it introduced, and SHALL never reach P8 with any red suite.
 
 #### Scenario: Regression green enables publish and the deploy gate
 
 - **WHEN** full tests and E2E exit 0
 - **THEN** P6 `done` and P7 (publish) is eligible, followed by the P8 approval dialog
+
+#### Scenario: Pre-existing failure does not block publishing but does block the gate
+
+- **GIVEN** the regression suite has one failure that also fails at the branch's base commit, in a file the run never touched
+- **WHEN** P6 classifies it
+- **THEN** it is recorded as pre-existing, P7 still publishes the branch, and the report names the failing test verbatim
+- **AND** P8 is not offered: the best verdict is `READY TO DEPLOY`, never `DEPLOYED`
+
+#### Scenario: A failure the run introduced blocks publishing
+
+- **GIVEN** a regression that passes at the base commit and fails after the run's changes
+- **WHEN** P6 classifies it
+- **THEN** neither P7 nor P8 runs, and the loop fixes forward or reports `BLOCKED`
 
 #### Scenario: No regression signal downgrades deploy
 

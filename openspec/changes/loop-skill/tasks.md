@@ -26,6 +26,10 @@
 
 - [x] 1.18 Skill §Publish: never `git add -A` blindly — inspect `git status --porcelain`, stage only the change's paths, ask when the split is unclear, and record the staged file list as evidence (REQ-RS-PUBLISH-01 — found by the end-to-end fixture test, which committed `__pycache__/*.pyc`, 2026-09-09)
 
+- [x] 1.19 Skill §Tests: separate "no test command documented" (skip, downgrades the deploy gate) from "command documented but the environment cannot run it" (`BLOCKED (test environment unavailable)`) — an unrunnable environment must never look like a clean skip (REQ-RS-TESTS-01 — found running the loop on vitalcigar.es, 2026-09-09)
+
+- [x] 1.20 Skill §Regression: classify each failure against the branch's base commit — pre-existing failures are reported and let P7 publish but never open the P8 gate; failures the run introduced block both (REQ-RS-REGRESSION-01 — found publishing on vitalcigar.es with one pre-existing mobile-overflow failure, 2026-09-09)
+
 ## 2. Template
 
 - [x] 2.1 Create `docs/openspec/templates/RUN-LOOP-template.md` — header keys, P0–P7 table, gate block, iteration log, verdict line; short usage note including `[prod-verify]` (REQ-RS-STATE-01, REQ-RS-DOCS-01)
@@ -56,7 +60,7 @@
 - [x] 5.3 Template conformance: the skill's `RUN-LOOP.md` example and `docs/openspec/templates/RUN-LOOP-template.md` share the same header keys and P0–P7 rows (diff of key lines) (REQ-RS-STATE-01)
 - [x] 5.4 Parity diff: `diff` Claude Code vs Cursor skill after normalising `.claude/`↔`.cursor/`, `Agent`↔`Task` and pacing paragraph — only expected deltas remain (REQ-RS-CMD-01)
 - [x] 5.5 `openspec validate loop-skill` exit 0 in the sandbox copy (toolkit repo has no `openspec init`), and `openspec status --change loop-skill --json` → `isComplete: true` (VERIFY gate)
-- [ ] 5.6 End-to-end dry-run on a real consumer project with `--no-deploy` on a trivial slug: run `/run-spec <slug> --no-deploy` and confirm `RUN-LOOP.md` shows P1–P6 rows, verdict `READY TO DEPLOY`, last chat line `Run-spec verdict: READY TO DEPLOY`, and `git log` unchanged (REQ-RS-REPORT-01, REQ-RS-SAFETY-01, REQ-RS-DEPLOY-01)
+- [x] 5.6 End-to-end dry-run on a real consumer project with `--no-deploy` on a trivial slug: run `/run-spec <slug> --no-deploy` and confirm `RUN-LOOP.md` shows P1–P6 rows, verdict `READY TO DEPLOY`, last chat line `Run-spec verdict: READY TO DEPLOY`, and `git log` unchanged (REQ-RS-REPORT-01, REQ-RS-SAFETY-01, REQ-RS-DEPLOY-01)
       Attempted 2026-09-08 in a sandbox consumer project (`scratchpad/consumer`): the smoke-test subagent stalled (watchdog, no progress 600 s) and was not relaunched — cost was not worth it. Run it manually: `/run-spec <slug> --no-deploy` in a real project.
 - [x] 5.8 Gate-model checks: `grep` proves both skills, both commands and the Cursor rule contain the P7 publish rules, the P8 `AskUserQuestion` requirement and `AWAITING DEPLOY APPROVAL`; no file still claims the invocation is a deploy order; parity diff still shows only the expected deltas (REQ-RS-PUBLISH-01, REQ-RS-DEPLOY-01, REQ-RS-DOCS-01)
 - [ ] 5.7 Deploy path on a consumer project with a `/deploy` command, first real feature: the P8 dialog appears, approving it yields verdict `DEPLOYED` with the deploy evidence line, and the only loop-made git mutation is the P7 commit + push of the current branch [prod-verify] (REQ-RS-PUBLISH-01, REQ-RS-DEPLOY-01)

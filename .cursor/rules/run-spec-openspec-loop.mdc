@@ -84,7 +84,10 @@ Literal token in a `tasks.md` line marking a task verifiable only against a prod
 | `max_iter` exhausted, gate still FAIL | `BLOCKED (max-iter reached)` |
 | Confirm review finds gaps, no budget | `BLOCKED (confirm review found gaps)` |
 | Ambiguous test failure | `BLOCKED (ambiguous test failure)` |
-| No regression signal documented | P6 `skipped`, P7 downgraded → `READY TO DEPLOY` |
+| No regression signal documented | P6 `skipped`, P8 downgraded → `READY TO DEPLOY` |
+| Test command documented but the environment cannot run it | `BLOCKED (test environment unavailable)` — never a silent skip |
+| P6 failure that also fails at the base commit, in untouched code | Pre-existing: report verbatim, P7 publishes, **P8 never offered** |
+| P6 failure introduced by this run | Blocks P7 and P8: fix forward or `BLOCKED` |
 | No project deploy command | `BLOCKED (no deploy command)` |
 | Deploy approval dialog cannot be shown | `AWAITING DEPLOY APPROVAL` — never deploy instead |
 | OpenSpec CLI unavailable in the target project | `BLOCKED (openspec CLI unavailable)` |

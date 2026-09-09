@@ -1,8 +1,6 @@
 ---
-name: /repasa-spec
-id: repasa-spec
-category: Workflow
 description: "Pipeline OpenSpec secuencial — gaps → hydrate → apply → gaps (desatendido, multiagente)"
+argument-hint: "[slug]"
 ---
 
 # Repasa spec (OpenSpec pipeline)
@@ -18,7 +16,7 @@ Cuando el desarrollador invoca **`/repasa-spec [<slug>]`** (o lenguaje natural e
 | **Lenguaje natural (ES)** | `repasa la spec stats-net`, `repasa el change background-permission`, `pipeline openspec stats-net`, `ejecuta el ciclo completo del change` |
 | **Lenguaje natural (EN)** | `run repasa-spec stats-net`, `full openspec pipeline stats-net`, `review and apply change stats-net` |
 
-**Regla:** si el mensaje encaja con **pipeline completo** / **repasa spec** con un change-id, el agente **debe** cargar y seguir **`.cursor/skills/repasa-spec/SKILL.md`** aunque no aparezca `/repasa-spec`.
+**Regla:** si el mensaje encaja con **pipeline completo** / **repasa spec** con un change-id, el agente **debe** cargar y seguir **`.claude/skills/repasa-spec/SKILL.md`** aunque no aparezca `/repasa-spec`.
 
 ## Slug (obligatorio)
 
@@ -47,8 +45,8 @@ Ejecutar **exactamente** estas fases, **una tras otra**, esperando el criterio d
 ## Qué ejecutar (obligatorio)
 
 1. Resolver slug (arriba).
-2. Leer y seguir **`.cursor/skills/repasa-spec/SKILL.md`** (orquestación completa).
-3. Aplicar **`.cursor/rules/repasa-spec-openspec-pipeline.mdc`** (L2).
+2. Leer y seguir **`.claude/skills/repasa-spec/SKILL.md`** (orquestación completa).
+3. Aplicar **`.claude/skills/repasa-spec/SKILL.md`** (L2).
 4. Operar en **modo multiagente** — orquestador coordina; subagentes por fase según skill delegada.
 5. Entregar resumen por fase + **`## Verification`** global al cierre.
 
@@ -64,10 +62,10 @@ Ejecutar **exactamente** estas fases, **una tras otra**, esperando el criterio d
 
 | Artefacto | Rol |
 |-----------|-----|
-| `.cursor/skills/repasa-spec/SKILL.md` | Orquestación secuencial del pipeline |
-| `.cursor/rules/repasa-spec-openspec-pipeline.mdc` | Reglas L2 + triggers NL |
-| `.cursor/skills/openspec-gap-analysis/SKILL.md` | Fases 1 y 4 |
-| `.cursor/skills/mejora-tarea/SKILL.md` | Fase 2 |
-| `.cursor/skills/aplica-tarea/SKILL.md` + `multiagente` | Fase 3 |
+| `.claude/skills/repasa-spec/SKILL.md` | Orquestación secuencial del pipeline |
+| `.claude/skills/repasa-spec/SKILL.md` | Reglas L2 + triggers NL |
+| `.claude/skills/openspec-gap-analysis/SKILL.md` | Fases 1 y 4 |
+| `.claude/skills/mejora-tarea/SKILL.md` | Fase 2 |
+| `.claude/skills/aplica-tarea/SKILL.md` + `multiagente` | Fase 3 |
 | `/gaps-spec`, `/mejora-tarea`, `/aplica-tarea` | Fases individuales (no encadenar solas salvo petición explícita) |
 | `/run-spec <slug>` | **Capa superior** — ejecuta este pipeline como fases P2–P4 y sigue hasta tests, regresión y publicación de la rama, parando en la puerta de aprobación del deploy. No encadenar `/repasa-spec` a mano mientras `run-spec` está corriendo. |

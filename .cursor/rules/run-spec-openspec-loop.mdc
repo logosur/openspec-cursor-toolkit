@@ -1,0 +1,116 @@
+---
+description: "OpenSpec top-level loop — /run-spec drives idea → deploy unattended (prepara → repasa → gap-closure loop → confirm → tests → regression → deploy). Triggers: build spec, construye la spec entera, de la idea al deploy, loop openspec completo, bucle openspec hasta deploy."
+globs: openspec/changes/**/*
+alwaysApply: false
+---
+
+# Build spec — OpenSpec top-level loop (L2)
+
+**Extends** `repasa-spec-openspec-pipeline.mdc`, `openspec-gap-analysis.mdc`, `openspec-workflow.mdc`, `hazlo-en-modo-multiagente.mdc`, `openspec-e2e-regression-guard.mdc` — orchestrates existing skills; does **not** weaken the L1 verification gate.
+
+Loads on `/run-spec [<slug>]` or the trigger phrases below.
+
+## Triggers
+
+| Language | Phrases |
+|----------|---------|
+| Slash | `/run-spec`, `run-spec` |
+| ES | `construye la spec entera`, `de la idea al deploy`, `loop openspec completo`, `bucle openspec hasta deploy`, `haz la feature de principio a fin` |
+| EN | `build spec end to end`, `idea to deploy`, `full openspec run loop`, `drive this change to deploy` |
+
+**Mandatory:** read `.cursor/skills/run-spec/SKILL.md` when triggered.
+
+## Input (required)
+
+- `slug`: first kebab-case token after `run-spec` (optional `/`, whitespace only).
+- Flags on line 1: `--no-deploy`, `--max-iter N` (1–5, clamped, logged; default 3).
+- Description: every line after line 1, verbatim. Never includes the flags.
+- Ask **once** and stop when the slug is missing/invalid, or when the description is empty **and** the change folder does not exist. Existing folder + empty description = **resume mode**.
+
+## State (mandatory)
+
+`openspec/changes/<slug>/RUN-LOOP.md`, from `docs/openspec/templates/RUN-LOOP-template.md`:
+
+- Written **after every phase transition** — header, phase table (P0–P7, `pending|running|done|skipped|blocked`), last gate reading, iteration log, residual `[prod-verify]` tasks, blockers, verdict.
+- On start with an existing file: resume from the first phase not `done`/`skipped`; never re-run a `done` phase; re-check the exit gate of any phase left `running`.
+
+## Sequential phases (strict order — no parallelism)
+
+| Phase | Delegate | Product code |
+|-------|----------|--------------|
+| P1 bootstrap | `prepara-tarea` | **No** |
+| P2 review | `repasa-spec` | Yes (inside its apply phase) |
+| P3 gap-closure ×≤`max_iter` | `repasa-spec` | Yes |
+| P4 confirm | `repasa-spec` (fresh reviewer) | Yes |
+| P5 feature tests | `ejecuta-tests-reporte` (+ fix-forward) | Yes |
+| P6 regression | project full tests + E2E | Yes |
+| P7 publish | `git commit` + `git push -u origin <branch>` | Git only |
+| P8 deploy gate | approval dialog → project `/deploy` | Deploy only, after explicit approval |
+
+### Pipeline override
+
+The delegated skills normally **stop** and tell the user to run the next command. Inside `/run-spec` the orchestrator **continues** to the next phase unless a stop condition below applies.
+
+### Delegation
+
+Each phase runs in a **fresh-context subagent** (`Task`) with a ≤15-line structured report (`phase_status`, `evidence`, `gaps_pending`, `tasks_unchecked`, `tasks_prod_verify`, `blocker`). **Exception:** P7 and P8 run in the main agent — they mutate git and open the approval dialog, which must reach the developer.
+
+**Prohibited:** running two phases at once; trusting a subagent's gate claim without re-reading the file; implementing product code directly in the orchestrator.
+
+## Gate (file-only)
+
+```bash
+gaps_pending=$(grep -E '^\*{0,2}Gaps pending \(mejora \+ apply\): [0-9]+\*{0,2}$' openspec/changes/<slug>/GAPS.md | tail -1 | grep -oE '[0-9]+' | tail -1)
+tasks_unchecked=$(grep -E '^[[:space:]]*- \[ \]' openspec/changes/<slug>/tasks.md | grep -vc '\[prod-verify\]')
+tasks_prod_verify=$(grep -E '^[[:space:]]*- \[ \]' openspec/changes/<slug>/tasks.md | grep -c '\[prod-verify\]')
+```
+
+`PASS` iff `gaps_pending = 0` **and** `tasks_unchecked = 0`. Missing file or missing line → `UNKNOWN`, treated as `FAIL`. On report-vs-file mismatch the **file wins**; log it.
+
+## `[prod-verify]`
+
+Literal token in a `tasks.md` line marking a task verifiable only against a production host, provider or dataset. Excluded from `tasks_unchecked`, never auto-checked, always listed verbatim under Residual. Other commands ignore it — for `/finaliza-spec` and `/archiva-tarea` it is still an unchecked task.
+
+## Publish and deploy gate
+
+- **P7 publish:** commit all pending work + `git push -u origin <current-branch>`, in the main agent. The `/run-spec` invocation authorizes this and nothing else. Clean synced tree → `skipped`. Production branch → **no git mutation**, `blocked (on production branch)`, stated first in the P8 dialog. Runs even with `--no-deploy`.
+- **P8 deploy gate:** one mandatory `AskUserQuestion` — *deploy now, unattended* / *stop here* — after presenting the pushed commit, P5/P6 results, residual `[prod-verify]` tasks and what the project deploy command does. Up to three extra questions for genuine doubts. Never pre-answered, never inferred, silence is never approval. Approval → project `/deploy` in the main agent → `DEPLOYED`.
+
+## Budget and stop conditions
+
+| Condition | Action |
+|-----------|--------|
+| `(gaps_pending, tasks_unchecked)` unchanged between two iterations | `NO PROGRESS` — stop |
+| `max_iter` exhausted, gate still FAIL | `BLOCKED (max-iter reached)` |
+| Confirm review finds gaps, no budget | `BLOCKED (confirm review found gaps)` |
+| Ambiguous test failure | `BLOCKED (ambiguous test failure)` |
+| No regression signal documented | P6 `skipped`, P8 downgraded → `READY TO DEPLOY` |
+| Test command documented but the environment cannot run it | `BLOCKED (test environment unavailable)` — never a silent skip |
+| P6 failure that also fails at the base commit, in untouched code | Pre-existing: report verbatim, P7 publishes, **P8 never offered** |
+| P6 failure introduced by this run | Blocks P7 and P8: fix forward or `BLOCKED` |
+| No project deploy command | `BLOCKED (no deploy command)` |
+| Deploy approval dialog cannot be shown | `AWAITING DEPLOY APPROVAL` — never deploy instead |
+| OpenSpec CLI unavailable in the target project | `BLOCKED (openspec CLI unavailable)` |
+| Missing credentials / human-only access / ambiguous product decision | `BLOCKED (<reason>)` |
+| git commit/push outside P7, or any merge/rebase/tag/force-push/other-branch push | **Never** |
+| Deploying without an explicit *deploy now* answer in the P8 dialog | **Never** — approval is not inferred from the invocation |
+
+Ordinary fixable failures are not stop conditions — fix forward within the budget, never by weakening assertions.
+
+## Deliverables
+
+- `openspec/changes/<slug>/RUN-LOOP.md` — updated after every transition
+- Hydrated artefacts + implemented tasks + test evidence (via the delegated phases)
+- Chat: `## Run loop — <slug>` · `## Verification` · `## Residual` · `## Resumen`
+- **Last line, verbatim:** `Run-spec verdict: DEPLOYED | READY TO DEPLOY | AWAITING DEPLOY APPROVAL | BLOCKED (<reason>) | NO PROGRESS`
+
+## Relation
+
+| Artefact | Role |
+|----------|------|
+| `.cursor/commands/run-spec.md` | Slash command |
+| `.cursor/skills/run-spec/SKILL.md` | Full orchestration workflow |
+| `.cursor/rules/repasa-spec-openspec-pipeline.mdc` | Layer below (P2/P3/P4) |
+| `docs/openspec/templates/RUN-LOOP-template.md` | State file template |
+| `/verifica-tarea`, `/harness-spec` | Optional deeper verification **after** the loop |
+| `/finaliza-spec`, `/archiva-tarea` | Manual close **after** the loop |

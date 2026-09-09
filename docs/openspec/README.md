@@ -10,7 +10,7 @@ This **toolkit** repo ships commands/skills/rules (Cursor) and commands/skills (
 |------|---------|
 | **`openspec/`** (in app repos) | Active changes (`changes/<name>/`), archived changes, root `specs/`, `config.yaml`. |
 | **`docs/openspec/prompts/`** | Reusable **prompts** (master explore→verify, refactor/SOLID). |
-| **`docs/openspec/templates/`** | GAPS scaffolds and examples. |
+| **`docs/openspec/templates/`** | GAPS scaffolds and examples, `RUN-LOOP` state template. |
 | **`docs/openspec/skills/`** | Long-form procedure notes. |
 | **`.cursor/skills/`** | **Cursor Agent skills** (`SKILL.md`): task flow (`prepara-tarea`, …), `opsx-*`, verification, multiagent. |
 | **`.claude/skills/`** | Same skills, native **Claude Code Agent Skills** (`SKILL.md`) — plus former Cursor-rule-only content folded in (e.g. `00-openspec-stack-agnostic`). |
@@ -24,11 +24,13 @@ Each consuming project adds its own **stack rule** (local dev, tests, URLs). The
 - Master prompt: [`prompts/master-openspec-prompt.md`](prompts/master-openspec-prompt.md)
 - Refactor / SOLID prompt: [`prompts/refactor-solid-master.md`](prompts/refactor-solid-master.md)
 - Gap analysis notes: [`skills/gap-analysis.md`](skills/gap-analysis.md)
+- Run loop state template: [`templates/RUN-LOOP-template.md`](templates/RUN-LOOP-template.md)
 
 ## Commands (Cursor and Claude Code)
 
 | Invoke | Purpose |
 |--------|---------|
+| `/run-spec <slug>` + description | **Top layer** — unattended loop from idea to a published branch (prepara → repasa → gap-closure loop → confirm → tests → regression → commit + push), stopping at a **deploy-approval dialog** before the project's `/deploy`. State in `openspec/changes/<slug>/RUN-LOOP.md`; flags `--no-deploy`, `--max-iter N`. |
 | `/openspec-list` | List recent OpenSpec changes (`bash .cursor/scripts/openspec-list.sh [count]` or `bash .claude/scripts/openspec-list.sh [count]`) |
 
 Project skills under `.cursor/skills/` / `.claude/skills/` point at **`docs/openspec/prompts/master-openspec-prompt.md`** for the bootstrap flow. When using **`/prepara-tarea`**, copy the full `## Prompt` section **through `## Mandatory closing (after VERIFY)`**.

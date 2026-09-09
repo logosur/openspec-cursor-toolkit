@@ -11,11 +11,11 @@ User request:
 
 Follow the project OpenSpec architecture:
 
-- EXPLORE (use the checklist in this prompt; align with `.cursor/rules/10-openspec-refactor-solid.mdc` and `.cursor/rules/tdd-spec-driven-tests.mdc`)
+- EXPLORE (use the checklist in this prompt; align with `.cursor/rules/10-openspec-refactor-solid.mdc` / `.claude/skills/10-openspec-refactor-solid/SKILL.md` and `.cursor/rules/tdd-spec-driven-tests.mdc`)
 - PROPOSE (same artefact layout as `docs/openspec/prompts/master-openspec-prompt.md`: `proposal.md`, `specs/`, `design.md` when needed, `tasks.md`)
 - HYDRATE
 - VERIFY
-- APPLY only when VERIFY = READY TO APPLY (use `.cursor/rules/40-openspec-safe-apply.mdc`)
+- APPLY only when VERIFY = READY TO APPLY (use `.cursor/rules/40-openspec-safe-apply.mdc` / `.claude/skills/40-openspec-safe-apply/SKILL.md`)
 
 Do not implement until VERIFY passes.
 

@@ -1,6 +1,6 @@
 ---
 name: repasa-spec
-description: "OpenSpec full pipeline — sequential gaps → hydrate → apply → gaps. Auto-invoke on /repasa-spec, repasa la spec, pipeline openspec, full openspec pipeline, ejecuta el ciclo completo del change."
+description: "OpenSpec full pipeline — gaps, then hydrate → apply → gaps repeated until no gap is left pending. Auto-invoke on /repasa-spec, repasa la spec, pipeline openspec, full openspec pipeline, ejecuta el ciclo completo del change."
 disable-model-invocation: true
 ---
 
@@ -51,10 +51,20 @@ Read before Phase 1:
 ## 3. Sequential phases (fixed order)
 
 ```text
-Phase 1: gaps-spec (pre)  →  Phase 2: mejora-tarea  →  Phase 3: aplica-tarea  →  Phase 4: gaps-spec (post)
+Phase 1: gaps-spec (pre, ONCE)
+   │
+   └─► ROUND N ─  Phase 2: mejora-tarea  →  Phase 3: aplica-tarea  →  Phase 4: gaps-spec (post)
+                       │
+                       ├─ gaps_pending = 0 ..................... PIPELINE COMPLETE
+                       └─ gaps_pending > 0 ..................... ROUND N+1 (back to Phase 2)
 ```
 
 **Gate between phases:** do not start phase N+1 until phase N reports `phase_status: done | partial | blocked` with evidence (see per-phase exit criteria).
+
+**The pipeline loops.** Phase 4 is a decision point, not the finish line. Phase 1 runs once; phases
+2 → 3 → 4 are one **round** and rounds repeat until `gaps_pending` reaches 0 or a loop stop applies
+(§ Loop). Finishing a run with `gaps_pending > 0` and no stop condition is a **failed pipeline**: the
+cycle found defects and left them written down instead of fixed.
 
 ---
 
@@ -126,6 +136,11 @@ Phase 1: gaps-spec (pre)  →  Phase 2: mejora-tarea  →  Phase 3: aplica-tarea
 4. `openspec validate "<slug>"` when relevant
 5. Project checks: project test/lint commands on touched paths (per stack rule)
 
+**A gap found mid-apply is fixed mid-apply.** If this phase uncovers a defect **within reach of the
+work in hand** — the fix touches files this round is already changing, or is smaller than writing it up
+— fix it here, in this same phase. Do **not** park it for the Phase 4 report. Deferring what you could
+fix is how a cycle ends with pending gaps that were never really pending.
+
 **Exit criteria (proceed to Phase 4 when):**
 
 - All applicable tasks marked done **or** remaining tasks listed with concrete blockers.
@@ -145,10 +160,25 @@ Phase 1: gaps-spec (pre)  →  Phase 2: mejora-tarea  →  Phase 3: aplica-tarea
 | Input | Post-apply codebase + updated spec/tasks |
 | Output | `GAPS.md` refreshed — post-apply residual gaps |
 
-**Exit criteria (pipeline complete when):**
+**Exit criteria (round complete when):**
 
 - `GAPS.md` updated with post-apply section or iteration log.
-- Residual FACT gaps listed for follow-up (`/mejora-tarea` or new change).
+- `## Pending count` filled and `gaps_pending` computed (the same integer the gap-analysis skill
+  writes as its mandatory last line).
+
+**Then decide — do not stop here by default:**
+
+| This round ended with | Do |
+|---|---|
+| `gaps_pending` = 0 | **Pipeline complete.** Go to § 6 and report |
+| `gaps_pending` > 0, the round closed ≥ 1 gap, and round < 5 | **Start round N+1 at Phase 2**, hydrating the new FACT gaps exactly as in the first round |
+| `gaps_pending` > 0 and the round closed **no** gap | **Stop.** An identical round would repeat the work. Report, per gap, what resisted |
+| Round 5 reached with `gaps_pending` > 0 | **Stop.** Report the remaining gaps and what each one needs |
+
+**Gaps the cycle cannot close by itself** — they need user authorization, production credentials or a
+business decision — must not keep the loop spinning. Record the reason in `GAPS.md`, list them in the
+final report under «necesita al desarrollador», and exclude them from `gaps_pending` so the loop can
+terminate honestly.
 
 ---
 
@@ -159,13 +189,17 @@ Maintain an internal phase log (include in final chat):
 ```markdown
 ## Pipeline — <slug>
 
-| Phase | Skill | Status | Evidence |
-|-------|-------|--------|----------|
-| 1 pre-gaps | openspec-gap-analysis | done/partial/blocked | GAPS.md path, FACT count |
-| 2 hydrate | mejora-tarea | done/partial/blocked | isComplete, validate exit |
-| 3 apply | aplica-tarea | done/partial/blocked | tasks x/y, verification |
-| 4 post-gaps | openspec-gap-analysis | done/partial/blocked | new FACT count |
+| Round | Phase | Skill | Status | Evidence |
+|-------|-------|-------|--------|----------|
+| — | 1 pre-gaps | openspec-gap-analysis | done/partial/blocked | GAPS.md path, FACT count |
+| 1 | 2 hydrate | mejora-tarea | done/partial/blocked | isComplete, validate exit |
+| 1 | 3 apply | aplica-tarea | done/partial/blocked | tasks x/y, verification |
+| 1 | 4 post-gaps | openspec-gap-analysis | done/partial/blocked | gaps_pending after the round |
+| 2 | … | … | … | … one block per round until gaps_pending = 0 |
 ```
+
+Keep one row per phase **per round**: the value of the loop is visible only if the reader can see what
+each round closed and what the next one had to pick up.
 
 ## 5. Stop conditions (whole pipeline)
 
@@ -176,14 +210,20 @@ Maintain an internal phase log (include in final chat):
 | Phase 2 blocked (no tasks.md, validate fails) | Stop before Phase 3 — report |
 | Phase 3 blocked mid-apply | Complete Phase 4 — report partial |
 | User explicit interrupt | Stop — report progress table |
+| Loop: a round closes no gap | Stop after that round — report, per gap, what resisted |
+| Loop: round 5 reached | Stop — report the remaining gaps and what each one needs |
+| Loop: the gaps left need the user | Stop — list them under «necesita al desarrollador» and do not count them in `gaps_pending` |
 | git commit/push/merge/DB import | Never without explicit user auth (unchanged) |
 
 ## 6. Final response (mandatory sections)
 
 1. **`## Pipeline — <slug>`** — phase table (above)
 2. **`## Verification`** — evidence from Phase 3 apply; JS/console if UI touched; tests/lint commands + output
-3. **Residual work** — unchecked `tasks.md` items; post-apply FACT gaps from Phase 4
+3. **Residual work** — unchecked `tasks.md` items; gaps the cycle could not close **and why each one
+   resisted** (a gap listed without a reason is not a report, it is a to-do passed to the reader)
 4. **`## Resumen`** — locked to Verified facts only (VR-14)
+5. **Last line** — the `gaps_pending` integer, which is **0** unless a § Loop stop applies; when it is
+   not 0, the line right above it says which stop condition fired
 
 ## 7. Cross-links
 

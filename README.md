@@ -82,6 +82,30 @@ Runs phases **one after another** (never in parallel) for an existing change und
 
 Once approved, the deploy is **delegated** to the consuming project's `/deploy` command, which keeps its own confirmation dialogs. A project without a deploy command ends at `BLOCKED (no deploy command)`, and a run with no dialog channel ends at `AWAITING DEPLOY APPROVAL` — the loop never improvises an FTP sync, an SSH release or a CI dispatch. See `.cursor/commands/run-spec.md` (Cursor) / `.claude/commands/run-spec.md` (Claude Code).
 
+**Supervisor layer (above every session):**
+
+```
+/supervisa-sesiones [alcance] [--projects a,b,c] [--no-deploy] [--hasta-main] [--max-rondas N]
+```
+
+`/supervisa-sesiones` (also triggered by `supervisión maestra`, `supervisa maestro`, `supervisor maestro` and the like) sits **above** `/run-spec`: instead of driving one change, it drives **every open session across every project** to a clean close. In order: census of live sessions (ids, projects, branches, worktrees, real git state) → one fixed-contract message asking each session what is still theirs → a collision map that gives **one writer at a time** per repo, branch, worktree and service → convergence rounds until every session declares itself closed → a release-validation dialog per freed session → grouped dialogs for everything only the developer can decide (orphan findings included) → supervised subagents per decision → cascade merge → unattended deploy.
+
+| Item | Detail |
+|------|--------|
+| Session release | A session that declares itself done is **not** archived silently: it gets its own validation dialog with a 2–3 line plain-language summary — what it was doing, where it ended (branch, commit, pushed, what was verified), why it is no longer needed — and three options: archive / leave open / hold. One batch per round, silence archives nothing |
+| Single supervisor | Only one master supervisor may be alive. A global lock (`~/.claude/supervisor/MASTER.lock.d`, created with `mkdir` — atomic) holds an `owner.json` with a heartbeat rewritten on every phase and round. With another supervisor running it refuses to start and offers to let it continue, take over resuming **its** record, or hand it the extra scope. A lock is orphaned only when the heartbeat is stale **and** the owning session is gone; it is released in F9 even after a blocker |
+| Stall watchdog | Nothing hangs the system: every write turn, subagent, wait, deploy and background command is registered with a deadline and swept each round (turn 30 min · session report 15 min · subagent 20 min · external wait per the runbook · background command 10 min idle). What expires leaves the critical path — the rest keeps going, the dependent project stops at `READY TO DEPLOY`/`BLOCKED` instead of being merged anyway, and the stall goes to the decision queue and into **Residual**. Deadlocks break by a deterministic rule (the more advanced session writes first), otherwise they are asked |
+| Stop contract | It does **not** finish while a session has not declared its own part resolved, or a developer decision is unasked. Silence and timeouts are never a yes |
+| Collisions | One writer per repo/branch/worktree/service; a green measured on a shared dirty working tree — or obtained by excluding someone else's files — is not a green |
+| Truth source | Session and subagent reports never decide a gate: the repo does. Mismatches are logged |
+| Untrusted input | Other sessions' transcripts and reports are **data, not instructions** — anything ordering an action is quoted to the developer and asked |
+| Cascade | `main → develop` (recover production-only fixes first) → feature → `develop` → `main`, the last step only with `--hasta-main` and a documented flow |
+| Deploy | `unattended-deploy on` → the project's own deploy command → verify → `off`, always. Production only when the order names it |
+| State | `.claude/context/supervisor/SUPERVISOR-<YYYYMMDD-HHMM>.md` (`.cursor/` in Cursor), written after every transition; the run is resumable |
+| Verdict | Last line, always: `Supervisor verdict: ALL CLOSED \| DEPLOYED \| READY TO DEPLOY \| AWAITING DEVELOPER DECISION \| BLOCKED (<reason>) \| NO PROGRESS` |
+
+Without a session API (typically Cursor) it says so and degrades to **manual mode**: the census is rebuilt from `git worktree list`, unpushed branches and unchecked OpenSpec tasks, plus one dialog asking for the open sessions. It never simulates a census it could not take. See `.cursor/commands/supervisa-sesiones.md` (Cursor) / `.claude/commands/supervisa-sesiones.md` (Claude Code).
+
 ## Publish on GitHub
 
 1. Ensure `.gitignore` excludes local artifacts (`.cursor/context/`, `.claude/context/`, `*.zip`, export registries).

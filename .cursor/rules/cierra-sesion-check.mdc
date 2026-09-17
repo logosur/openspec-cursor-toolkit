@@ -1,0 +1,39 @@
+---
+description: "Cierre de sesión — /cierra-sesion responde en lenguaje natural y en pocas líneas si queda algo pendiente. Triggers: queda algo pendiente, puedo cerrar la sesión, está todo terminado, me voy queda algo, cierre de sesión."
+alwaysApply: false
+---
+
+# Cierra sesión — veredicto de cierre (lenguaje natural)
+
+Carga con `/cierra-sesion [detalle]` o con las frases de disparo. Ejecuta
+**`.cursor/skills/cierra-sesion/SKILL.md`**; esta regla solo fija los triggers y los límites.
+
+## Triggers
+
+| Idioma | Frases |
+|--------|--------|
+| Slash | `/cierra-sesion`, `cierra-sesion` |
+| ES | `¿queda algo pendiente?`, `¿puedo cerrar la sesión?`, `¿está todo terminado?`, `me voy, ¿queda algo?`, `cierra la sesión`, `dame el cierre` |
+| EN | `anything left?`, `can I close this session?`, `is everything done?`, `session close check` |
+
+## Contrato de respuesta
+
+1. Primera línea: veredicto («Sí, puedes cerrar» / «No: quedan N cosas»).
+2. Hasta 5 viñetas de una línea, lenguaje llano, solo lo que falta.
+3. Última línea: la acción concreta que lo cierra.
+4. Máximo 10 líneas sin el argumento `detalle`.
+
+## Dudas
+
+Si algo solo lo sabe el desarrollador (si una petición a medias sigue en pie, si quiere terminar el
+trabajo empezado, si sube o no los cambios sin commitear), **se abre diálogo de preguntas antes del
+veredicto**, con opciones en lenguaje natural y bien explicadas. Una sola tanda. Nunca se pregunta
+lo que el agente puede comprobar por sí mismo.
+
+## Límites
+
+- **Solo informa.** No arregla pendientes, no commitea, no pushea, no archiva changes.
+- **No inventa** pendientes: cada viñeta nace de una señal comprobada (git, OpenSpec, tests, hilo de la conversación).
+- **No recapitula** lo hecho en la sesión, ni pega logs, tablas ni rutas largas.
+- Lo no verificado se dice como no verificado, nunca se da por bueno.
+- Una duda real se pregunta, no se resuelve adivinando ni se entierra en el veredicto.

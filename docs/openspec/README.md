@@ -64,7 +64,7 @@ Project skills under `.cursor/skills/` / `.claude/skills/` point at **`docs/open
 
 Measured over a week of real use with Claude Code on a C codebase (eleven
 capabilities, the strongest model kept for judgment work); the full account is
-[issue #1](https://github.com/vejeta/openspec-cursor-toolkit/issues/1).
+[issue #2](https://github.com/logosur/openspec-cursor-toolkit/issues/2).
 
 - Run as the skills used to describe, with parallel subagents fanned out by
   the orchestrator, phases 0 to 3 for two capabilities spent **65% of a weekly

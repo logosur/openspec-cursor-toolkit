@@ -6,7 +6,7 @@ model budget in a day, from a week of measured use.
 
 ## Why
 
-Issue [#1](https://github.com/vejeta/openspec-cursor-toolkit/issues/1). Run
+Issue [#2](https://github.com/logosur/openspec-cursor-toolkit/issues/2). Run
 as the skills describe, with the orchestrator fanning out parallel subagents,
 phases 0 to 3 for two capabilities spent 65% of a weekly Claude Code budget by
 the next morning. The causes were plain in the transcripts: parallel agents

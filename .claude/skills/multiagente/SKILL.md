@@ -38,7 +38,7 @@ The goal is not to merely start work. The goal is to finish the task, verify it,
 1. Restate the task internally as acceptance criteria.
 2. Inspect the project before editing: stack, commands, relevant docs/rules, existing patterns, and current state.
 3. Create a short task list for orchestration when the work has more than one meaningful step.
-4. Launch subagents for independent or specialized work. Prefer parallel subagents for exploration/review/test investigation when possible.
+4. Launch subagents for independent or specialized work, **one at a time by default, each with a context packet** (the exact files and lines, the commands to run, the contract to satisfy, the shape of the report). Parallel subagents are an opt-in for tasks that share no files and when the budget has room: parallel exploration of one repository pays for the same files several times. Long suites run in the orchestrator's background shell, never inside a waiting subagent. The subagent never commits or pushes; the orchestrator reviews the diff and commits. See `docs/openspec/README.md`, "Budget and the lean mode".
 5. Integrate results and apply or request additional focused work until the criteria are met.
 6. Verify through the narrowest reliable checks first, then broaden only as risk requires.
 7. If verification fails, treat the failure as the next task and continue.

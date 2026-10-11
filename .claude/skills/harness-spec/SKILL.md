@@ -150,6 +150,8 @@ Este es el paso que no existe en `/verifica-tarea`/`/comando-verificar`: un **su
 
 Escribir el veredicto tal cual lo devuelve el subagente en `.claude/context/verification/harness-<slug>/supervisor-verdict-<timestamp>.md` (+ `.html` gemelo si >8 filas). El orquestador **no edita ni suaviza** este fichero.
 
+**Alcance del supervisor (modo lean, por defecto).** El supervisor se lanza **acotado a las capas que el cambio tocó** (por ejemplo solo la capa de terminal y la del sanitizer cuando el cambio es del motor y no del pintado), con un paquete de contexto que diga qué cambió, por qué y qué escenarios deben re-verificarse. El supervisor completo, todas las capas, se reserva para cambios transversales y para el cierre de la capacidad. Medido en una semana de uso: supervisor acotado ~110k tokens, completo ~225k. Es la única fase multiagente que paga su coste, porque el contexto fresco es lo que caza los tests cuya aserción no puede fallar; todo lo demás va en serie. Ver `docs/openspec/README.md`, "Budget and the lean mode".
+
 ## Fase 5 — Bucle evaluator-optimizer (acotado)
 
 - Si el veredicto global es `FAIL` → el orquestador corrige lo señalado (implementación y/o tests del harness — nunca aflojar la aserción para que pase), vuelve a Fase 3, y **relanza un supervisor en contexto fresco** (nueva llamada `Agent`, no reutilizar la anterior) para la Fase 4.
@@ -196,3 +198,5 @@ En el chat, en este orden:
 - Aflojar una aserición del harness para que el supervisor la apruebe.
 - Tests del harness que no ejercen el boundary real (mocks del límite exacto bajo prueba, bypass de formulario/auth).
 - Marcar un escenario como cubierto sin `@scenario` trazable en el test.
+- Dar por cubierto un escenario con un test que **no se ha visto fallar** en el árbol sin el cambio (o con el cambio desactivado), salvo que la fila del manifest diga por qué esa prueba fue imposible: un test que pasa igual con el comportamiento roto es peor que ninguno, porque además da cobertura falsa.
+- Que un subagente delegado **comitee o empuje**: el orquestador revisa el diff línea a línea, verifica y comitea.

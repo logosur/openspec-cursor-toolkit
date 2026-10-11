@@ -11,7 +11,7 @@ description: "Honest OpenSpec gap analysis — multiagent loop (max 5 iter), evi
 
 You are running **openspec-gap-analysis** (slash command **or natural language**): find **evidence-backed** spec gaps the user did not specify. **Gap discovery only** — no product code, no APPLY.
 
-**MANDATORY:** operate under **`hazlo-en-modo-multiagente`** — orchestrator delegates via `Task`; subagents search/read only.
+**Delegation:** operate under **`hazlo-en-modo-multiagente`** in its lean form by default: one subagent at a time, given a context packet (the spec, the seed list of suspected gap classes, the exact files to read, where throwaway probes may be written), that searches, reads and runs single probes only; the orchestrator re-verifies every FACT row before writing it. Parallel subagents are an opt-in when the budget has room. See `docs/openspec/README.md`, "Budget and the lean mode".
 
 ## When to use (natural language)
 

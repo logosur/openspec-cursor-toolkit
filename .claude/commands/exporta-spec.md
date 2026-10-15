@@ -88,6 +88,40 @@ Stdout includes `## EXPORT_STATS` with `FILES_NEW`, `FILES_UPDATED`, `FILES_UNCH
 
 Use `--force` only when the developer explicitly wants a full re-copy (e.g. after line-ending normalization).
 
+## Exclusion list — a project keeps its own version
+
+A project may diverge **on purpose** (its own policy makes the generic bundle wrong there). Declare it instead of restoring files by hand after every run:
+
+| Where | Scope |
+|-------|-------|
+| `<bundle>/bundle.exclude` | That bundle only — versioned next to the bundle, so the reason travels with it |
+| `<ai-developer>/templates/openspec-cursor/exclude.global` | Every bundle |
+| `--exclude PATTERN` (repeatable) | One run; absolute path, glob, or bare project directory name |
+| `--exclude-file FILE` (repeatable) | One run, same syntax as `bundle.exclude` |
+
+Syntax: one pattern per line, optional reason after `#`. Excluded projects are never written to and appear in `## EXPORT_EXCLUDED` with pattern, reason and the file that declared it.
+
+**Prefer `bundle.exclude` over the flag** when the divergence is permanent: a flag is forgotten on the next run, a declared line is not. Real case: `job-offer-apply` keeps its own `cierra-sesion` because `master` is production there and each session publishes its own verified work without asking.
+
+## Drift detection — the project edited its copy
+
+Every deploy records the delivered `sha256` of each file under `<PROJECTS_BASE>/.cursor-local/export-spec/baselines/<project>/<slug>.sha256` (outside every repo — never inside a project, where a non-gitignored `.cursor/context/` would show it as a dirty file).
+
+| Destination state | Action |
+|-------------------|--------|
+| Differs from bundle, matches the baseline | **UPDATE** — the bundle moved on; safe to overwrite |
+| Differs from bundle **and** from the baseline | **DRIFT** — the project edited it; reported, **never overwritten** |
+| No baseline yet, file has uncommitted local changes | **DRIFT** — treated as the project's own edit |
+| No baseline yet, file clean | **UPDATE (no baseline)** — first run records one |
+
+Drift makes the script exit **3** and list every case under `## EXPORT_DRIFT`. Three legitimate answers, never silence:
+
+1. The project's edit is an improvement → port it to the source repo, rebuild the bundle, re-export (then it is no longer drift).
+2. The divergence is intentional → add a line to `bundle.exclude` with the reason.
+3. The edit is stale or wrong → re-run with `--accept-drift` (or `--force`), which discards it and says so per file.
+
+`--check-drift` reports drift and writes nothing (implies `--dry-run`): use it before a wide export to see what you would overwrite.
+
 ## Workflow (summary)
 
 | Phase | Action |
@@ -107,6 +141,7 @@ Full detail: `.claude/skills/exporta-spec/SKILL.md`.
 | `0` | Deployed | Report `discovered=N` **and paste full `## EXPORT_TARGETS` list** + `REGISTRY` |
 | `1` | Bundle/manifest error | Fix bundle, re-run |
 | `2` | `ASK_PROJECTS_BASE` | Ask developer for base path; re-run with `--projects-base` |
+| `3` | Drift found, nothing overwritten | Read `## EXPORT_DRIFT`; port it upstream, declare it in `bundle.exclude`, or re-run with `--accept-drift` |
 
 ## Prohibited
 

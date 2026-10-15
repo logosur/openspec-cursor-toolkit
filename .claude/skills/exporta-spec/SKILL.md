@@ -163,6 +163,43 @@ Deploy all: bash ai-developer/scripts/exporta-spec.sh --all
 
 ---
 
+## Phase 3b — Exclusion list and drift (before any wide export)
+
+### Exclusion list
+
+A project that keeps its own version of a bundle is declared, not patched back by hand after each run:
+
+```text
+# <bundle>/bundle.exclude
+job-offer-apply  # master is production; each session publishes its own verified work
+```
+
+Sources, in load order: `templates/openspec-cursor/exclude.global` (all bundles), `<bundle>/bundle.exclude` (this bundle), `--exclude-file FILE`, `--exclude PATTERN`. A pattern containing `/` matches the absolute project path (glob allowed); a bare word matches the project directory name. Reason after `#` is printed on every run.
+
+Excluded projects are skipped entirely and listed in `## EXPORT_EXCLUDED` as `EXCLUDED:<path>|<pattern>|<reason>|<source>`.
+
+### Drift
+
+The exporter records what it delivered — `sha256` per file — in the local registry, outside every repo:
+
+```text
+<PROJECTS_BASE>/.cursor-local/export-spec/baselines/<project>/<slug>.sha256
+```
+
+Never inside the project: `.cursor/context/` is gitignored in some repos and not in others, and a baseline written there shows up as a dirty file in the ones where it is not.
+
+Classification per file: `new`, `unchanged`, `updated` (differs from bundle but matches baseline — the bundle moved on), `updated-nobaseline` (no baseline, file clean), `drift` (differs from both baseline and bundle, or no baseline and uncommitted local changes).
+
+**Drift is never overwritten.** The run reports it, stats carry `FILES_DRIFT` / `PROJECTS_DRIFT`, the `## EXPORT_DRIFT` block lists `DRIFT:<root>|<dst>`, and the exit code is **3**. The baseline is kept as it was, so the drift keeps surfacing until somebody decides.
+
+On drift, the agent **must** diff the project file against the bundle and report which of the three it is — improvement to port upstream, intentional divergence to declare in `bundle.exclude`, or stale copy to discard with `--accept-drift`. Reporting "exit 3" without that reading is not a result.
+
+`--check-drift` audits without writing (implies `--dry-run`). Run it before any `--all` export.
+
+### Excluding a project by hand (when there is no other way)
+
+If a project must be left out for one run and no pattern fits, back up **every** entry of the manifest for it — not only the ones a `--dry-run` flagged as divergent. Files that match the bundle are rewritten too, and that is where an incoherent half-and-half state comes from (learned the hard way in `job-offer-apply`, 2026-10-15).
+
 ## Phase 4 — Deploy (smart update)
 
 Default: **compare before copy**. For each manifest entry in each target project:
@@ -205,6 +242,7 @@ bash "${AI_DEV}/scripts/exporta-spec.sh" --slug "${SLUG}" --projects-base "${PRO
 | `0` | Parse `discovered=N` and `## EXPORT_STATS`; **paste all `TARGET:` lines** under `## Directorios exportados`; mention `REGISTRY=` path |
 | `1` | Show stderr; fix manifest/files |
 | `2` | Ask for `PROJECTS_BASE`; do not proceed until answered |
+| `3` | Drift: read `## EXPORT_DRIFT`, diff each file, and report improvement / intentional divergence / stale copy. Never re-run with `--accept-drift` on your own initiative |
 
 ---
 

@@ -54,10 +54,19 @@ Script writes local-only registry after discovery:
 Deploy compares bundle vs each target file (`cmp`):
 
 - **NEW** — destination missing → copy
-- **UPDATE** — exists but differs → copy
+- **UPDATE** — differs from the bundle but matches the recorded baseline (the bundle moved on) → copy
 - **SKIP** — identical → no write
+- **DRIFT** — differs from the bundle **and** from the baseline: the project edited its copy → reported, never overwritten, exit code 3
+- **EXCLUDED** — the project is listed in `bundle.exclude`, `exclude.global`, `--exclude` or `--exclude-file` → never written to
 
-Report `## EXPORT_STATS` from stdout. Use `--force` only when developer asks for unconditional overwrite.
+Report `## EXPORT_STATS`, `## EXPORT_DRIFT` and `## EXPORT_EXCLUDED` from stdout. Use `--force` only when the developer asks for unconditional overwrite.
+
+## Exclusion and drift
+
+- A project that diverges **on purpose** gets a line in `<bundle>/bundle.exclude` (`pattern  # reason`), not a manual restore after every run. `exclude.global` covers every bundle; `--exclude PATTERN` covers one run.
+- Baselines of what was delivered live **outside** the repos, in `<PROJECTS_BASE>/.cursor-local/export-spec/baselines/<project>/<slug>.sha256`. Never write them inside a project.
+- `--check-drift` audits without writing. Run it before any wide or `--all` export.
+- On exit 3: diff the drifted file against the bundle and say which it is — improvement to port upstream, intentional divergence to declare, or stale copy to discard with `--accept-drift`. Never discard a project's edits on your own initiative.
 
 ## Obligation
 

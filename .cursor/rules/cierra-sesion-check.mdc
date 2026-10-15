@@ -30,9 +30,14 @@ trabajo empezado, si sube o no los cambios sin commitear), **se abre diálogo de
 veredicto**, con opciones en lenguaje natural y bien explicadas. Una sola tanda. Nunca se pregunta
 lo que el agente puede comprobar por sí mismo.
 
+Los cambios de **esta sesión** sin commitear no se despachan con «por si quieres subirlos antes de
+salir»: se preguntan (commitear sin push / commitear y push / dejarlos). Elegir commit o push en el
+diálogo es la orden explícita que exigen las reglas globales, limitada a esos ficheros; nunca
+`git add -A` en el árbol compartido.
+
 ## Límites
 
-- **Solo informa.** No arregla pendientes, no commitea, no pushea, no archiva changes.
+- **Solo informa.** No arregla pendientes, no commitea, no pushea, no archiva changes, salvo lo que el desarrollador elija en el diálogo.
 - **No inventa** pendientes: cada viñeta nace de una señal comprobada (git, OpenSpec, tests, hilo de la conversación).
 - **No recapitula** lo hecho en la sesión, ni pega logs, tablas ni rutas largas.
 - Lo no verificado se dice como no verificado, nunca se da por bueno.

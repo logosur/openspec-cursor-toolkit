@@ -5,7 +5,7 @@ description: Build a persistent, re-runnable test harness for an OpenSpec spec/c
 
 # Harness spec — persistent harness + independent supervisor verifier
 
-> **Command:** `.claude/commands/harness-spec.md`
+> **Command:** `.cursor/commands/harness-spec.md`
 > **OpenSpec:** `openspec/changes/<slug>/specs/**/spec.md` or `openspec/specs/<capability>/spec.md`
 > **Stack:** Symfony/PHPUnit (`apps/api`), Next.js/Playwright (`apps/web`), Docker Compose
 

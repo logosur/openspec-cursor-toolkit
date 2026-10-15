@@ -1,6 +1,6 @@
 ---
 name: openspec-workflow
-description: OpenSpec workflow rules for safe AI-assisted development
+description: "Guardrails for AI-assisted OpenSpec work: no implementation before the source of truth is identified, a clear split between what the code guarantees, what tests verify, what logs show and what remains unproven, and tests that are never relaxed just to pass. Use when the user asks to work with OpenSpec proposals or specs, tests, TDD, Postman, PHPUnit, webhooks or state transitions."
 ---
 
 When the user asks to work with OpenSpec, proposals, specs, tests, TDD, Postman, PHPUnit, webhooks, or state transitions:

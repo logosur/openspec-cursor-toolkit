@@ -1,0 +1,78 @@
+# Final — python3 -m unittest scripts/test_validate_toolkit.py && python3 scripts/validate-toolkit.py
+# 2026-10-15T17:39:37+02:00 · develop @ 221d85a + working tree of this change
+
+test_alias_that_carries_a_workflow (scripts.test_validate_toolkit.Aliases.test_alias_that_carries_a_workflow) ... ok
+test_alias_to_missing_skill (scripts.test_validate_toolkit.Aliases.test_alias_to_missing_skill) ... ok
+test_invocable_alias (scripts.test_validate_toolkit.Aliases.test_invocable_alias) ... ok
+test_valid_alias_has_no_finding (scripts.test_validate_toolkit.Aliases.test_valid_alias_has_no_finding) ... ok
+test_error_pair (scripts.test_validate_toolkit.Collisions.test_error_pair) ... ok
+test_non_invocable_skill_never_collides (scripts.test_validate_toolkit.Collisions.test_non_invocable_skill_never_collides) ... ok
+test_scores_are_deterministic (scripts.test_validate_toolkit.Collisions.test_scores_are_deterministic) ... ok
+test_warn_pair_exits_0 (scripts.test_validate_toolkit.Collisions.test_warn_pair_exits_0) ... ok
+test_declared_divergence_passes (scripts.test_validate_toolkit.DescriptionParity.test_declared_divergence_passes) ... ok
+test_divergence_exception_dead_when_equal (scripts.test_validate_toolkit.DescriptionParity.test_divergence_exception_dead_when_equal) ... ok
+test_undeclared_divergence_shows_both_texts (scripts.test_validate_toolkit.DescriptionParity.test_undeclared_divergence_shows_both_texts) ... ok
+test_dead_claude_only_exception (scripts.test_validate_toolkit.Exceptions.test_dead_claude_only_exception) ... ok
+test_exception_that_matches_no_asymmetry_is_dead (scripts.test_validate_toolkit.Exceptions.test_exception_that_matches_no_asymmetry_is_dead) ... ok
+test_exception_without_reason (scripts.test_validate_toolkit.Exceptions.test_exception_without_reason) ... ok
+test_real_exceptions_file_is_alive_and_complete (scripts.test_validate_toolkit.Exceptions.test_real_exceptions_file_is_alive_and_complete) ... ok
+test_unknown_section (scripts.test_validate_toolkit.Exceptions.test_unknown_section) ... ok
+test_clean_catalog_exits_0_with_summary (scripts.test_validate_toolkit.ExitCodeContract.test_clean_catalog_exits_0_with_summary) ... ok
+test_two_findings_in_one_run_exit_1 (scripts.test_validate_toolkit.ExitCodeContract.test_two_findings_in_one_run_exit_1) ... ok
+test_warnings_only_exit_0_and_listed (scripts.test_validate_toolkit.ExitCodeContract.test_warnings_only_exit_0_and_listed) ... ok
+test_missing_frontmatter (scripts.test_validate_toolkit.Frontmatter.test_missing_frontmatter) ... ok
+test_rule_missing_always_apply (scripts.test_validate_toolkit.Frontmatter.test_rule_missing_always_apply) ... ok
+test_tree_specific_command_keys (scripts.test_validate_toolkit.Frontmatter.test_tree_specific_command_keys) ... ok
+test_unknown_key_model (scripts.test_validate_toolkit.Frontmatter.test_unknown_key_model) ... ok
+test_unparseable_yaml_unquoted_colon (scripts.test_validate_toolkit.Frontmatter.test_unparseable_yaml_unquoted_colon) ... ok
+test_homonym_falls_back_to_claude_only_skill (scripts.test_validate_toolkit.HygieneWarnings.test_homonym_falls_back_to_claude_only_skill) ... ok
+test_homonym_rule_divergence_is_warn (scripts.test_validate_toolkit.HygieneWarnings.test_homonym_rule_divergence_is_warn) ... ok
+test_horizontal_rule_is_not_inner_frontmatter (scripts.test_validate_toolkit.HygieneWarnings.test_horizontal_rule_is_not_inner_frontmatter) ... ok
+test_stale_inner_frontmatter_is_warn (scripts.test_validate_toolkit.HygieneWarnings.test_stale_inner_frontmatter_is_warn) ... ok
+test_declared_group_validates_nested_skill (scripts.test_validate_toolkit.Names.test_declared_group_validates_nested_skill) ... ok
+test_name_drift (scripts.test_validate_toolkit.Names.test_name_drift) ... ok
+test_non_kebab_command_name (scripts.test_validate_toolkit.Names.test_non_kebab_command_name) ... ok
+test_stray_folder (scripts.test_validate_toolkit.Names.test_stray_folder) ... ok
+test_undeclared_group_is_a_stray_folder (scripts.test_validate_toolkit.Names.test_undeclared_group_is_a_stray_folder) ... ok
+test_backticked_name_counts (scripts.test_validate_toolkit.ReadmeCoverage.test_backticked_name_counts) ... ok
+test_link_target_counts (scripts.test_validate_toolkit.ReadmeCoverage.test_link_target_counts) ... ok
+test_name_inside_another_word_does_not_count (scripts.test_validate_toolkit.ReadmeCoverage.test_name_inside_another_word_does_not_count) ... ok
+test_wrapper_exempt_and_invocable_skill_checked (scripts.test_validate_toolkit.RoutingScope.test_wrapper_exempt_and_invocable_skill_checked) ... ok
+test_wrapper_still_gets_frontmatter_checks (scripts.test_validate_toolkit.RoutingScope.test_wrapper_still_gets_frontmatter_checks) ... ok
+test_command_only_in_claude (scripts.test_validate_toolkit.SetParity.test_command_only_in_claude) ... ok
+test_declared_claude_only_command (scripts.test_validate_toolkit.SetParity.test_declared_claude_only_command) ... ok
+test_declared_claude_only_skill (scripts.test_validate_toolkit.SetParity.test_declared_claude_only_skill) ... ok
+test_undeclared_skill_asymmetry (scripts.test_validate_toolkit.SetParity.test_undeclared_skill_asymmetry) ... ok
+test_1024_characters_is_allowed (scripts.test_validate_toolkit.TriggerAndLength.test_1024_characters_is_allowed) ... ok
+test_1100_character_description (scripts.test_validate_toolkit.TriggerAndLength.test_1100_character_description) ... ok
+test_each_trigger_phrase_is_accepted (scripts.test_validate_toolkit.TriggerAndLength.test_each_trigger_phrase_is_accepted) ... ok
+test_purpose_only_description (scripts.test_validate_toolkit.TriggerAndLength.test_purpose_only_description) ... ok
+
+----------------------------------------------------------------------
+Ran 46 tests in 0.340s
+
+OK
+# unittest exit=0
+
+WARN .claude/skills/aplica-tarea/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .claude/skills/archiva-tarea/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .claude/skills/mejora-tarea/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .claude/skills/opsx-apply/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .claude/skills/opsx-archive/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .claude/skills/opsx-explore/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .claude/skills/opsx-propose/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .claude/skills/prepara-tarea/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .cursor/rules/40-openspec-safe-apply.mdc: [homonym-rule] description differs from its homonym skill .cursor/skills/40-openspec-safe-apply/SKILL.md: rule 'Safe APPLY phase for OpenSpec — unattended multi-agent execution, scope control, and evidence-backed completion' | skill 'Keeps the APPLY step of an OpenSpec change inside its scope: it starts only after VERIFY returns READY TO APPLY, allows no drive-by refactors or weakened tests, stops when code contradicts the spec, and closes only with passing checks or recorded deferrals. Use when implementing an approved change or deciding whether an apply is complete (apply seguro, scope, evidencia).'
+WARN .cursor/rules/openspec-gap-analysis.mdc: [homonym-rule] description differs from its homonym skill .cursor/skills/openspec-gap-analysis/SKILL.md: rule 'OpenSpec gap analysis — honest multiagent loop (max 5 iter), GAPS.md, no implementation. NL triggers: gap analysis, analiza gaps, revisar gaps, casuísticas faltantes, huecos en la spec, spec gaps, missing casuistics, GAPS.md' | skill 'Honest OpenSpec gap analysis — multiagent loop (max 5 iter), evidence-backed GAPS.md; no implementation. Auto-invoke on NL: gap analysis, analiza gaps, revisar gaps, casuísticas faltantes, huecos en la spec, missing casuistics, GAPS.md, spec gaps, qué falta en la spec, gaps stats-net, gaps en polling rider.'
+WARN .cursor/rules/rune-specs.mdc: [homonym-rule] description differs from its homonym skill .cursor/skills/rune-specs/SKILL.md: rule 'RUNE specs — optional formal specifications for business logic services (stack-agnostic)' | skill 'Writes RUNE specifications (SIGNATURE, INTENT, BEHAVIOR, TESTS) for business-logic services such as validators, guards, mappers and calculators before they are implemented; optional and PHP-oriented, only for projects that adopt RUNE. Use when creating, documenting or refactoring such a service in a RUNE project, or when the user mentions RUNE specs or .rune files.'
+WARN .cursor/skills/aplica-tarea/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .cursor/skills/archiva-tarea/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .cursor/skills/mejora-tarea/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .cursor/skills/opsx-apply/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .cursor/skills/opsx-archive/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .cursor/skills/opsx-explore/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .cursor/skills/opsx-propose/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .cursor/skills/prepara-tarea/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+validate-toolkit: 0 error(s), 19 warning(s)
+
+# validator exit=0

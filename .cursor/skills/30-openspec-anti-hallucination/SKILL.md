@@ -1,6 +1,6 @@
 ---
 name: 30-openspec-anti-hallucination
-description: Prevent invented implementation details during OpenSpec work (numbered OpenSpec series)
+description: "Forbids inventing class names, services, endpoints, tables, statuses, response codes, config keys, test names or log fields in OpenSpec work: each one is verified in code, config, tests, docs or provided logs, or marked NOT VERIFIABLE, and claims are labelled FACT, INFERENCE, HYPOTHESIS or UNKNOWN. Use when a spec, design or task names a concrete implementation detail (anti-alucinación)."
 ---
 
 The assistant must not invent:

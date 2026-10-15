@@ -121,10 +121,27 @@ Command entry point: [`.claude/commands/cierra-sesion.md`](../commands/cierra-se
 | [`00-openspec-master/`](00-openspec-master/SKILL.md) | Master EXPLORE → PROPOSE → HYDRATE → VERIFY → APPLY → ARCHIVE workflow. |
 | [`00-openspec-orchestrator/`](00-openspec-orchestrator/SKILL.md) | OpenSpec orchestration layer (same lifecycle, orchestrator framing). |
 | [`10-openspec-refactor-solid/`](10-openspec-refactor-solid/SKILL.md) | OpenSpec refactor workflow for SOLID / Drupal / Symfony / PSR. |
-| [`20-hydrate-spec/`](20-hydrate-spec/SKILL.md) / [`20-openspec-hydrate-spec/`](20-openspec-hydrate-spec/SKILL.md) | Hydrate weak proposals until testable. |
-| [`30-openspec-anti-hallucination/`](30-openspec-anti-hallucination/SKILL.md) / [`openspec-anti-hallucination/`](openspec-anti-hallucination/SKILL.md) | Prevent invented implementation details. |
+| [`20-openspec-hydrate-spec/`](20-openspec-hydrate-spec/SKILL.md) | Hydrate weak proposals until testable. `20-hydrate-spec` is a deprecated alias that points here. |
+| [`30-openspec-anti-hallucination/`](30-openspec-anti-hallucination/SKILL.md) | Prevent invented implementation details. `openspec-anti-hallucination` is a deprecated alias that points here. |
 | [`40-openspec-safe-apply/`](40-openspec-safe-apply/SKILL.md) | Safe APPLY phase — gates, scope control, evidence-backed completion. |
 | [`openspec-e2e-regression-guard/`](openspec-e2e-regression-guard/SKILL.md) | OpenSpec as source of truth for E2E regression protection. |
 | [`openspec-extract-spec-from-doc/`](openspec-extract-spec-from-doc/SKILL.md) | Convert a `.doc`/`.docx`/`.odt` ticket reference document into an OpenSpec spec/design/tasks/VERIFY. |
 | [`openspec-fix-changes-gitignore/`](openspec-fix-changes-gitignore/SKILL.md) | Optional: decide version vs gitignore for fix-only OpenSpec/E2E artefacts. |
 | [`rune-specs/`](rune-specs/SKILL.md) | Optional RUNE specs for business-logic services (PHP-oriented). |
+
+## All skills
+
+Folders not covered by the sections above. Every skill folder must be named somewhere in this README; `python3 scripts/validate-toolkit.py` checks it.
+
+| Folder | Purpose |
+|--------|---------|
+| [`comando-verificar/`](comando-verificar/SKILL.md) | Deep combinatorial verification with a matrix artifact — forms, services, casuistics. |
+| [`exporta-spec/`](exporta-spec/SKILL.md) | Export a command or skill bundle to every OpenSpec project under `PROJECTS_BASE`. |
+| [`harness-spec/`](harness-spec/SKILL.md) | Persistent, re-runnable test harness for a spec/change plus an independent supervisor agent. |
+| [`multiagente/`](multiagente/SKILL.md) | Unattended multi-agent execution of a specified task. |
+| [`openspec-workflow/`](openspec-workflow/SKILL.md) | Guardrails for AI-assisted OpenSpec work: source of truth first, tests never relaxed just to pass. |
+| [`opsx-apply/`](opsx-apply/SKILL.md) | Implement tasks from an OpenSpec change (OPSX command skill). |
+| [`opsx-archive/`](opsx-archive/SKILL.md) | Archive a completed change (OPSX command skill). |
+| [`opsx-propose/`](opsx-propose/SKILL.md) | Propose a new change and generate all its artifacts in one step (OPSX command skill). |
+| [`qa/`](qa/SKILL.md) | Honest QA HTML report with mobile-first then desktop screenshots and a combinatorial matrix. |
+| [`verifica-tarea/`](verifica-tarea/SKILL.md) | OpenSpec change verification — 100% scenario matrix, VERIFY gates, honest evidence. |

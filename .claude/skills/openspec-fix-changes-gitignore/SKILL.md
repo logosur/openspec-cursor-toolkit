@@ -1,6 +1,6 @@
 ---
 name: openspec-fix-changes-gitignore
-description: OpenSpec and E2E fix artifacts — gitignore by content (optional; adapt paths in your app repo)
+description: "Decides from their content whether an OpenSpec change or E2E spec is ticket-scoped fix evidence (gitignored) or a product feature (versioned), and asks when it is mixed; optional, paths adapted per application repo. Use when about to git add an openspec/changes/<slug>/ folder or a ticket-scoped E2E spec (gitignore artefactos)."
 ---
 
 # OpenSpec and E2E fix artifacts — gitignore by content (optional)

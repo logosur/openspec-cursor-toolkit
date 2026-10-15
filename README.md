@@ -20,6 +20,7 @@ This repository ships **no product** `openspec/` tree for a consuming applicatio
 | `.claude/skills/README.md` | Skills index (OPSX ↔ ES map + stack-agnostic skill list). |
 | `.claude/scripts/openspec-list.sh` | Same script, `.claude/context/` output path. |
 | `docs/openspec/` | Index, master prompts, GAPS + RUN-LOOP templates, operator notes — shared by both toolkits. |
+| `scripts/` | Contributor tooling for this repo only, never exported: catalog validator, its tests and the declared exceptions (see [Validate the catalog](#validate-the-catalog)). |
 
 ## Integrate into another project
 
@@ -105,6 +106,44 @@ Once approved, the deploy is **delegated** to the consuming project's `/deploy` 
 | Verdict | Last line, always: `Supervisor verdict: ALL CLOSED \| DEPLOYED \| READY TO DEPLOY \| AWAITING DEVELOPER DECISION \| BLOCKED (<reason>) \| NO PROGRESS` |
 
 Without a session API (typically Cursor) it says so and degrades to **manual mode**: the census is rebuilt from `git worktree list`, unpushed branches and unchecked OpenSpec tasks, plus one dialog asking for the open sessions. It never simulates a census it could not take. See `.cursor/commands/supervisa-sesiones.md` (Cursor) / `.claude/commands/supervisa-sesiones.md` (Claude Code).
+
+## Validate the catalog
+
+`scripts/validate-toolkit.py` checks the catalog rules that used to be kept by hand, and CI (`.github/workflows/validate-toolkit.yml`) runs it with its tests on every push and pull request. It needs Python 3 and PyYAML (`pip install pyyaml`). Nothing in `scripts/` is exported to consumer projects.
+
+```bash
+python3 -m unittest scripts/test_validate_toolkit.py
+python3 scripts/validate-toolkit.py
+```
+
+Each finding is one line — `ERROR` or `WARN`, the file, `[rule]` and a message — and the run ends with a summary line. Any `ERROR` makes it exit `1`; warnings never change the exit code.
+
+| Rule | What it checks |
+|------|----------------|
+| `command-parity`, `skill-parity` | The same commands and skills exist in `.cursor/` and `.claude/`, except declared asymmetries |
+| `description-parity` | A command or skill present in both trees has the same `description`, except declared divergences |
+| `frontmatter`, `keys` | Frontmatter parses as YAML and has the required keys, and only the allowed ones, for its file kind |
+| `name`, `skill-folder` | Skill `name` equals its folder; names are kebab-case; every folder under `skills/` has a `SKILL.md` or is a declared group |
+| `readme-coverage` | Each `skills/README.md` names every skill folder of its tree (as `` `name` ``, `name/` or a link) |
+| `trigger-clause`, `description-length`, `collision` | The routing contract below, for model-invocable skills |
+| `alias` | A `Deprecated alias of <skill>` is not model-invocable, names an existing skill and stays a short pointer (≤ 15 lines) |
+| `exceptions` | Every declared exception has a reason and still matches something |
+| `inner-frontmatter`, `homonym-rule` (`WARN`) | A stale second frontmatter block at the top of a skill body; a Cursor rule whose description differs from its homonym skill |
+
+**Declaring an intentional asymmetry.** Add an entry with a `reason` to `scripts/catalog-exceptions.yaml`, under `claude_only_skills`, `cursor_only_skills`, `claude_only_commands`, `cursor_only_commands`, `description_divergence` (with `kind: command` or `kind: skill`) or `skill_groups`. Remove it in the same change that removes its cause: an entry that matches nothing is an error.
+
+**Routing contract.** A skill without `disable-model-invocation: true` is picked by its description, so the description must:
+
+- say what the skill does and when to use it, with a trigger clause: `Use when`, `Use on`, `Auto-invoke on` or `Triggers on`;
+- take its trigger phrases, Spanish ones included, from text already in the repo: this README, the skills READMEs, the command files, `CLAUDE.md` or the skill body;
+- not list the skill's steps in order, and not name commands, files or behaviour the skill does not contain;
+- stay within 1024 characters and below 0.50 TF-IDF cosine against every other model-invocable skill of its tree (0.30 or more is a warning: justify it or reword).
+
+The validator checks the clause, the length and the collisions; the other points are checked in review.
+
+**Retiring a duplicate skill.** Turn it into a deprecated alias instead of deleting it: keep the folder and `name`, set `disable-model-invocation: true`, start the description with `Deprecated alias of <canonical>`, and leave a body of a few lines that points to the canonical skill. Do the same with its homonym Cursor rule. The exporter cannot delete files, so a pointer is what brings consumer copies back in line.
+
+**Changing the validator.** A new or changed rule ships with at least one passing and one failing case in `scripts/test_validate_toolkit.py`; a rule without a failing-case test is incomplete. The collision thresholds are named constants whose rationale is in the design of the OpenSpec change `toolkit-catalog-validation` (Decision 4). Changing them is a reviewed decision, never a way to turn CI green.
 
 ## Publish on GitHub
 

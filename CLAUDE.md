@@ -21,15 +21,18 @@ Claude Code solo carga este archivo y `.claude/rules/*.md`; `.cursor/rules/*.mdc
 - `.claude/{commands,skills/*/SKILL.md}` espejo nativo Claude Code; rules `.mdc` plegadas en `SKILL.md`.
 - `.{cursor,claude}/scripts/openspec-list.sh` listado de changes.
 - `docs/openspec/` índice, prompts, templates; compartido.
+- `scripts/` validador del catálogo, sus tests y excepciones declaradas; herramienta de este repo, no se exporta.
 - `.{cursor,claude}/context/` salida de sesión, gitignored.
 
 ## Invariantes
 
-- **Paridad `.cursor/` ↔ `.claude/`**: mismo set de commands (idéntico hoy) y skills. Cambio en uno → replicar en otro. `.claude/skills` tiene 4 extra que en Cursor son solo rule: `00-openspec-stack-agnostic`, `openspec-e2e-regression-guard`, `openspec-extract-spec-from-doc`, `openspec-fix-changes-gitignore`.
+- **Paridad `.cursor/` ↔ `.claude/`**: mismo set de commands (idéntico hoy) y skills. Cambio en uno → replicar en otro. `.claude/skills` tiene 4 extra que en Cursor son solo rule: `00-openspec-stack-agnostic`, `openspec-e2e-regression-guard`, `openspec-extract-spec-from-doc`, `openspec-fix-changes-gitignore`. Lo comprueba `scripts/validate-toolkit.py`; toda asimetría se declara, con motivo, en `scripts/catalog-exceptions.yaml`.
 - Rule `.mdc` con skill homónima: cambiar contenido → actualizar también `SKILL.md`.
-- `.cursor/skills/README.md` y `.claude/skills/README.md` al día al añadir/renombrar.
+- `.cursor/skills/README.md` y `.claude/skills/README.md` nombran cada carpeta de skill de su árbol (lo comprueba el validador).
 - Nombres kebab-case; alias ES (`prepara-tarea`, …) + OPSX EN (`opsx-*`); serie numerada `00-`..`40-`.
-- Frontmatter: commands `description` (+ `argument-hint`); skills `name` + `description` con triggers.
+- Frontmatter: commands `description` (+ `argument-hint`); skills `name` (= carpeta) + `description`. YAML válido y claves permitidas: lo comprueba el validador.
+- Routing: skill invocable → `description` con qué + cuándo (`Use when`/`Use on`/`Auto-invoke on`/`Triggers on`), frases sacadas del repo, ≤ 1024 car., sin colisión TF-IDF ≥ 0.50. Duplicado → alias obsoleto (`Deprecated alias of <canónica>`, `disable-model-invocation: true`), nunca borrar.
+- Antes de cerrar un cambio del catálogo: `python3 -m unittest scripts/test_validate_toolkit.py && python3 scripts/validate-toolkit.py` (CI lo repite en cada push/PR). Detalle en `README.md` → «Validate the catalog».
 - Nunca hardcodear host/puerto/comandos ajenos.
 - Prohibido: `git commit/push/merge` sin orden; commitear registros export; cerrar apply/verify sin evidencia; aflojar aserciones E2E; deploy sin diálogo (`run-spec` para en gate).
 - Fases `repasa-spec`/`run-spec` secuenciales, nunca paralelas. Gate se lee de disco (`GAPS.md`, `tasks.md`), no de lo que afirme un agente.
@@ -41,8 +44,8 @@ Claude Code solo carga este archivo y `.claude/rules/*.md`; `.cursor/rules/*.mdc
 | Stack-agnostic | `00-openspec-stack-agnostic.mdc` |
 | Spec fuerte / workflow | `00-openspec-master.mdc`, `00-openspec-orchestrator.mdc`, `openspec-workflow.mdc` |
 | Refactor SOLID/DI | `10-openspec-refactor-solid.mdc` |
-| Hidratar proposals | `20-openspec-hydrate-spec.mdc`, `20-hydrate-spec.mdc` |
-| Anti-alucinación | `30-openspec-anti-hallucination.mdc`, `openspec-anti-hallucination.mdc` |
+| Hidratar proposals | `20-openspec-hydrate-spec.mdc` (`20-hydrate-spec`: alias obsoleto) |
+| Anti-alucinación | `30-openspec-anti-hallucination.mdc` (`openspec-anti-hallucination`: alias obsoleto) |
 | Apply seguro, scope, evidencia | `40-openspec-safe-apply.mdc` |
 | Gap analysis / GAPS.md | `openspec-gap-analysis.mdc` |
 | Pipeline `/repasa-spec` | `repasa-spec-openspec-pipeline.mdc` |

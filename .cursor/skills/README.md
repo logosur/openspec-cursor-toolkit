@@ -112,3 +112,29 @@ Command entry point: [`.cursor/commands/supervisa-sesiones.md`](../commands/supe
 | [`cierra-sesion/`](cierra-sesion/SKILL.md) | `/cierra-sesion [detalle]` **or NL** (`¿queda algo pendiente?`, `¿puedo cerrar la sesión?`) | Read-only close check: verdict in one line + up to 5 plain-language bullets with what is still pending. Never fixes, commits or pushes anything. |
 
 Command entry point: [`.cursor/commands/cierra-sesion.md`](../commands/cierra-sesion.md), rule [`cierra-sesion-check.mdc`](../rules/cierra-sesion-check.mdc).
+
+## All skills
+
+Folders not covered by the sections above. Every skill folder must be named somewhere in this README; `python3 scripts/validate-toolkit.py` checks it.
+
+| Folder | Purpose |
+|--------|---------|
+| [`00-openspec-master/`](00-openspec-master/SKILL.md) | Full OpenSpec lifecycle for strong specifications, ending in a verify verdict before any code. |
+| [`00-openspec-orchestrator/`](00-openspec-orchestrator/SKILL.md) | Default gate that sends change requests through OpenSpec instead of coding straight away. |
+| [`10-openspec-refactor-solid/`](10-openspec-refactor-solid/SKILL.md) | SOLID / dependency-injection refactors of project-owned code, planned as an OpenSpec change. |
+| [`20-hydrate-spec/`](20-hydrate-spec/SKILL.md) | **Deprecated alias** of `20-openspec-hydrate-spec` (not model-invocable; kept so old references resolve). |
+| [`20-openspec-hydrate-spec/`](20-openspec-hydrate-spec/SKILL.md) | Hydrate a weak proposal until every requirement can fail a test. |
+| [`30-openspec-anti-hallucination/`](30-openspec-anti-hallucination/SKILL.md) | Never invent implementation details: verify them or mark them NOT VERIFIABLE. |
+| [`40-openspec-safe-apply/`](40-openspec-safe-apply/SKILL.md) | Keep the APPLY step inside its scope and close it only with evidence. |
+| [`comando-verificar/`](comando-verificar/SKILL.md) | Deep combinatorial verification with a matrix artifact — forms, services, casuistics. |
+| [`exporta-spec/`](exporta-spec/SKILL.md) | Export a command, skill or rule bundle to every OpenSpec project under `PROJECTS_BASE`. |
+| [`harness-spec/`](harness-spec/SKILL.md) | Persistent, re-runnable test harness for a spec/change plus an independent supervisor agent. |
+| [`multiagente/`](multiagente/SKILL.md) | Unattended multi-agent execution of a specified task. |
+| [`openspec-anti-hallucination/`](openspec-anti-hallucination/SKILL.md) | **Deprecated alias** of `30-openspec-anti-hallucination` (not model-invocable; kept so old references resolve). |
+| [`openspec-workflow/`](openspec-workflow/SKILL.md) | Guardrails for AI-assisted OpenSpec work: source of truth first, tests never relaxed just to pass. |
+| [`opsx-apply/`](opsx-apply/SKILL.md) | Implement tasks from an OpenSpec change (OPSX command skill). |
+| [`opsx-archive/`](opsx-archive/SKILL.md) | Archive a completed change (OPSX command skill). |
+| [`opsx-propose/`](opsx-propose/SKILL.md) | Propose a new change and generate all its artifacts in one step (OPSX command skill). |
+| [`qa/`](qa/SKILL.md) | Honest QA HTML report with mobile-first then desktop screenshots and a combinatorial matrix. |
+| [`rune-specs/`](rune-specs/SKILL.md) | Optional RUNE specs for business-logic services (PHP-oriented). |
+| [`verifica-tarea/`](verifica-tarea/SKILL.md) | OpenSpec change verification — 100% scenario matrix, VERIFY gates, honest evidence. |

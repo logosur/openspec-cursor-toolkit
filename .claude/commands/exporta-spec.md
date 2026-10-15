@@ -42,7 +42,7 @@ TARGET:/absolute/path/to/project
 | All bundles | `/exporta-spec all`, `/exporta-spec todos` | Deploy every bundle with `bundle.manifest` (includes `exporta-spec`, `repasa-spec`, …) |
 | Type + name | `/exporta-spec command html` | Only `.claude/commands/html.md` |
 | Type + name | `/exporta-spec skill html` | Only `.claude/skills/html/SKILL.md` (+ siblings in folder) |
-| Bundle path | `/exporta-spec bundle templates/openspec-claude/html` | Use existing bundle dir (sync only) |
+| Bundle path | `/exporta-spec bundle templates/openspec-cursor/html` | Use existing bundle dir (sync only) |
 | Base override | `PROJECTS_BASE=/other/path` on next line | Override projects base (else default below) |
 
 **Type keywords:** `command`/`comando`, `skill`, `bundle`.
@@ -140,7 +140,7 @@ Why it exists: on 2026-10-15 two sessions exported the same bundle a minute apar
 | Phase | Action |
 |-------|--------|
 | **0** | Lock slug (or `all`) + artifact files in **source repo** (`git rev-parse --show-toplevel`) |
-| **1** | Resolve `ai-developer` + write `templates/openspec-claude/<slug>/bundle.manifest` |
+| **1** | Resolve `ai-developer` + write `templates/openspec-cursor/<slug>/bundle.manifest` |
 | **2** | Copy source files into bundle; add `README.md` if missing |
 | **3** | `bash <ai-developer>/scripts/exporta-spec.sh --slug <slug> --projects-base "$PROJECTS_BASE"` or `--all` |
 | **4** | Optional: patch `.claude/skills/README.md` in source repo docs in bundle README |
@@ -159,7 +159,7 @@ Full detail: `.claude/skills/exporta-spec/SKILL.md`.
 
 ## Prohibited
 
-- Exporting without a **manifest** on disk in `ai-developer/templates/openspec-claude/<slug>/`.
+- Exporting without a **manifest** on disk in `ai-developer/templates/openspec-cursor/<slug>/`.
 - Silently changing `PROJECTS_BASE` when default is missing.
 - Committing registry files under `.claude-local/` or `.claude/context/export-spec/`.
 - `git commit` / `git push` unless the developer explicitly asks.

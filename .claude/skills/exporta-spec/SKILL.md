@@ -21,7 +21,7 @@ Extract from the message:
 |-------|----------|
 | **Slug** | `html`, `comando-verificar`, `gaps-spec`, `exporta-spec`, `repasa-spec` |
 | **Type** | `command`, `skill`, `bundle` (optional — default `bundle`) |
-| **Scope** | `all`, `todos` → deploy every bundle under `templates/openspec-claude/*/bundle.manifest` |
+| **Scope** | `all`, `todos` → deploy every bundle under `templates/openspec-cursor/*/bundle.manifest` |
 | **PROJECTS_BASE** | env `PROJECTS_BASE=…`, legacy `HTDOCS_BASE=…`, or default |
 
 **Slug normalization:** lowercase, hyphens; strip leading `/` from command names (`/html` → `html`).
@@ -122,7 +122,7 @@ For slug `S`, collect existing files:
 Target directory:
 
 ```text
-${AI_DEV}/templates/openspec-claude/<slug>/
+${AI_DEV}/templates/openspec-cursor/<slug>/
 ```
 
 ### bundle.manifest format
@@ -146,7 +146,7 @@ Rules:
 ### Copy files
 
 ```bash
-BUNDLE="${AI_DEV}/templates/openspec-claude/${SLUG}"
+BUNDLE="${AI_DEV}/templates/openspec-cursor/${SLUG}"
 mkdir -p "${BUNDLE}"
 # cp each source → bundle using manifest left-hand names
 ```
@@ -197,6 +197,20 @@ On drift, the agent **must** diff the project file against the bundle and report
 `--check-drift` audits without writing (implies `--dry-run`). Run it before any `--all` export.
 `--check-drift` y `--dry-run` no escriben nada, y su informe lo dice: `Done (plan only, nothing written)`, `WRITES_PERFORMED=0` y contadores `WOULD_FILES_NEW` / `WOULD_FILES_UPDATED` / `WOULD_PROJECTS_TOUCH`. Nunca leer un log de auditoría como prueba de despliegue: solo una pasada real emite `FILES_NEW` / `FILES_UPDATED`.
 
+
+### Adding new entries to an existing bundle
+
+A new manifest entry has no baseline anywhere, so a consumer that already has a file at that path is unprotected on the first run: tracked and clean it is overwritten as `FIRSTRUN`, untracked it is overwritten silently as `no baseline`. Before the first export of new entries:
+
+1. For every consumer and every new destination that already exists and differs from the bundle, compare it with **every historical version** of that path — this repo, its AulaDrupal twin, and the files ever stored in `ai-developer/templates`. A match is an old delivery: safe to update.
+2. Anything without a known origin is the project's own work until proven otherwise. Protect it before exporting by seeding its baseline with the bundle's sha (`<sha>  <dst>` in `<PROJECTS_BASE>/.cursor-local/export-spec/baselines/<project>/<slug>.sha256`): it then reports as `DRIFT` and is never written.
+3. Run `--check-drift` and confirm the protected set is entirely inside `## EXPORT_DRIFT` before the real run.
+
+On 2026-10-15 adding the Claude surface and the lifecycle commands found 228 such files across consumers: 102 were old deliveries and 126 had no known origin, mostly in projects with their own evolved tooling.
+
+### Symlinked layouts
+
+When `.claude/commands` (or `skills`, `scripts`) is a symlink to `.cursor/…`, two entries resolve to one real file. The script resolves every destination with `realpath -m` — which works even when intermediate directories do not exist yet, unlike `readlink -f` — and keeps the entry whose path does **not** traverse a symlink: that surface owns the files. Manifest order never decides which variant the project gets.
 
 ### Excluding a project by hand (when there is no other way)
 
@@ -313,7 +327,7 @@ Copy every `TARGET:` path from script stdout (sorted as emitted). Applies to **r
 
 ## Verification
 - **Verified:** `exporta-spec.sh --slug <slug> --projects-base <path>` exit 0; stdout `discovered=N` + `COUNT=N` in `## EXPORT_TARGETS` + `## EXPORT_STATS`
-- **Verified:** bundle at `<AI_DEV>/templates/openspec-claude/<slug>/bundle.manifest` (M files)
+- **Verified:** bundle at `<AI_DEV>/templates/openspec-cursor/<slug>/bundle.manifest` (M files)
 - **Verified:** registry at `<PROJECTS_BASE>/.claude-local/export-spec/projects-registry.json`
 
 ## Resumen
@@ -338,7 +352,7 @@ Copy every `TARGET:` path from script stdout (sorted as emitted). Applies to **r
 /exporta-spec all
 ```
 
-→ Every `templates/openspec-claude/*/bundle.manifest` including `exporta-spec` itself.
+→ Every `templates/openspec-cursor/*/bundle.manifest` including `exporta-spec` itself.
 
 ### Command only
 

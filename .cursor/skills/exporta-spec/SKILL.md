@@ -201,6 +201,20 @@ On drift, the agent **must** diff the project file against the bundle and report
 `--check-drift` y `--dry-run` no escriben nada, y su informe lo dice: `Done (plan only, nothing written)`, `WRITES_PERFORMED=0` y contadores `WOULD_FILES_NEW` / `WOULD_FILES_UPDATED` / `WOULD_PROJECTS_TOUCH`. Nunca leer un log de auditoría como prueba de despliegue: solo una pasada real emite `FILES_NEW` / `FILES_UPDATED`.
 
 
+### Adding new entries to an existing bundle
+
+A new manifest entry has no baseline anywhere, so a consumer that already has a file at that path is unprotected on the first run: tracked and clean it is overwritten as `FIRSTRUN`, untracked it is overwritten silently as `no baseline`. Before the first export of new entries:
+
+1. For every consumer and every new destination that already exists and differs from the bundle, compare it with **every historical version** of that path — this repo, its AulaDrupal twin, and the files ever stored in `ai-developer/templates`. A match is an old delivery: safe to update.
+2. Anything without a known origin is the project's own work until proven otherwise. Protect it before exporting by seeding its baseline with the bundle's sha (`<sha>  <dst>` in `<PROJECTS_BASE>/.cursor-local/export-spec/baselines/<project>/<slug>.sha256`): it then reports as `DRIFT` and is never written.
+3. Run `--check-drift` and confirm the protected set is entirely inside `## EXPORT_DRIFT` before the real run.
+
+On 2026-10-15 adding the Claude surface and the lifecycle commands found 228 such files across consumers: 102 were old deliveries and 126 had no known origin, mostly in projects with their own evolved tooling.
+
+### Symlinked layouts
+
+When `.claude/commands` (or `skills`, `scripts`) is a symlink to `.cursor/…`, two entries resolve to one real file. The script resolves every destination with `realpath -m` — which works even when intermediate directories do not exist yet, unlike `readlink -f` — and keeps the entry whose path does **not** traverse a symlink: that surface owns the files. Manifest order never decides which variant the project gets.
+
 ### Excluding a project by hand (when there is no other way)
 
 If a project must be left out for one run and no pattern fits, back up **every** entry of the manifest for it — not only the ones a `--dry-run` flagged as divergent. Files that match the bundle are rewritten too, and that is where an incoherent half-and-half state comes from (learned the hard way in `job-offer-apply`, 2026-10-15).

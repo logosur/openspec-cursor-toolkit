@@ -68,6 +68,12 @@ Report `## EXPORT_STATS`, `## EXPORT_DRIFT` and `## EXPORT_EXCLUDED` from stdout
 - `--check-drift` audits without writing. Run it before any wide or `--all` export.
 - On exit 3: diff the drifted file against the bundle and say which it is — improvement to port upstream, intentional divergence to declare, or stale copy to discard with `--accept-drift`. Never discard a project's edits on your own initiative.
 
+## Locking
+
+- One export per bundle at a time; a second run of the same bundle waits (`WAIT: …`) and then continues. Different bundles run in parallel; the shared registry has its own short lock.
+- Locks: `<PROJECTS_BASE>/.cursor-local/export-spec/locks/`. Released by the kernel when the holder exits or dies.
+- Exit **4** = lock timeout (`--lock-timeout`, default 1800 s). Nothing was written. Never delete a lock file to get past it.
+
 ## Obligation
 
 1. Discover source files in **current repo** (`git rev-parse --show-toplevel`).

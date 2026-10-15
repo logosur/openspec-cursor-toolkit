@@ -129,6 +129,17 @@ Drift makes the script exit **3** and list every case under `## EXPORT_DRIFT`. T
 `--check-drift` y `--dry-run` no escriben nada, y su informe lo dice: `Done (plan only, nothing written)`, `WRITES_PERFORMED=0` y contadores `WOULD_FILES_NEW` / `WOULD_FILES_UPDATED` / `WOULD_PROJECTS_TOUCH`. Nunca leer un log de auditoría como prueba de despliegue: solo una pasada real emite `FILES_NEW` / `FILES_UPDATED`.
 
 
+## Locking — two sessions never interleave an export
+
+Only one export of a given bundle runs at a time. A second run of the same bundle prints `WAIT: another export of '<slug>' holds the lock (…)` and continues on its own when the first finishes; different bundles may run in parallel. The shared projects registry has its own short lock.
+
+- Locks live in `<PROJECTS_BASE>/.cursor-local/export-spec/locks/` (`<slug>.lock`, `registry.lock`), outside every repo.
+- The kernel releases a lock when its holder exits or is killed, so a crashed run never leaves it stuck. The lock file records the last holder; the `WAIT` line says whether that process is still alive instead of trusting a stale record.
+- `--lock-timeout SECONDS` (default 1800) bounds the wait; on timeout the script exits **4** without writing anything.
+- Audits (`--check-drift`, `--dry-run`) take the lock too, so they never read a half-finished export.
+
+Why it exists: on 2026-10-15 two sessions exported the same bundle a minute apart. Nothing broke only because the content matched; with different bundle versions one would have overwritten the other and the baselines would describe a delivery that no longer exists, which silently disables drift detection.
+
 ## Workflow (summary)
 
 | Phase | Action |
@@ -148,6 +159,7 @@ Full detail: `.cursor/skills/exporta-spec/SKILL.md`.
 | `0` | Deployed | Report `discovered=N` **and paste full `## EXPORT_TARGETS` list** + `REGISTRY` |
 | `1` | Bundle/manifest error | Fix bundle, re-run |
 | `2` | `ASK_PROJECTS_BASE` | Ask developer for base path; re-run with `--projects-base` |
+| `4` | Timed out waiting for another export's lock | Nothing was written; the `WAIT` line says who holds it. Re-run later or raise `--lock-timeout` |
 | `3` | Drift found, nothing overwritten | Read `## EXPORT_DRIFT`; port it upstream, declare it in `bundle.exclude`, or re-run with `--accept-drift` |
 
 ## Prohibited

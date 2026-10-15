@@ -202,6 +202,17 @@ On drift, the agent **must** diff the project file against the bundle and report
 
 If a project must be left out for one run and no pattern fits, back up **every** entry of the manifest for it — not only the ones a `--dry-run` flagged as divergent. Files that match the bundle are rewritten too, and that is where an incoherent half-and-half state comes from (learned the hard way in `job-offer-apply`, 2026-10-15).
 
+## Locking — two sessions never interleave an export
+
+Only one export of a given bundle runs at a time. A second run of the same bundle prints `WAIT: another export of '<slug>' holds the lock (…)` and continues on its own when the first finishes; different bundles may run in parallel. The shared projects registry has its own short lock.
+
+- Locks live in `<PROJECTS_BASE>/.cursor-local/export-spec/locks/` (`<slug>.lock`, `registry.lock`), outside every repo.
+- The kernel releases a lock when its holder exits or is killed, so a crashed run never leaves it stuck. The lock file records the last holder; the `WAIT` line says whether that process is still alive instead of trusting a stale record.
+- `--lock-timeout SECONDS` (default 1800) bounds the wait; on timeout the script exits **4** without writing anything.
+- Audits (`--check-drift`, `--dry-run`) take the lock too, so they never read a half-finished export.
+
+Why it exists: on 2026-10-15 two sessions exported the same bundle a minute apart. Nothing broke only because the content matched; with different bundle versions one would have overwritten the other and the baselines would describe a delivery that no longer exists, which silently disables drift detection.
+
 ## Phase 4 — Deploy (smart update)
 
 Default: **compare before copy**. For each manifest entry in each target project:
@@ -244,6 +255,7 @@ bash "${AI_DEV}/scripts/exporta-spec.sh" --slug "${SLUG}" --projects-base "${PRO
 | `0` | Parse `discovered=N` and `## EXPORT_STATS`; **paste all `TARGET:` lines** under `## Directorios exportados`; mention `REGISTRY=` path |
 | `1` | Show stderr; fix manifest/files |
 | `2` | Ask for `PROJECTS_BASE`; do not proceed until answered |
+| `4` | Lock timeout: another export of the same bundle is still running. Nothing was written. Never delete a lock file to get past it |
 | `3` | Drift: read `## EXPORT_DRIFT`, diff each file, and report improvement / intentional divergence / stale copy. Never re-run with `--accept-drift` on your own initiative |
 
 ---

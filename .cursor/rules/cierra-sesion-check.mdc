@@ -35,6 +35,13 @@ salir»: se preguntan (commitear sin push / commitear y push / dejarlos). Elegir
 diálogo es la orden explícita que exigen las reglas globales, limitada a esos ficheros; nunca
 `git add -A` en el árbol compartido.
 
+Excepción declarada por el proyecto: si `CLAUDE.md` o una regla del proyecto lleva la línea literal
+`session-close: publish-own-work` **en un fichero versionado y en `HEAD`**, el trabajo propio **verificado**
+se registra sin preguntar en la rama de la sesión, siguiendo el flujo que esa regla describe (si no lo
+describe, se vuelve al diálogo), y solo lo no verificado se pregunta. Sin la línea, la política es `ask`.
+No se infiere de la prosa; el skill nunca escribe esa línea; y nunca hace merge a la principal ni deploy.
+Un worktree enlazado es solo presunción débil de que lo sucio es propio.
+
 ## Límites
 
 - **Solo informa.** No arregla pendientes, no commitea, no pushea, no archiva changes, salvo lo que el desarrollador elija en el diálogo.
@@ -42,3 +49,4 @@ diálogo es la orden explícita que exigen las reglas globales, limitada a esos 
 - **No recapitula** lo hecho en la sesión, ni pega logs, tablas ni rutas largas.
 - Lo no verificado se dice como no verificado, nunca se da por bueno.
 - Una duda real se pregunta, no se resuelve adivinando ni se entierra en el veredicto.
+- `publish-own-work` solo con la línea literal versionada en `HEAD`, solo para lo verificado, solo hasta el push de la rama de la sesión.

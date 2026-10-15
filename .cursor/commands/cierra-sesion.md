@@ -16,7 +16,7 @@ El objetivo es que lo sepa **leyendo 5 líneas**, sin abrir archivos, sin leer l
 
 1. Leer y seguir **`.cursor/skills/cierra-sesion/SKILL.md`**.
 2. Recoger señales reales (git, OpenSpec, procesos en segundo plano, hilo de la conversación) **antes** de responder. Nada de veredicto por intuición.
-3. Si queda una **duda que solo el desarrollador puede resolver**, abrir un diálogo de preguntas (`AskUserQuestion` en Claude Code, AskQuestion en Cursor) **antes** de dar el veredicto — nunca adivinar ni dar por cerrado lo dudoso. Los cambios de esta sesión sin commitear son siempre una de esas dudas.
+3. Si queda una **duda que solo el desarrollador puede resolver**, abrir un diálogo de preguntas (`AskUserQuestion` en Claude Code, AskQuestion en Cursor) **antes** de dar el veredicto — nunca adivinar ni dar por cerrado lo dudoso. Los cambios de esta sesión sin commitear son una de esas dudas, salvo que el proyecto declare `session-close: publish-own-work` en un fichero versionado y commiteado (ver la skill): entonces lo verificado se registra en la rama de la sesión según el flujo que esa regla describe, solo lo no verificado se pregunta, y nunca hay merge a la principal ni deploy.
 4. Responder con el formato de salida de abajo. Sin tablas, sin volcados, sin recapitular lo ya hecho.
 
 ## Qué se revisa
@@ -31,6 +31,7 @@ El objetivo es que lo sepa **leyendo 5 líneas**, sin abrir archivos, sin leer l
 | Entregable prometido | Informe, captura o artefacto anunciado y no entregado |
 | Pregunta sin responder | Decisión que se le pidió al desarrollador y sigue abierta |
 | Nota de conocimiento | Si el trabajo fue sustantivo y falta en el vault de Obsidian, se escribe antes del veredicto sin preguntar; nunca se lista como opcional |
+| Política de publicación | Línea literal `session-close: publish-own-work` en `CLAUDE.md` o en una regla del proyecto, **versionada y presente en `HEAD`**; sin ella, `ask`. El skill nunca la escribe. Un worktree enlazado (`git rev-parse --git-common-dir` ≠ `.git`) solo es presunción débil de que lo sucio es propio |
 
 ## Formato de salida (máx. 10 líneas)
 
@@ -46,7 +47,7 @@ Si el estado de algo **no se puede determinar leyendo el repo ni el hilo**, no s
 
 - No está claro si algo que pidió a medio camino sigue en pie o lo descartó.
 - Hay trabajo a medias y no se sabe si quiere terminarlo ahora o dejarlo para mañana.
-- Hay cambios de esta sesión sin commitear y nunca pidió subirlos: se pregunta con tres opciones (commitear sin push, commitear y push, dejarlos). Elegir una de las dos primeras es la orden explícita de commit/push, solo para esos ficheros; nunca `git add -A` en el árbol compartido.
+- Bajo `ask` (sin la línea declarada): hay cambios de esta sesión sin commitear y nunca pidió subirlos: se pregunta con tres opciones (commitear sin push, commitear y push, dejarlos). Elegir una de las dos primeras es la orden explícita de commit/push, solo para esos ficheros; nunca `git add -A` en el árbol compartido.
 - El alcance de lo pedido admite dos lecturas y de ello depende si queda pendiente o no.
 
 **No se pregunta** lo que el agente puede comprobar por sí mismo (ejecutar los tests, mirar `git status`, leer `tasks.md`): eso se comprueba. Una vez respondido el diálogo, se ejecuta lo elegido, se comprueba y se da el veredicto incorporando la respuesta, sin volver a preguntar.
@@ -58,7 +59,8 @@ Si el estado de algo **no se puede determinar leyendo el repo ni el hilo**, no s
 ## Prohibido
 
 - Resumir lo que ya se hizo en la sesión: solo importa lo que queda.
-- Listar cambios sin commitear como bloqueo cuando el desarrollador nunca pidió commitear — se le pregunta en el diálogo, no se le bloquea ni se le despacha con «por si quieres subirlos».
+- Listar cambios sin commitear como bloqueo cuando el desarrollador nunca pidió commitear — bajo `ask` se le pregunta en el diálogo, no se le bloquea ni se le despacha con «por si quieres subirlos».
+- Tratar un proyecto como `publish-own-work` sin la línea literal versionada en `HEAD`; escribir esa línea; registrar bajo ella trabajo no verificado; o pasar de la rama de la sesión (merge a la principal, deploy).
 - Commitear, pushear, arreglar o cerrar nada por iniciativa propia: este comando **solo informa**, salvo lo que el desarrollador elija en el diálogo.
 - Dar un veredicto «todo cerrado» cuando hay una duda real sin resolver: primero el diálogo, después el veredicto.
 - Abrir diálogo para cosas comprobables por el agente, o encadenar varios diálogos seguidos.

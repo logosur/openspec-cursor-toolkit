@@ -126,6 +126,8 @@ Drift makes the script exit **3** and list every case under `## EXPORT_DRIFT`. T
 3. The edit is stale or wrong → re-run with `--accept-drift` (or `--force`), which discards it and says so per file.
 
 `--check-drift` reports drift and writes nothing (implies `--dry-run`): use it before a wide export to see what you would overwrite.
+`--check-drift` y `--dry-run` no escriben nada, y su informe lo dice: `Done (plan only, nothing written)`, `WRITES_PERFORMED=0` y contadores `WOULD_FILES_NEW` / `WOULD_FILES_UPDATED` / `WOULD_PROJECTS_TOUCH`. Nunca leer un log de auditoría como prueba de despliegue: solo una pasada real emite `FILES_NEW` / `FILES_UPDATED`.
+
 
 ## Workflow (summary)
 

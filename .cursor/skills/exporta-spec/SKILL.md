@@ -198,6 +198,8 @@ Classification per file: `new`, `unchanged`, `updated` (differs from bundle but 
 On drift, the agent **must** diff the project file against the bundle and report which of the three it is — improvement to port upstream, intentional divergence to declare in `bundle.exclude`, or stale copy to discard with `--accept-drift`. Reporting "exit 3" without that reading is not a result.
 
 `--check-drift` audits without writing (implies `--dry-run`). Run it before any `--all` export.
+`--check-drift` y `--dry-run` no escriben nada, y su informe lo dice: `Done (plan only, nothing written)`, `WRITES_PERFORMED=0` y contadores `WOULD_FILES_NEW` / `WOULD_FILES_UPDATED` / `WOULD_PROJECTS_TOUCH`. Nunca leer un log de auditoría como prueba de despliegue: solo una pasada real emite `FILES_NEW` / `FILES_UPDATED`.
+
 
 ### Excluding a project by hand (when there is no other way)
 

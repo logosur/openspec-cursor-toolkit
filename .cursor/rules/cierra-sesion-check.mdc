@@ -1,9 +1,9 @@
 ---
-description: "Cierre de sesión — /cierra-sesion responde en lenguaje natural y en pocas líneas si queda algo pendiente. Triggers: queda algo pendiente, puedo cerrar la sesión, está todo terminado, me voy queda algo, cierre de sesión."
+description: "Cierre de sesión — /cierra-sesion abre un único diálogo con casillas que explica qué queda pendiente de esta sesión y de otras (con dueña o huérfano). Triggers: queda algo pendiente, puedo cerrar la sesión, está todo terminado, me voy queda algo, cierre de sesión."
 alwaysApply: false
 ---
 
-# Cierra sesión — veredicto de cierre (lenguaje natural)
+# Cierra sesión — un diálogo con casillas (lenguaje natural)
 
 Carga con `/cierra-sesion [detalle]` o con las frases de disparo. Ejecuta
 **`.cursor/skills/cierra-sesion/SKILL.md`**; esta regla solo fija los triggers y los límites.
@@ -16,37 +16,46 @@ Carga con `/cierra-sesion [detalle]` o con las frases de disparo. Ejecuta
 | ES | `¿queda algo pendiente?`, `¿puedo cerrar la sesión?`, `¿está todo terminado?`, `me voy, ¿queda algo?`, `cierra la sesión`, `dame el cierre` |
 | EN | `anything left?`, `can I close this session?`, `is everything done?`, `session close check` |
 
-## Contrato de respuesta
+## Contrato
 
-1. Primera línea: veredicto («Sí, puedes cerrar» / «No: quedan N cosas»).
-2. Hasta 5 viñetas de una línea, lenguaje llano, solo lo que falta.
-3. Última línea: la acción concreta que lo cierra.
-4. Máximo 10 líneas sin el argumento `detalle`.
+El resultado es **un único diálogo** (`AskUserQuestion`, una sola llamada, hasta 4 preguntas, **todas de
+selección múltiple**) que **explica** lo pendiente y deja marcar casillas. El diálogo es el informe: no se
+escribe antes un listado que lo repita. Cuatro bloques; los vacíos no se preguntan:
+
+1. **Esta sesión**: lo que falta de esta sesión. Casillas: commit de los ficheros propios, push, deploy
+   (nunca recomendado), terminar lo que falta.
+2. **Con dueña**: pendientes ajenos con sesión viva (nombre y estado). No se tocan. Casilla: avisar a cada
+   dueña (solo mismo proyecto; el aviso no autoriza commit, push, merge ni deploy).
+3. **Huérfanos**: lo que ninguna sesión viva tiene. Casillas: cerrar los worktrees huérfanos limpios,
+   retomar uno con trabajo (solo lectura), revisar stashes.
+4. **Al terminar**: cerrar el worktree de esta sesión y/o archivarla.
+
+**La interfaz enseña una pregunta cada vez**, así que el texto de **todas** las preguntas abre con el mismo
+resumen de tres líneas, siempre las tres y en frases llanas: `De esta sesión:`, `De otras sesiones:` (con
+dueña viva) y `Huérfano, sin sesión:` («Nada.» si no hay nada; nunca se omite una línea porque ese bloque
+no tenga casillas). Sin ese resumen no se puede decidir qué es de quién. Máximo 4 opciones por pregunta (lo que sobra se agrupa). No hay casillas preseleccionadas: lo recomendado va
+primero con «(Recomendada)» y **solo se ejecuta lo marcado**. La propiedad sale del censo
+`session-owners.py`, nunca de una suposición. Informe final de máx. 10 líneas: veredicto, hecho, lo que sigue
+pendiente y la orden que lo cierra. Marcar una casilla es la orden explícita que exigen las reglas globales,
+limitada a los ficheros de esta sesión; nunca `git add -A` en el árbol compartido.
+
+Excepción declarada por el proyecto: si `CLAUDE.md` o una regla del proyecto lleva la línea literal
+`session-close: publish-own-work` **en un fichero versionado y en `HEAD`**, commit y push del trabajo propio
+**verificado** no se ofrecen, se ejecutan y se dicen. Sin la línea, la política es `ask`. El skill nunca
+escribe esa línea ni hace merge a la principal o deploy sin que se marque.
 
 ## Dudas
 
-Si algo solo lo sabe el desarrollador (si una petición a medias sigue en pie, si quiere terminar el
-trabajo empezado, si sube o no los cambios sin commitear), **se abre diálogo de preguntas antes del
-veredicto**, con opciones en lenguaje natural y bien explicadas. Una sola tanda. Nunca se pregunta
-lo que el agente puede comprobar por sí mismo.
-
-Los cambios de **esta sesión** sin commitear no se despachan con «por si quieres subirlos antes de
-salir»: se preguntan (commitear sin push / commitear y push / dejarlos). Elegir commit o push en el
-diálogo es la orden explícita que exigen las reglas globales, limitada a esos ficheros; nunca
-`git add -A` en el árbol compartido.
-
-Excepción declarada por el proyecto: si `CLAUDE.md` o una regla del proyecto lleva la línea literal
-`session-close: publish-own-work` **en un fichero versionado y en `HEAD`**, el trabajo propio **verificado**
-se registra sin preguntar en la rama de la sesión, siguiendo el flujo que esa regla describe (si no lo
-describe, se vuelve al diálogo), y solo lo no verificado se pregunta. Sin la línea, la política es `ask`.
-No se infiere de la prosa; el skill nunca escribe esa línea; y nunca hace merge a la principal ni deploy.
-Un worktree enlazado es solo presunción débil de que lo sucio es propio.
+Si algo solo lo sabe el desarrollador (si una petición a medias sigue en pie), se explica en el texto de la
+pregunta del bloque y se contesta en «Otro». Nunca se pregunta lo que el agente puede comprobar por sí mismo.
 
 ## Límites
 
-- **Solo informa.** No arregla pendientes, no commitea, no pushea, no archiva changes, salvo lo que el desarrollador elija en el diálogo.
-- **No inventa** pendientes: cada viñeta nace de una señal comprobada (git, OpenSpec, tests, hilo de la conversación).
+- **Lo de otras sesiones no se toca.** Con dueña solo se avisa; de un huérfano solo se hace lo que dice una
+  casilla marcada (cerrarlo si está limpio, retomarlo en solo lectura, revisar sus stashes). Fusionarlo,
+  commitear sus cambios o borrar lo no fusionado pide una orden aparte, por nombre. Nunca se cierra otra sesión.
+- **No inventa** pendientes ni propietarias: cada opción nace de una señal comprobada (git, OpenSpec, tests,
+  hilo de la conversación, censo de sesiones vivas).
 - **No recapitula** lo hecho en la sesión, ni pega logs, tablas ni rutas largas.
 - Lo no verificado se dice como no verificado, nunca se da por bueno.
-- Una duda real se pregunta, no se resuelve adivinando ni se entierra en el veredicto.
-- `publish-own-work` solo con la línea literal versionada en `HEAD`, solo para lo verificado, solo hasta el push de la rama de la sesión.
+- Sin casillas marcadas, no hay commit, push, deploy ni cierre; el deploy nunca se recomienda.

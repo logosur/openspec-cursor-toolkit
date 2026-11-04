@@ -50,7 +50,6 @@ Claude Code solo carga este archivo y `.claude/rules/*.md`; `.cursor/rules/*.mdc
 | Gap analysis / GAPS.md | `openspec-gap-analysis.mdc` |
 | Pipeline `/repasa-spec` | `repasa-spec-openspec-pipeline.mdc` |
 | Loop `/run-spec` | `run-spec-openspec-loop.mdc` |
-| Supervisor multi-sesión | `supervisa-sesiones-multisesion.mdc` |
 | `/verifica-tarea`, `/comando-verificar` | `verifica-tarea-openspec-a-fondo.mdc`, `comando-verificar-a-fondo.mdc` |
 | `/qa`, `/html` | `comando-qa.mdc`, `comando-html.mdc` |
 | `/exporta-spec` | `comando-exporta-spec.mdc` |

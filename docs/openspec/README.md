@@ -103,6 +103,25 @@ The lean mode, which the skills now recommend as the default:
    per-model one binds, and the orchestrator session draws on it too.
 7. **Parallel fan-out is an opt-in**, for tasks that share no files and when
    the budget has room. Say so in the plan when you choose it.
+8. **Two findings with one cause stop the fixes.** Give every finding a
+   root-cause class: who reads input, who owns child processes, who may
+   draw, and so on. When a second finding lands in a class, stop fixing
+   them one at a time. Design the one owner of that concern, then fix
+   the findings through it. Specs describe behaviour, so each finding
+   reads as a new scenario and passes its own tests, while the shared
+   cause stays. In the same project, about ten findings over two weeks
+   were one cause: input read outside the main loop. Each was fixed and
+   verified on its own, and the redesign that removed them came last.
+9. **An invariant you rely on is a test.** If the design says "only X does
+   Y", add a check to the normal test run that fails when anything else
+   does Y. Keep a counted allow list of the places that still break it,
+   each naming the pass that removes it, so the list can only shrink.
+   Without that check, the verifier tests each pass against its own
+   brief, and nobody tests the pattern.
+10. **An out-of-scope line carries its revisit trigger.** "Out of scope"
+    in a design says when to look again, for example "when a finding
+    touches it". The cause above had been scoped out of an earlier design,
+    and nobody went back to it as the findings arrived.
 
 The one multi-agent step that earns its cost is the **fresh-context
 supervisor** (`/harness-spec`, phase 4): in the same week it caught three

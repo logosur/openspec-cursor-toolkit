@@ -68,3 +68,20 @@ why that proof was impossible.
 #### Scenario: Prohibitions of harness-spec
 - **WHEN** an operator reads the prohibitions
 - **THEN** a test never seen failing is listed beside the existing prohibition against loosening an assertion
+
+### Requirement: A shared cause stops the per-finding fixes
+
+`openspec-gap-analysis` SHALL give each FACT gap a root-cause class and SHALL
+report two or more gaps or past findings in one class as a single
+ARCHITECTURE row, naming the broken invariant, an owner design and a check
+that fails when the invariant breaks. The operator notes SHALL say that an
+invariant the design relies on is enforced by such a check, and that an
+out-of-scope line in a design names when to revisit it.
+
+#### Scenario: Two findings with one cause
+- **WHEN** a gap analysis finds a gap whose cause matches a finding already fixed in the change
+- **THEN** GAPS.md carries one ARCHITECTURE row listing both, the invariant and the proposed owner with its check, instead of two independent REQ proposals
+
+#### Scenario: Operator notes on shared causes
+- **WHEN** an operator opens `docs/openspec/README.md`
+- **THEN** the lean-mode rules include stopping per-finding fixes at the second finding of a class, enforcing invariants with a check in the normal test run, and giving each out-of-scope line a revisit trigger

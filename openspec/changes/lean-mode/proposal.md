@@ -24,12 +24,17 @@ about 32% to 12 to 15%.
 ## What Changes
 
 - `docs/openspec/README.md`: a section "Budget and the lean mode" with the
-  measured costs, the three usage counters, and seven operating rules.
+  measured costs, the three usage counters, and ten operating rules. The
+  last three came from a second measurement: about ten findings fixed one
+  at a time over two weeks shared one cause that an earlier design had
+  scoped out, and no check enforced the invariant.
 - `multiagente` (both toolkits): serial delegation with a context packet is
   the default; parallel fan-out is an explicit opt-in; the delegate never
   commits or pushes.
 - `openspec-gap-analysis` (both toolkits): the mandatory multi-agent line
-  becomes the lean form by default.
+  becomes the lean form by default; each FACT gap gets a root-cause class,
+  and two or more in one class become one ARCHITECTURE row with an owner
+  design and a check.
 - `harness-spec` (both toolkits): the supervisor is scoped by default to the
   layers the change touched; two new prohibitions, a scenario counted as
   covered by a test never seen failing, and a delegate that commits.

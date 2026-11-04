@@ -228,6 +228,8 @@ For each candidate:
 2. **FACT** only with `path:line` or command output in Evidence column.
 3. Increment gap IDs (`G-01`, `G-02`, …) — do not reuse IDs for different gaps.
 4. If FACT and missing from spec → note proposed REQ id in **Req** column as `(proposed REQ-XX-NN)` — **do not edit spec.md** in this skill unless user explicitly asks hydrate in same message.
+5. Name the **root-cause class** of each FACT gap in its Notes (the concern it breaks: who reads input, who owns child processes, who may draw, who mutates a buffer...). Compare with the findings already fixed in this change or recorded in earlier GAPS files.
+6. When **two or more** FACT gaps or past findings share a class, add one row with taxonomy **ARCHITECTURE**: the invariant that is broken, every gap and finding in the class, and a proposed owner design with a check that fails when the invariant breaks. Those gaps are then fixed through that owner, not one by one. Read the change's design first: if it scoped this concern out, quote that line in the row.
 
 Update the iteration table after each iter with **honest** outcome (including "0 FACT gaps").
 

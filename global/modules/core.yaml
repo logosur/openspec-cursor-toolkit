@@ -12,6 +12,7 @@ optional:
     pgrep: process-kill-gate evaluates kill patterns with it (procps)
     ddev: worktree placement inside DDEV projects
 files:
+  - {src: global/CLAUDE.md, dest: CLAUDE.md, merge: block}
   - {src: global/scripts/lib/toolkit_config.py, dest: scripts/lib/toolkit_config.py, mode: "0755"}
   - {src: global/hooks/commit-authorship-gate, dest: hooks/commit-authorship-gate, mode: "0755"}
   - {src: global/hooks/process-kill-gate, dest: hooks/process-kill-gate, mode: "0755"}

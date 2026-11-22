@@ -2,9 +2,9 @@ Claude Code solo carga este archivo y `.claude/rules/*.md`; `.cursor/rules/*.mdc
 
 # openspec-cursor-toolkit
 
-**Qué es:** fuente de verdad del toolkit OpenSpec (commands, skills, rules, `docs/openspec/`) que se **exporta** a proyectos consumidores. Stack-agnostic: el consumidor aporta su rule de stack (`01-project-stack-quality-gate.mdc` o su `CLAUDE.md`).
+**Qué es:** toolkit **global de Claude Code** (repo público): se instala una vez por máquina en `~/.claude` con `./install.sh install` (módulos `openspec`, `core`, `devtools`) y se personaliza con un **override privado fuera del repo** (`~/.config/claude-toolkit/`). Incluye el catálogo OpenSpec (commands, skills, `docs/openspec/`), que además se sigue **exportando** por proyecto; Cursor (`.cursor/`) es destino secundario. Stack-agnostic: el consumidor aporta su rule de stack (`01-project-stack-quality-gate.mdc` o su `CLAUDE.md`).
 
-**Qué NO es:** no es app; no contiene `openspec/` de producto, solo sus propios changes (`openspec/changes/<slug>/`). Se cambia la fuente y se exporta; no se parchea por proyecto.
+**Qué NO es:** no es app; no contiene `openspec/` de producto, solo sus propios changes (`openspec/changes/<slug>/`). Se cambia la fuente y se instala o exporta; no se parchea por proyecto ni por máquina (lo personal va al override).
 
 ## Export
 
@@ -21,7 +21,10 @@ Claude Code solo carga este archivo y `.claude/rules/*.md`; `.cursor/rules/*.mdc
 - `.claude/{commands,skills/*/SKILL.md}` espejo nativo Claude Code; rules `.mdc` plegadas en `SKILL.md`.
 - `.{cursor,claude}/scripts/openspec-list.sh` listado de changes.
 - `docs/openspec/` índice, prompts, templates; compartido.
-- `scripts/` validador del catálogo, sus tests y excepciones declaradas; herramienta de este repo, no se exporta.
+- `install.sh` + `scripts/toolkit/` instalador (install, uninstall, status, verify, drift, pull, equivalence) y sus tests (`scripts/toolkit/tests/`, siempre en un `HOME` temporal).
+- `global/` lo que instalan los módulos que no es catálogo: `modules/*.yaml` (manifiestos), `hooks/`, `scripts/` (+ `lib/toolkit_config.py`), `rules/`, `skills/`, `CLAUDE.md` (bloque gestionado), `config/<pieza>.json` (valores por defecto), `settings/hooks.*.json` (fragmentos de hooks) y `contracts/<pieza>.yaml` (sondas).
+- `examples/override/` override de ejemplo; el real nunca entra en el repo.
+- `scripts/` validador del catálogo, comprobador de privacidad (`privacy-check.py`, patrones y excepciones), sus tests; herramienta de este repo, no se instala ni se exporta.
 - `.{cursor,claude}/context/` salida de sesión, gitignored.
 
 ## Invariantes
@@ -34,6 +37,12 @@ Claude Code solo carga este archivo y `.claude/rules/*.md`; `.cursor/rules/*.mdc
 - Routing: skill invocable → `description` con qué + cuándo (`Use when`/`Use on`/`Auto-invoke on`/`Triggers on`), frases sacadas del repo, ≤ 1024 car., sin colisión TF-IDF ≥ 0.50. Duplicado → alias obsoleto (`Deprecated alias of <canónica>`, `disable-model-invocation: true`), nunca borrar.
 - Antes de cerrar un cambio del catálogo: `python3 -m unittest scripts/test_validate_toolkit.py && python3 scripts/validate-toolkit.py` (CI lo repite en cada push/PR). Detalle en `README.md` → «Validate the catalog».
 - Nunca hardcodear host/puerto/comandos ajenos.
+- **Dos fuentes, ninguna copia:** el catálogo vive solo en `.claude/` (el módulo `openspec` lo instala desde ahí) y lo demás en `global/`. La paridad compara `.claude/` ↔ `.cursor/`; `global/` no entra en ella.
+- **Cada fichero de `global/` pertenece a un solo módulo**; todo hook instalado tiene contrato en `global/contracts/`; una pieza solo cita lo que instala su módulo o sus dependencias (lo comprueba el validador, reglas `global-*`).
+- **Nada de una máquina concreta en `global/`:** rutas, hosts, proyectos y listas van a una pieza de config (`global/config/<pieza>.json`, leída con `toolkit_config.load`) con valor por defecto genérico; el valor real, al override. Un hook con la config rota falla abierto.
+- **Privacidad antes de cada commit:** `python3 scripts/privacy-check.py --staged --require-private` y `--message <fichero>` en 0; nada personal (IPs, correos, UUID de cuentas, rutas de home, nombres de proyectos o clientes, citas literales) entra en el repo. Ante la duda, al override.
+- **Las piezas solo se ejecutan en un `HOME` temporal** (`verify`, tests, `equivalence`); el `~/.claude` real solo se lee.
+- Antes de cerrar un cambio del instalador o de `global/`: `python3 -m unittest discover -s scripts/toolkit/tests -t .` además de las pruebas del catálogo.
 - Prohibido: `git commit/push/merge` sin orden; commitear registros export; cerrar apply/verify sin evidencia; aflojar aserciones E2E; deploy sin diálogo (`run-spec` para en gate).
 - Fases `repasa-spec`/`run-spec` secuenciales, nunca paralelas. Gate se lee de disco (`GAPS.md`, `tasks.md`), no de lo que afirme un agente.
 

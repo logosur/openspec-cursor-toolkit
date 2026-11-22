@@ -1,0 +1,3 @@
+#!/bin/sh
+# Example personal piece installed by the override; the hook in hooks/personal.json runs it.
+exit 0

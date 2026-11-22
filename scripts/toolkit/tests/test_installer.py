@@ -199,6 +199,17 @@ class OverrideLayer(Sandbox):
         cmds = [h['command'] for e in self.settings()['hooks']['PreToolUse'] for h in e['hooks']]
         self.assertFalse(any('process-kill-gate' in c for c in cmds))
 
+    def test_example_override_installs(self):
+        self.override = REPO_ROOT / 'examples/override'
+        code, out = self.run_cli('install', override=True)
+        self.assertEqual(code, 0, out)
+        self.assertTrue((self.target / 'rules/my-team-conventions.md').is_file())
+        self.assertIn('Local addition', (self.target / 'rules/worktrees-ubicacion.md').read_text())
+        cfg = json.loads((self.target / 'toolkit/config/worktree-location.json').read_text())
+        self.assertEqual(cfg, {'root': '~/code/worktrees'})
+        cmds = [h['command'] for e in self.settings()['hooks'].get('Stop', []) for h in e['hooks']]
+        self.assertTrue(any('my-stop-notifier' in c for c in cmds), cmds)
+
     def test_symlink_in_override_is_refused(self):
         self.override.mkdir()
         (self.override / 'files').mkdir()

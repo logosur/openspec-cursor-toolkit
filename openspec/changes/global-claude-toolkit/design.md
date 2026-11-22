@@ -145,6 +145,19 @@ Third-party skills and plugins (listed in README as optional), skills of client 
 - **Scope of `core`:** evaluated piece by piece, not by excluding everything near supervision; the start-session gates, the duplicate-chip gate and the question-queue CLI are autonomous and tested, so they are candidates.
 - **Order:** a vertical slice first (installer, override, hook merge, equivalence, with `openspec` and two or three autonomous pieces), then `core` grows.
 
+## Changes during implementation
+
+- **A third module, `devtools`** (port-lease, test-account and their rules), split from `core` so `core`
+  stays the guard rails only (SRP); it depends on `core` for the config helper. Default modules:
+  `openspec, core, devtools`, defined once in `scripts/toolkit/modules.py`.
+- **Override files the toolkit already provides** are kept in the override only when they differ from
+  the toolkit and are not an earlier version of it; the rest moved to the override's `archive/`. An
+  install therefore reproduces the live dir exactly (evidence/equivalence.md) and reconciling the 43
+  differing files is left to `drift`/`pull`, file by file.
+- **Probes take raw stdin** (`stdin_raw`), so a contract can test unparseable input. A probe found that
+  the authorship gate exits 1 on valid JSON that is not an object; the gate is edited only by its
+  owner by hand, so it is recorded (core-scope.md) and not changed.
+
 ## SOLID
 
 | Principle | How the toolkit meets it | Where it is violated today (audit) and the fix |

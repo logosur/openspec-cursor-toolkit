@@ -1,6 +1,6 @@
 ---
 name: 40-openspec-safe-apply
-description: Safe APPLY phase for OpenSpec — gates, scope control, and evidence-backed completion
+description: "Keeps the APPLY step of an OpenSpec change inside its scope: it starts only after VERIFY returns READY TO APPLY, allows no drive-by refactors or weakened tests, stops when code contradicts the spec, and closes only with passing checks or recorded deferrals. Use when implementing an approved change or deciding whether an apply is complete (apply seguro, scope, evidencia)."
 ---
 
 Use this rule during the **APPLY** step of OpenSpec (after VERIFY returns **READY TO APPLY**).

@@ -1,0 +1,858 @@
+#!/usr/bin/env python3
+"""PreToolUse(Bash): a session's pkill/killall/kill can only reach its own processes.
+
+Why: `pkill -f` matches the command line of every process of the user. A pattern meant for a
+session's own wait loop (say "monitor") also matches desktop-session monitors, file-system volume
+monitors, browser and app crash handlers and processes inside containers that run with the user's
+uid on the host. Killing those can end the whole desktop session, with every app and agent session
+in it, or stop a shared development router.
+
+What it does, at hook time, before the command runs:
+- Pattern kills are evaluated against the live process table: `pkill` (translated to `pgrep` with the
+  same selection options), `killall` (by name, `-r` regex, `-u` user), `kill $(…)` / backticks and
+  `… | xargs kill` when the PID producer only uses read-only commands (ps, pgrep, pidof, grep, awk, cut,
+  head, tail, sed without -i, sort, uniq, tr, cat, lsof -t, fuser without -k), and `fuser -k`.
+  If any matched process of our uid is not this session's own, the call is denied with the list.
+- Own = descendants of this session's `claude` process, plus processes that were reparented but still
+  carry this session's CLAUDE_CODE_SESSION_ID in their environment (background servers, setsid/nohup).
+  The session's own `claude` process is never "own": killing it kills the session.
+- Explicit PIDs pass (the agent named them), except `-1` as a target (every process of the user) and
+  critical processes: the desktop session, the Claude app, other Claude sessions and Docker containers.
+
+What it does not cover: patterns built from variables (`pkill -f "$PAT"`, `kill $p` in a loop) cannot be
+evaluated and pass (logged as `unevaluated`); commands run through ddev/docker/ssh/adb run elsewhere and
+are skipped; scripts that call pkill internally are not seen. Processes that start between the hook and
+the command are not seen either.
+
+Plain deny, no dialog: the remedy is in the agent's hands (kill by PID, or a unique marker). It fails
+open: any error is logged to errors.log and the command goes ahead.
+Log: ~/.claude/state/process-kill-gate/decisions.log. Self-test: `process-kill-gate --self-test`.
+Rule: ~/.claude/rules/matar-procesos-solo-propios.md.
+"""
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+import traceback
+
+STATE_DIR = os.environ.get('PROCESS_KILL_GATE_STATE') or os.path.expanduser('~/.claude/state/process-kill-gate')
+UID = os.getuid()
+PREFILTER = re.compile(r'\b(pkill|killall|kill|fuser)\b')
+
+HEREDOC = re.compile(r"(?m)^([^\n]*?)<<-?\s*(['\"]?)(\w+)\2[^\n]*\n(.*?)^\s*\3\s*$", re.S)
+SHELLS = re.compile(r"(?<![\w.-])(bash|sh|zsh|dash|ssh|sudo|su|docker|systemd-run)(?![\w.-])")
+
+# Words that only prefix the real command.
+PREFIXES = {'sudo', 'nohup', 'command', 'exec', 'time', 'then', 'do', 'else', 'elif', '{', '(', '!', 'if',
+            'while', 'until', 'builtin'}
+PREFIX_WITH_ARGS = {'timeout', 'nice', 'ionice', 'setsid', 'stdbuf', 'env'}
+# The rest of the simple command runs in another machine, container or device.
+ELSEWHERE = {'ddev', 'docker', 'podman', 'ssh', 'kubectl', 'adb', 'vagrant', 'lando', 'distrobox',
+             'toolbox', 'flatpak-spawn'}
+SHELL_C = {'bash', 'sh', 'zsh', 'dash'}
+# Commands allowed in a PID producer we run ourselves at hook time (all read-only).
+PRODUCERS = {'ps', 'pgrep', 'pidof', 'grep', 'egrep', 'fgrep', 'awk', 'gawk', 'mawk', 'cut', 'head', 'tail',
+             'sed', 'sort', 'uniq', 'tr', 'cat', 'lsof', 'fuser', 'echo'}
+SIGNAL_NAMES = {'hup', 'int', 'quit', 'ill', 'trap', 'abrt', 'bus', 'fpe', 'kill', 'usr1', 'segv', 'usr2',
+                'pipe', 'alrm', 'term', 'stkflt', 'chld', 'cont', 'stop', 'tstp', 'ttin', 'ttou', 'urg',
+                'xcpu', 'xfsz', 'vtalrm', 'prof', 'winch', 'io', 'pwr', 'sys'}
+
+
+def is_signal_arg(a):
+    """`-9`, `-KILL`, `-SIGTERM`, `-term`, `-RTMIN+1`: a signal given as an option."""
+    if not a.startswith('-') or len(a) < 2 or a.startswith('--'):
+        return False
+    name = a[1:]
+    if name.isdigit():
+        return True
+    low = name.lower()
+    low = low[3:] if low.startswith('sig') else low
+    return low in SIGNAL_NAMES or bool(re.match(r'^rtm(in|ax)([+-]\d+)?$', low))
+
+
+def now_iso():
+    return time.strftime('%Y-%m-%dT%H:%M:%S')
+
+
+def append(name, line):
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(os.path.join(STATE_DIR, name), 'a') as fh:
+            fh.write(line.replace('\n', ' ') + '\n')
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------- process table
+
+def read(path, binary=False):
+    try:
+        with open(path, 'rb' if binary else 'r', errors=None if binary else 'replace') as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+class Proc:
+    __slots__ = ('pid', 'ppid', 'uid', 'comm', 'cmdline', 'cgroup', 'session')
+
+    def __init__(self, pid):
+        self.pid = pid
+        stat = read('/proc/%d/stat' % pid) or ''
+        rp = stat.rfind(')')
+        self.comm = stat[stat.find('(') + 1:rp] if rp > 0 else ''
+        rest = stat[rp + 2:].split() if rp > 0 else []
+        self.ppid = int(rest[1]) if len(rest) > 1 else 0
+        status = read('/proc/%d/status' % pid) or ''
+        m = re.search(r'^Uid:\s+(\d+)', status, re.M)
+        self.uid = int(m.group(1)) if m else -1
+        raw = read('/proc/%d/cmdline' % pid, binary=True) or b''
+        self.cmdline = raw.replace(b'\0', b' ').decode('utf-8', 'replace').strip() or '[%s]' % self.comm
+        self.cgroup = read('/proc/%d/cgroup' % pid) or ''
+        self.session = None
+        if self.uid == UID:
+            env = read('/proc/%d/environ' % pid, binary=True) or b''
+            m = re.search(rb'(?:^|\0)CLAUDE_CODE_SESSION_ID=([^\0]*)', env)
+            if m:
+                self.session = m.group(1).decode('ascii', 'replace')
+
+
+def proc_table():
+    table = {}
+    for name in os.listdir('/proc'):
+        if name.isdigit():
+            p = Proc(int(name))
+            if p.comm:
+                table[p.pid] = p
+    return table
+
+
+def find_claude_root(table, start):
+    """Nearest ancestor of `start` that is a `claude` CLI process."""
+    pid, seen = start, set()
+    while pid and pid not in seen:
+        seen.add(pid)
+        p = table.get(pid)
+        if not p:
+            break
+        if p.comm == 'claude':
+            return pid
+        pid = p.ppid
+    env_pid = os.environ.get('CLAUDE_PID', '')
+    return int(env_pid) if env_pid.isdigit() else None
+
+
+def descendants(table, root):
+    children = {}
+    for p in table.values():
+        children.setdefault(p.ppid, []).append(p.pid)
+    out, stack = set(), [root]
+    while stack:
+        for c in children.get(stack.pop(), []):
+            if c not in out:
+                out.add(c)
+                stack.append(c)
+    return out
+
+
+def ancestors(table, pid):
+    out = set()
+    while pid and pid not in out:
+        out.add(pid)
+        p = table.get(pid)
+        pid = p.ppid if p else 0
+    return out
+
+
+def label(p, table):
+    cg, cmd, comm = p.cgroup, p.cmdline, p.comm
+    m = re.search(r'docker-([0-9a-f]{12})', cg)
+    if m:
+        return 'contenedor Docker %s (DDEV o Compose de algún proyecto)' % m.group(1)
+    if re.search(r'gnome-session|gnome-shell|Xorg|Xwayland|gdm|mutter', comm + ' ' + cmd[:120]):
+        return 'sesión de escritorio (matarlo cierra GNOME, la app de Claude con todas sus sesiones y Chrome)'
+    if comm == 'claude':
+        return 'otra sesión de Claude (para pararla, stop_session)'
+    if 'claude-desktop' in cmd[:200] or comm in ('claude-desktop', 'disclaimer'):
+        return 'app de Claude (todas las sesiones)'
+    if comm.startswith('gvfs') or comm.startswith('gsd-') or comm in (
+            'pipewire', 'wireplumber', 'pulseaudio', 'dbus-daemon', 'dbus-broker', 'xdg-desktop-por',
+            'ibus-daemon', 'evolution-sourc', 'tracker-miner-f', 'systemd'):
+        return 'servicio del escritorio'
+    if 'chrome' in comm or '/chrome' in cmd[:200]:
+        return 'Chrome'
+    if p.session:
+        return 'proceso de otra sesión de Claude'
+    for a in ancestors(table, p.ppid):
+        q = table.get(a)
+        if q and q.comm == 'claude':
+            return 'proceso de otra sesión de Claude'
+    return 'proceso ajeno a esta sesión'
+
+
+def critical(p, table, claude_root):
+    """Reason an explicit PID must not be killed, or None."""
+    if p.pid == claude_root:
+        return 'esta misma sesión de Claude'
+    lab = label(p, table)
+    if lab.startswith(('contenedor Docker', 'sesión de escritorio', 'otra sesión de Claude', 'app de Claude',
+                       'servicio del escritorio')):
+        return lab
+    return None
+
+
+# ---------------------------------------------------------------- shell parsing
+
+def strip_data_heredocs(cmd):
+    def repl(m):
+        return m.group(0) if SHELLS.search(m.group(1)) else m.group(1)
+    return HEREDOC.sub(repl, cmd)
+
+
+def split_top(cmd):
+    """Split into pipelines of simple commands on unquoted ; && || & newline and |.
+
+    Returns [[simple, simple, ...], ...]. $(…), backticks and quotes are kept intact.
+    """
+    pipelines, current, buf = [], [], []
+    i, n, quote, depth = 0, len(cmd), None, 0
+
+    def flush_simple():
+        text = ''.join(buf).strip()
+        buf.clear()
+        if text:
+            current.append(text)
+
+    def flush_pipeline():
+        flush_simple()
+        if current:
+            pipelines.append(list(current))
+            current.clear()
+
+    while i < n:
+        c = cmd[i]
+        if quote:
+            buf.append(c)
+            if c == '\\' and quote == '"' and i + 1 < n:
+                buf.append(cmd[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c == '\\' and i + 1 < n:
+            buf.append(cmd[i:i + 2])
+            i += 2
+            continue
+        if c in ('"', "'", '`'):
+            if c == '`':
+                j = cmd.find('`', i + 1)
+                j = n - 1 if j < 0 else j
+                buf.append(cmd[i:j + 1])
+                i = j + 1
+                continue
+            quote = c
+            buf.append(c)
+            i += 1
+            continue
+        if c == '$' and i + 1 < n and cmd[i + 1] == '(':
+            depth += 1
+            buf.append('$(')
+            i += 2
+            continue
+        if depth:
+            if c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+            buf.append(c)
+            i += 1
+            continue
+        if c == '#' and (not buf or buf[-1][-1:].isspace()):
+            j = cmd.find('\n', i)
+            i = n if j < 0 else j
+            continue
+        two = cmd[i:i + 2]
+        if two in ('&&', '||'):
+            flush_pipeline()
+            i += 2
+            continue
+        if c in ';\n':
+            flush_pipeline()
+            i += 1
+            continue
+        if c == '&' and cmd[i + 1:i + 2] != '>' and (not buf or buf[-1][-1:] not in '<>'):
+            flush_pipeline()
+            i += 1
+            continue
+        if c == '|':
+            flush_simple()
+            i += 1
+            continue
+        buf.append(c)
+        i += 1
+    flush_pipeline()
+    return pipelines
+
+
+SUBST = re.compile(r'\$\((?!\()((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)|`([^`]*)`')
+
+
+def tokens_of(simple):
+    """shlex tokens with $(…)/backticks replaced by placeholders; returns (tokens, substitutions)."""
+    subs = []
+
+    def repl(m):
+        subs.append(m.group(1) if m.group(1) is not None else m.group(2))
+        return ' __SUBST%d__ ' % (len(subs) - 1)
+    text = SUBST.sub(repl, simple)
+    try:
+        toks = shlex.split(text, comments=False, posix=True)
+    except ValueError:
+        toks = text.split()
+    return drop_redirections(toks), subs
+
+
+REDIR_FULL = re.compile(r'^(\d*|&)(>>?|<<?<?)(&?\d*-?|\S+)$')
+REDIR_OP = re.compile(r'^(\d*|&)(>>?|<<?<?)&?$')
+
+
+def drop_redirections(toks):
+    """`2>/dev/null`, `> out`, `2>&1`, `&>log` are not arguments."""
+    out, skip = [], False
+    for t in toks:
+        if skip:
+            skip = False
+            continue
+        if REDIR_OP.match(t):
+            skip = True
+            continue
+        if REDIR_FULL.match(t):
+            continue
+        out.append(t)
+    return out
+
+
+def strip_prefixes(toks):
+    """Drop VAR=x assignments and wrapper words; return (tokens, elevated)."""
+    elevated = False
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', t):
+            i += 1
+            continue
+        base = os.path.basename(t)
+        if base in PREFIXES:
+            elevated = elevated or base == 'sudo'
+            i += 1
+            if base == 'sudo':
+                while i < len(toks) and toks[i].startswith('-'):
+                    i += 2 if toks[i] in ('-u', '-g', '-C', '-p') else 1
+            continue
+        if base in PREFIX_WITH_ARGS:
+            i += 1
+            while i < len(toks) and (toks[i].startswith('-') or re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', toks[i])):
+                i += 2 if (base in ('nice', 'ionice', 'timeout') and
+                           toks[i] in ('-n', '-c', '-p', '-s', '-k', '--signal', '--kill-after')) else 1
+            if base == 'timeout' and i < len(toks):
+                i += 1  # duration
+            continue
+        break
+    return toks[i:], elevated
+
+
+def unevaluable(text):
+    return bool(re.search(r'\$[A-Za-z_{$!?@*#0-9]', text))
+
+
+# ---------------------------------------------------------------- evaluation
+
+class Verdict:
+    def __init__(self):
+        self.targets = []      # (raw command, set of pids)
+        self.explicit = []     # explicit pids
+        self.kill_all = False
+        self.elevated = False  # sudo: other users' processes count too
+        self.notes = []        # pieces that could not be evaluated
+
+
+def run(argv, cwd=None, timeout=4):
+    try:
+        out = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
+                             cwd=cwd if cwd and os.path.isdir(cwd) else None)
+        return out.returncode, out.stdout, out.stderr
+    except (OSError, subprocess.SubprocessError):
+        return None, '', ''
+
+
+def pids_from(text):
+    return {int(x) for x in re.findall(r'(?<![\w.-])(\d{1,8})(?![\w.-])', text)}
+
+
+def eval_pkill(args, verdict, raw, cwd):
+    if any(unevaluable(a) for a in args):
+        verdict.notes.append(raw)
+        return
+    out, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if is_signal_arg(a) or a in ('--echo', '--count') or a.startswith(('--signal=', '--queue=')):
+            i += 1
+            continue
+        if a in ('--signal', '-q', '--queue'):
+            i += 2
+            continue
+        if re.match(r'^-[a-zA-Z]+$', a):
+            # `-e`/`-c` (also inside a cluster like `-cf`) only change pkill's output; pgrep -c would print a count.
+            a = '-' + a[1:].replace('c', '').replace('e', '')
+            if a == '-':
+                i += 1
+                continue
+        out.append(a)
+        i += 1
+    code, stdout, _ = run(['pgrep'] + out, cwd)
+    # Exit 2/3 (bad regex, bad option): pkill would fail the same way and kill nothing.
+    if code is None or code > 1:
+        verdict.notes.append(raw)
+        return
+    verdict.targets.append((raw, pids_from(stdout)))
+
+
+def eval_killall(args, verdict, raw):
+    if any(unevaluable(a) for a in args):
+        verdict.notes.append(raw)
+        return
+    names, regex, icase, users, i = [], False, False, [], 0
+    while i < len(args):
+        a = args[i]
+        if a == '--':
+            names.extend(args[i + 1:])
+            break
+        if a in ('-s', '--signal', '-y', '--younger-than', '-o', '--older-than', '-n', '--ns', '-Z', '--context'):
+            i += 2
+            continue
+        if a in ('-u', '--user'):
+            users.append(args[i + 1] if i + 1 < len(args) else '')
+            i += 2
+            continue
+        if a.startswith('-') and len(a) > 1:
+            if not is_signal_arg(a) and re.match(r'^-[a-zA-Z]+$', a):
+                regex = regex or 'r' in a[1:]
+                icase = icase or 'I' in a[1:]
+            elif a in ('--regexp',):
+                regex = True
+            elif a in ('--ignore-case',):
+                icase = True
+            i += 1
+            continue
+        names.append(a)
+        i += 1
+    pids = set()
+    for name in names or ([''] if users else []):
+        argv = ['pgrep']
+        if icase:
+            argv.append('-i')
+        if users:
+            argv += ['-u', ','.join(users)]
+        if name:
+            argv += [name] if regex else ['-x', name[:15]]
+        code, stdout, _ = run(argv)
+        if code is None or code > 1:
+            verdict.notes.append(raw)
+            return
+        pids |= pids_from(stdout)
+    verdict.targets.append((raw, pids))
+
+
+SAFE_REDIRECTS = re.compile(r'\d?>\s*/dev/null|\d?>&\d|&>\s*/dev/null')
+
+
+def producer_ok(text):
+    """True if the PID producer only runs read-only commands we can run ourselves at hook time."""
+    if unevaluable(re.sub(r"'[^']*'", "''", text)):
+        return False
+    if '>' in SAFE_REDIRECTS.sub('', re.sub(r"'[^']*'", "''", text)) or re.search(r'system\s*\(|getline|\|&', text):
+        return False
+    for simples in split_top(text):
+        for simple in simples:
+            toks, subs = tokens_of(balance_strip(simple))
+            if subs or not toks:
+                return False
+            toks, _ = strip_prefixes(toks)
+            if not toks:
+                return False
+            base = os.path.basename(toks[0])
+            if base not in PRODUCERS:
+                return False
+            if base == 'sed' and any(t.startswith('-i') or t == '--in-place' or re.search(r'(^|;)\s*[we]\b', t)
+                                     for t in toks[1:]):
+                return False
+            if base == 'sort' and any(t.startswith('-o') or t.startswith('--output') for t in toks[1:]):
+                return False
+            if base == 'fuser' and any(re.match(r'^-[a-zA-Z]*k', t) for t in toks[1:]):
+                return False
+            if base == 'lsof' and not any(re.match(r'^-[a-zA-Z]*t', t) for t in toks[1:]):
+                return False
+    return True
+
+
+def eval_producer(text, verdict, raw, cwd):
+    if not producer_ok(text):
+        verdict.notes.append(raw)
+        return
+    code, stdout, _ = run(['bash', '-c', text], cwd, timeout=5)
+    if code is None:
+        verdict.notes.append(raw)
+        return
+    verdict.targets.append((raw, pids_from(stdout)))
+
+
+def eval_kill(args, subs, verdict, raw, cwd):
+    if args and args[0] in ('-l', '-L', '--list'):
+        return
+    i = 0
+    if args and args[0] in ('-s', '-n', '--signal'):
+        i = 2
+    elif args and (is_signal_arg(args[0]) or re.match(r'^-[A-Z][A-Z0-9+-]+$', args[0])):
+        i = 1
+    for a in args[i:]:
+        if a == '--':
+            continue
+        m = re.match(r'^__SUBST(\d+)__$', a)
+        if m:
+            eval_producer(subs[int(m.group(1))], verdict, raw, cwd)
+        elif a == '-1':
+            verdict.kill_all = True
+        elif re.match(r'^-\d+$', a):
+            code, stdout, _ = run(['pgrep', '-g', a[1:]])
+            verdict.targets.append((raw, pids_from(stdout) if code in (0, 1) else set()))
+        elif a.isdigit():
+            verdict.explicit.append(int(a))
+        elif unevaluable(a) or '__SUBST' in a:
+            verdict.notes.append(raw)
+
+
+def balance_strip(simple):
+    """Drop subshell/group parentheses and braces that split_top left at the edges."""
+    s = simple.strip()
+    while s[:1] in ('(', '{') and not s.startswith('$('):
+        s = s[1:].lstrip()
+    while s[-1:] in (')', '}') and s.count('(') < s.count(')') + (1 if s[-1:] == '}' else 0):
+        if s[-1:] == '}' and s.count('{') >= s.count('}'):
+            break
+        s = s[:-1].rstrip()
+    return s
+
+
+def analyse(command, verdict=None, depth=0, cwd=None):
+    verdict = verdict or Verdict()
+    if depth > 3:
+        return verdict
+    command = strip_data_heredocs(command)
+    for pipeline in split_top(command):
+        for idx, simple in enumerate(pipeline):
+            simple = balance_strip(simple)
+            if re.match(r'^cd\s', simple):
+                try:
+                    target = shlex.split(simple)[1:]
+                except ValueError:
+                    target = []
+                if len(target) == 1 and not unevaluable(target[0]):
+                    cwd = os.path.join(cwd or os.getcwd(), os.path.expanduser(target[0]))
+                continue
+            if not PREFILTER.search(simple):
+                continue
+            toks, subs = tokens_of(simple)
+            for sub in subs:
+                if PREFILTER.search(sub):
+                    analyse(sub, verdict, depth + 1, cwd)
+            toks, elevated = strip_prefixes(toks)
+            if not toks:
+                continue
+            verdict.elevated = verdict.elevated or elevated
+            base = os.path.basename(toks[0])
+            args = toks[1:]
+            if base in ELSEWHERE:
+                continue
+            if base == 'trap' and args:
+                analyse(args[0], verdict, depth + 1, cwd)
+                continue
+            if base == 'flock':
+                k = 0
+                while k < len(args) and args[k].startswith('-') and args[k] != '-c':
+                    k += 2 if args[k] in ('-w', '--wait', '--timeout', '-E', '--conflict-exit-code') else 1
+                rest = args[k + 1:]  # after the lock file
+                if rest[:1] == ['-c'] and len(rest) > 1:
+                    analyse(restore(rest[1], subs), verdict, depth + 1, cwd)
+                elif rest:
+                    analyse(rebuild(rest, subs), verdict, depth + 1, cwd)
+                continue
+            if '--' in args and base not in ('pkill', 'killall', 'kill', 'pgrep'):
+                tail = args[args.index('--') + 1:]
+                if tail and os.path.basename(tail[0]) in ('pkill', 'killall', 'kill', 'fuser', 'xargs', 'bash',
+                                                          'sh', 'zsh', 'dash', 'timeout', 'sudo', 'env', 'nohup'):
+                    analyse(rebuild(tail, subs), verdict, depth + 1, cwd)
+                    continue
+            if base in SHELL_C and '-c' in args:
+                k = args.index('-c')
+                if k + 1 < len(args):
+                    inner = args[k + 1]
+                    for j, s in enumerate(subs):
+                        inner = inner.replace('__SUBST%d__' % j, '$(%s)' % s)
+                    analyse(inner, verdict, depth + 1, cwd)
+                continue
+            if base == 'eval':
+                analyse(' '.join(args), verdict, depth + 1, cwd)
+                continue
+            if base == 'pkill':
+                eval_pkill(args, verdict, simple, cwd)
+            elif base == 'killall':
+                eval_killall(args, verdict, simple)
+            elif base == 'kill':
+                eval_kill(args, subs, verdict, simple, cwd)
+            elif base == 'fuser' and any(re.match(r'^-[a-zA-Z]*k', a) for a in args):
+                rest = [a.replace('k', '') if re.match(r'^-[a-zA-Z]*k', a) else a for a in args]
+                rest = [a for a in rest if a != '-' and not is_signal_arg(a)]
+                if any(unevaluable(a) for a in rest):
+                    verdict.notes.append(simple)
+                else:
+                    code, stdout, _ = run(['fuser'] + rest, cwd)
+                    verdict.targets.append((simple, pids_from(stdout)))
+            elif base == 'xargs':
+                x, rest = 0, args
+                while x < len(rest) and rest[x].startswith('-'):
+                    x += 2 if rest[x] in ('-n', '-P', '-I', '-L', '-d', '-s', '-E', '-a') else 1
+                if x < len(rest) and os.path.basename(rest[x]) in ('kill', 'pkill') and idx > 0:
+                    eval_producer(' | '.join(pipeline[:idx]), verdict, ' | '.join(pipeline[:idx + 1]), cwd)
+    return verdict
+
+
+def restore(text, subs):
+    for j, sub in enumerate(subs):
+        text = text.replace('__SUBST%d__' % j, '$(%s)' % sub)
+    return text
+
+
+def rebuild(toks, subs):
+    """Back to shell text, with $(…) restored where placeholders were."""
+    text = ' '.join(shlex.quote(t) if '__SUBST' not in t else t for t in toks)
+    for j, sub in enumerate(subs):
+        text = text.replace('__SUBST%d__' % j, '$(%s)' % sub)
+    return text
+
+
+def transient_chain(table, hook_pid, root):
+    """The hook itself and the shells between it and the claude process (they vanish right after)."""
+    out, pid = {hook_pid}, (table[hook_pid].ppid if hook_pid in table else 0)
+    for _ in range(4):
+        if not pid or pid == root or pid not in table or table[pid].comm == 'claude':
+            break
+        out.add(pid)
+        pid = table[pid].ppid
+    return out
+
+
+def decide(command, own_root=None, session_id=None, table=None, hook_pid=None, cwd=None):
+    """Return (deny_reason or None, log_tag)."""
+    if not PREFILTER.search(command):
+        return None, None
+    verdict = analyse(command, cwd=cwd)
+    if not verdict.targets and not verdict.explicit and not verdict.kill_all:
+        return None, ('unevaluated' if verdict.notes else None)
+    table = table or proc_table()
+    hook_pid = hook_pid or os.getpid()
+    root = own_root or find_claude_root(table, hook_pid)
+    own = descendants(table, root) if root else set()
+    transient = transient_chain(table, hook_pid, root)
+
+    problems = []
+    if verdict.kill_all:
+        problems.append('`kill -1` manda la señal a TODOS tus procesos (escritorio, app de Claude, todas las '
+                        'sesiones, DDEV)')
+    foreign, seen = [], set()
+    for raw, pids in verdict.targets:
+        for pid in sorted(pids):
+            if pid in seen or pid in transient:
+                continue
+            seen.add(pid)
+            p = table.get(pid)
+            if not p or (p.uid != UID and not verdict.elevated):
+                continue
+            if pid == root:
+                foreign.append((pid, 'esta misma sesión de Claude', p.cmdline))
+                continue
+            if pid in own or (session_id and p.session == session_id and p.comm != 'claude'):
+                continue
+            foreign.append((pid, label(p, table), p.cmdline))
+    for pid in verdict.explicit:
+        p = table.get(pid)
+        if p and pid != root and (pid in own or (session_id and p.session == session_id and p.comm != 'claude')):
+            continue
+        if p and (p.uid == UID or verdict.elevated) and pid not in seen:
+            why = critical(p, table, root)
+            if why:
+                foreign.append((pid, why, p.cmdline))
+    if not problems and not foreign:
+        return None, 'allow'
+
+    shown = ['PID %d, %s: %s' % (pid, lab, cmd[:90]) for pid, lab, cmd in foreign[:8]]
+    more = len(foreign) - len(shown)
+    reason = 'process-kill-gate: '
+    if problems:
+        reason += problems[0] + '. '
+    if foreign:
+        reason += ('esta orden alcanzaría %d proceso%s que no %s de esta sesión: %s%s. '
+                   % (len(foreign), '' if len(foreign) == 1 else 's', 'es' if len(foreign) == 1 else 'son',
+                      '; '.join(shown), ' (y %d más)' % more if more > 0 else ''))
+    reason += ('El 21-11 un `pkill -f "monitor|until grep -q"` cerró la sesión de escritorio del desarrollador y '
+               'paró el router de DDEV (~/.claude/rules/matar-procesos-solo-propios.md). Mata solo lo tuyo: '
+               "mira con `pgrep -af '<patrón>'` qué encaja, y usa `kill <PID>` con los tuyos, `pkill -P <PID>` "
+               'para los hijos de uno tuyo, o un patrón con una marca única que solo lleve la orden que lanzaste. '
+               'Una sesión de Claude se para con stop_session y un contenedor con ddev/docker stop. Si el '
+               'desarrollador te ha ordenado parar algo de otra sesión, hazlo por PID.')
+    return reason, 'deny'
+
+
+# ---------------------------------------------------------------- hook entry
+
+def main():
+    try:
+        payload = json.load(sys.stdin)
+        if not isinstance(payload, dict) or payload.get('tool_name') != 'Bash':
+            return 0
+        command = (payload.get('tool_input') or {}).get('command')
+        if not isinstance(command, str) or not PREFILTER.search(command):
+            return 0
+        reason, tag = decide(command, session_id=payload.get('session_id'), cwd=payload.get('cwd'))
+    except Exception:
+        append('errors.log', '%s %s' % (now_iso(), traceback.format_exc().strip().splitlines()[-1]))
+        return 0
+    if tag:
+        append('decisions.log', '%s %s session=%s env_session=%s cwd=%s cmd=%r' % (
+            now_iso(), tag, payload.get('session_id') or '-', os.environ.get('CLAUDE_CODE_SESSION_ID', '-'),
+            payload.get('cwd') or '-', command[:300]))
+    if reason:
+        json.dump({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
+                                          'permissionDecisionReason': reason}}, sys.stdout)
+    return 0
+
+
+# ---------------------------------------------------------------- self-test
+
+def self_test():
+    import tempfile
+    marker = 'pkgate-selftest-%d' % os.getpid()
+    tmp = tempfile.mkdtemp(prefix='pkgate-')
+    pidfile = os.path.join(tmp, 'serve.pid')
+    own = subprocess.Popen(['bash', '-c', 'exec -a %s sleep 120' % marker])
+    with open(pidfile, 'w') as fh:
+        fh.write('%d\n' % own.pid)
+    # A foreign process: `setsid -f` forks, so it is reparented away from this tree, and it carries
+    # another session id.
+    env = dict(os.environ, CLAUDE_CODE_SESSION_ID='selftest-other-session')
+    subprocess.run(['setsid', '-f', 'bash', '-c', 'exec -a %s-other sleep 120' % marker], env=env)
+    time.sleep(0.4)
+    other_pids = pids_from(subprocess.run(['pgrep', '-f', '^%s-other' % marker], capture_output=True,
+                                          text=True).stdout)
+    me = os.getpid()
+    ok = failed = 0
+
+    def check(name, command, expect_deny, root=me, session='selftest-session', cwd=None):
+        nonlocal ok, failed
+        reason, tag = decide(command, own_root=root, session_id=session, hook_pid=me, cwd=cwd)
+        if bool(reason) == expect_deny:
+            ok += 1
+            print('ok   %s' % name)
+        else:
+            failed += 1
+            print('FAIL %s -> %s %s' % (name, tag, (reason or '')[:300]))
+
+    def pg(*args):
+        return subprocess.run(['pgrep', '-u', str(UID)] + list(args), capture_output=True, text=True).stdout.split()
+
+    try:
+        check('the foreign test process exists', 'true', False)
+        if not other_pids:
+            print('FAIL could not start the foreign test process')
+            failed += 1
+        check('incident pattern is denied', 'cd /tmp; pkill -f "monitor|until grep -q" 2>/dev/null; echo', True)
+        check('own child by unique marker passes', "pkill -f '^%s 120'" % marker, False)
+        check('same marker seen from another root is denied', "pkill -f '^%s 120'" % marker, True,
+              root=min(other_pids) if other_pids else 1)
+        check('foreign process with the marker is denied', "pkill -f '^%s-other'" % marker, True)
+        check('reparented process with own session id passes', "pkill -f '^%s-other'" % marker, False,
+              session='selftest-other-session')
+        check('pkill -9 with own marker passes', "pkill -9 -f '^%s 120'" % marker, False)
+        check('pkill -P own parent passes', 'pkill -P %d' % me, False)
+        check('kill -9 -1 is denied', 'kill -9 -1', True)
+        check('kill -- -1 is denied', 'kill -- -1', True)
+        check('kill $(pgrep -f monitor) is denied', 'kill $(pgrep -f monitor)', True)
+        check('pgrep | xargs kill is denied', 'pgrep -f monitor | xargs -r kill -9', True)
+        check('ps|grep|awk|xargs kill is denied', "ps aux | grep monitor | awk '{print $2}' | xargs kill", True)
+        check('ddev exec pkill passes', "ddev exec bash -c 'pkill -f php'", False)
+        check('docker exec pkill passes', 'docker exec web pkill -f monitor', False)
+        check('echo of a pkill passes', 'echo "pkill -f monitor"', False)
+        check('git message with pkill passes', 'git commit -m "stop pkill -f monitor"', False)
+        check('heredoc data passes', "cat > note.md <<'EOF'\npkill -f monitor\nEOF", False)
+        check('bash -c pkill is denied', "bash -c 'pkill -f monitor'", True)
+        check('subshell pkill is denied', '(cd /tmp && pkill -f monitor)', True)
+        check('timeout prefix is seen', 'timeout 5 pkill -f monitor', True)
+        check('sudo prefix is seen', 'sudo -n pkill -f monitor', True)
+        check('killall of a long gvfs name is denied', 'killall gvfs-udisks2-volume-monitor', True)
+        check('killall -r regex is denied', "killall -r 'gvfs.*'", True)
+        check('pkill -u self is denied', 'pkill -u %d' % UID, True)
+        check('variable pattern passes (unevaluated)', 'pkill -f "$PAT"', False)
+        check('loop variable passes (unevaluated)', 'for p in $(pgrep -f monitor); do kill $p; done', False)
+        check('kill of an own PID passes', 'kill %d' % own.pid, False)
+        check('kill $(cat own pidfile) passes', 'kill $(cat %s)' % pidfile, False)
+        check('cd then kill $(cat relative pidfile) passes', 'cd %s && kill $(cat serve.pid)' % tmp, False)
+        check('kill of the session root is denied', 'kill %d' % me, True)
+        check('kill -l passes', 'kill -l', False)
+        check('producer with a write is not run', "kill $(pgrep -f monitor > %s/x)" % tmp, False)
+        check('words like skill or killed do not trigger', 'echo skilled killed; ls', False)
+        check('clustered -cf is not a count', 'pkill -cf monitor', True)
+        check('clustered -ef is seen', 'pkill -ef monitor', True)
+        check('heavy-job run -- pkill is seen', "heavy-job run --kind e2e --label x -- pkill -f monitor", True)
+        check('port-lease exec -- pkill is seen', 'port-lease exec -- pkill -f monitor', True)
+        check('flock lock pkill is seen', 'flock -w 60 /tmp/x.lock pkill -f monitor', True)
+        check('flock lock -c pkill is seen', "flock /tmp/x.lock -c 'pkill -f monitor'", True)
+        check('trap with pkill is seen', "trap 'pkill -f monitor' EXIT", True)
+        check('pkill inside $() is seen', 'x=$(pkill -f monitor); echo $x', True)
+        check('xargs producer is not run', "kill $(pgrep -f monitor | xargs echo)", False)
+        check('bad regex passes (pkill fails too)', "pkill -f 'monitor('", False)
+        check('git log -- kill.py passes', 'git log --oneline -- kill.py', False)
+        if pg('-x', 'chrome'):
+            check('pkill -x chrome is denied (Chrome runs)', 'pkill -x chrome', True)
+        gpid = pg('-x', 'gnome-session-c')
+        if gpid:
+            check('kill of gnome-session-ctl PID is denied', 'kill %s' % gpid[0], True)
+            check('kill -TERM of gnome-session-ctl PID is denied', 'kill -TERM %s' % gpid[0], True)
+        dock = pg('-f', 'monitor-traefik-stderr')
+        if dock:
+            check('kill of a ddev-router PID is denied', 'kill -9 %s' % dock[0], True)
+        if pg('-f', 'gnome-session-ctl'):
+            check('fuser -k on a busy port of others is denied or passes when unused',
+                  'fuser -k 1/tcp', False)
+    finally:
+        try:
+            own.kill()
+        except OSError:
+            pass
+        for pid in other_pids:
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+    print('%d ok, %d failed' % (ok, failed))
+    return 1 if failed else 0
+
+
+if __name__ == '__main__':
+    if len(sys.argv) > 1 and sys.argv[1] == '--self-test':
+        sys.exit(self_test())
+    sys.exit(main())

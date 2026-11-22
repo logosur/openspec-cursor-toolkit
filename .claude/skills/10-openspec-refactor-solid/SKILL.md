@@ -1,6 +1,6 @@
 ---
 name: 10-openspec-refactor-solid
-description: OpenSpec refactor workflow for SOLID, DI, and test-backed internal improvements (stack-agnostic)
+description: "Plans SOLID and dependency-injection refactors of project-owned code as an OpenSpec change, keeping external behaviour unchanged and vendor/contrib code untouched. Use when the user asks to refactor custom code, improve architecture, apply SOLID, improve dependency injection, create interfaces or remove bad practices (refactor SOLID/DI)."
 ---
 
 When the user asks to refactor custom code, improve architecture, apply SOLID, improve dependency injection, create interfaces, improve tests, or remove bad practices, use an OpenSpec change before implementation.

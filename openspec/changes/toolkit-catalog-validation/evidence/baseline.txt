@@ -1,0 +1,84 @@
+# Baseline — python3 scripts/validate-toolkit.py on the unmodified catalog
+# 2026-10-15T17:32:26+02:00 · develop @ 221d85a · catalog files untouched (only scripts/ added)
+
+ERROR .claude/skills/00-openspec-master/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .claude/skills/00-openspec-orchestrator/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .claude/skills/00-openspec-stack-agnostic/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .claude/skills/10-openspec-refactor-solid/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .claude/skills/20-hydrate-spec/SKILL.md: [collision] descriptions of '20-hydrate-spec' and '20-openspec-hydrate-spec' collide in .claude (TF-IDF cosine 0.57 >= 0.50)
+ERROR .claude/skills/20-hydrate-spec/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .claude/skills/20-openspec-hydrate-spec/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .claude/skills/30-openspec-anti-hallucination/SKILL.md: [collision] descriptions of '30-openspec-anti-hallucination' and 'openspec-anti-hallucination' collide in .claude (TF-IDF cosine 0.58 >= 0.50)
+ERROR .claude/skills/30-openspec-anti-hallucination/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .claude/skills/40-openspec-safe-apply/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .claude/skills/README.md: [readme-coverage] skill 'comando-verificar' is not mentioned in .claude/skills/README.md (write it as `comando-verificar` or link comando-verificar/SKILL.md)
+ERROR .claude/skills/README.md: [readme-coverage] skill 'exporta-spec' is not mentioned in .claude/skills/README.md (write it as `exporta-spec` or link exporta-spec/SKILL.md)
+ERROR .claude/skills/README.md: [readme-coverage] skill 'harness-spec' is not mentioned in .claude/skills/README.md (write it as `harness-spec` or link harness-spec/SKILL.md)
+ERROR .claude/skills/README.md: [readme-coverage] skill 'multiagente' is not mentioned in .claude/skills/README.md (write it as `multiagente` or link multiagente/SKILL.md)
+ERROR .claude/skills/README.md: [readme-coverage] skill 'openspec-workflow' is not mentioned in .claude/skills/README.md (write it as `openspec-workflow` or link openspec-workflow/SKILL.md)
+ERROR .claude/skills/README.md: [readme-coverage] skill 'opsx-apply' is not mentioned in .claude/skills/README.md (write it as `opsx-apply` or link opsx-apply/SKILL.md)
+ERROR .claude/skills/README.md: [readme-coverage] skill 'opsx-archive' is not mentioned in .claude/skills/README.md (write it as `opsx-archive` or link opsx-archive/SKILL.md)
+ERROR .claude/skills/README.md: [readme-coverage] skill 'opsx-propose' is not mentioned in .claude/skills/README.md (write it as `opsx-propose` or link opsx-propose/SKILL.md)
+ERROR .claude/skills/README.md: [readme-coverage] skill 'qa' is not mentioned in .claude/skills/README.md (write it as `qa` or link qa/SKILL.md)
+ERROR .claude/skills/README.md: [readme-coverage] skill 'verifica-tarea' is not mentioned in .claude/skills/README.md (write it as `verifica-tarea` or link verifica-tarea/SKILL.md)
+ERROR .claude/skills/openspec-anti-hallucination/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .claude/skills/openspec-e2e-regression-guard/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .claude/skills/openspec-extract-spec-from-doc/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .claude/skills/openspec-fix-changes-gitignore/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .claude/skills/openspec-workflow/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .claude/skills/rune-specs/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .cursor/skills/00-openspec-master/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .cursor/skills/00-openspec-orchestrator/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .cursor/skills/10-openspec-refactor-solid/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .cursor/skills/20-hydrate-spec/SKILL.md: [collision] descriptions of '20-hydrate-spec' and '20-openspec-hydrate-spec' collide in .cursor (TF-IDF cosine 0.57 >= 0.50)
+ERROR .cursor/skills/20-hydrate-spec/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .cursor/skills/20-openspec-hydrate-spec/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .cursor/skills/30-openspec-anti-hallucination/SKILL.md: [collision] descriptions of '30-openspec-anti-hallucination' and 'openspec-anti-hallucination' collide in .cursor (TF-IDF cosine 0.57 >= 0.50)
+ERROR .cursor/skills/30-openspec-anti-hallucination/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .cursor/skills/40-openspec-safe-apply/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .cursor/skills/README.md: [readme-coverage] skill '00-openspec-master' is not mentioned in .cursor/skills/README.md (write it as `00-openspec-master` or link 00-openspec-master/SKILL.md)
+ERROR .cursor/skills/README.md: [readme-coverage] skill '00-openspec-orchestrator' is not mentioned in .cursor/skills/README.md (write it as `00-openspec-orchestrator` or link 00-openspec-orchestrator/SKILL.md)
+ERROR .cursor/skills/README.md: [readme-coverage] skill '10-openspec-refactor-solid' is not mentioned in .cursor/skills/README.md (write it as `10-openspec-refactor-solid` or link 10-openspec-refactor-solid/SKILL.md)
+ERROR .cursor/skills/README.md: [readme-coverage] skill '20-hydrate-spec' is not mentioned in .cursor/skills/README.md (write it as `20-hydrate-spec` or link 20-hydrate-spec/SKILL.md)
+ERROR .cursor/skills/README.md: [readme-coverage] skill '20-openspec-hydrate-spec' is not mentioned in .cursor/skills/README.md (write it as `20-openspec-hydrate-spec` or link 20-openspec-hydrate-spec/SKILL.md)
+ERROR .cursor/skills/README.md: [readme-coverage] skill '30-openspec-anti-hallucination' is not mentioned in .cursor/skills/README.md (write it as `30-openspec-anti-hallucination` or link 30-openspec-anti-hallucination/SKILL.md)
+ERROR .cursor/skills/README.md: [readme-coverage] skill '40-openspec-safe-apply' is not mentioned in .cursor/skills/README.md (write it as `40-openspec-safe-apply` or link 40-openspec-safe-apply/SKILL.md)
+ERROR .cursor/skills/README.md: [readme-coverage] skill 'comando-verificar' is not mentioned in .cursor/skills/README.md (write it as `comando-verificar` or link comando-verificar/SKILL.md)
+ERROR .cursor/skills/README.md: [readme-coverage] skill 'exporta-spec' is not mentioned in .cursor/skills/README.md (write it as `exporta-spec` or link exporta-spec/SKILL.md)
+ERROR .cursor/skills/README.md: [readme-coverage] skill 'harness-spec' is not mentioned in .cursor/skills/README.md (write it as `harness-spec` or link harness-spec/SKILL.md)
+ERROR .cursor/skills/README.md: [readme-coverage] skill 'multiagente' is not mentioned in .cursor/skills/README.md (write it as `multiagente` or link multiagente/SKILL.md)
+ERROR .cursor/skills/README.md: [readme-coverage] skill 'openspec-anti-hallucination' is not mentioned in .cursor/skills/README.md (write it as `openspec-anti-hallucination` or link openspec-anti-hallucination/SKILL.md)
+ERROR .cursor/skills/README.md: [readme-coverage] skill 'openspec-workflow' is not mentioned in .cursor/skills/README.md (write it as `openspec-workflow` or link openspec-workflow/SKILL.md)
+ERROR .cursor/skills/README.md: [readme-coverage] skill 'opsx-apply' is not mentioned in .cursor/skills/README.md (write it as `opsx-apply` or link opsx-apply/SKILL.md)
+ERROR .cursor/skills/README.md: [readme-coverage] skill 'opsx-archive' is not mentioned in .cursor/skills/README.md (write it as `opsx-archive` or link opsx-archive/SKILL.md)
+ERROR .cursor/skills/README.md: [readme-coverage] skill 'opsx-propose' is not mentioned in .cursor/skills/README.md (write it as `opsx-propose` or link opsx-propose/SKILL.md)
+ERROR .cursor/skills/README.md: [readme-coverage] skill 'qa' is not mentioned in .cursor/skills/README.md (write it as `qa` or link qa/SKILL.md)
+ERROR .cursor/skills/README.md: [readme-coverage] skill 'rune-specs' is not mentioned in .cursor/skills/README.md (write it as `rune-specs` or link rune-specs/SKILL.md)
+ERROR .cursor/skills/README.md: [readme-coverage] skill 'verifica-tarea' is not mentioned in .cursor/skills/README.md (write it as `verifica-tarea` or link verifica-tarea/SKILL.md)
+ERROR .cursor/skills/openspec-anti-hallucination/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .cursor/skills/openspec-workflow/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+ERROR .cursor/skills/rune-specs/SKILL.md: [trigger-clause] description has no trigger clause (Use when / Use on / Auto-invoke on / Triggers on)
+WARN .claude/skills/20-openspec-hydrate-spec/SKILL.md: [collision] descriptions of '20-openspec-hydrate-spec' and '30-openspec-anti-hallucination' are close in .claude (TF-IDF cosine 0.33 >= 0.30)
+WARN .claude/skills/aplica-tarea/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .claude/skills/archiva-tarea/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .claude/skills/mejora-tarea/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .claude/skills/opsx-apply/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .claude/skills/opsx-archive/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .claude/skills/opsx-explore/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .claude/skills/opsx-propose/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .claude/skills/prepara-tarea/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .cursor/rules/40-openspec-safe-apply.mdc: [homonym-rule] description differs from its homonym skill .cursor/skills/40-openspec-safe-apply/SKILL.md: rule 'Safe APPLY phase for OpenSpec — unattended multi-agent execution, scope control, and evidence-backed completion' | skill 'Safe APPLY phase for OpenSpec — gates, scope control, and evidence-backed completion'
+WARN .cursor/rules/openspec-gap-analysis.mdc: [homonym-rule] description differs from its homonym skill .cursor/skills/openspec-gap-analysis/SKILL.md: rule 'OpenSpec gap analysis — honest multiagent loop (max 5 iter), GAPS.md, no implementation. NL triggers: gap analysis, analiza gaps, revisar gaps, casuísticas faltantes, huecos en la spec, spec gaps, missing casuistics, GAPS.md' | skill 'Honest OpenSpec gap analysis — multiagent loop (max 5 iter), evidence-backed GAPS.md; no implementation. Auto-invoke on NL: gap analysis, analiza gaps, revisar gaps, casuísticas faltantes, huecos en la spec, missing casuistics, GAPS.md, spec gaps, qué falta en la spec, gaps stats-net, gaps en polling rider.'
+WARN .cursor/rules/rune-specs.mdc: [homonym-rule] description differs from its homonym skill .cursor/skills/rune-specs/SKILL.md: rule 'RUNE specs — optional formal specifications for business logic services (stack-agnostic)' | skill 'RUNE specs — create formal specifications for business logic services before implementing (optional; PHP-oriented)'
+WARN .cursor/skills/20-openspec-hydrate-spec/SKILL.md: [collision] descriptions of '20-openspec-hydrate-spec' and '30-openspec-anti-hallucination' are close in .cursor (TF-IDF cosine 0.33 >= 0.30)
+WARN .cursor/skills/aplica-tarea/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .cursor/skills/archiva-tarea/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .cursor/skills/mejora-tarea/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .cursor/skills/opsx-apply/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .cursor/skills/opsx-archive/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .cursor/skills/opsx-explore/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .cursor/skills/opsx-propose/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+WARN .cursor/skills/prepara-tarea/SKILL.md: [inner-frontmatter] body starts with a second frontmatter-like block (stale name/description); remove it
+validate-toolkit: 57 error(s), 21 warning(s)
+
+# exit=1

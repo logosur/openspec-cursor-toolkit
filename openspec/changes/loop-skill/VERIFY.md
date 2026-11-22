@@ -21,15 +21,15 @@
 | Existing pipeline `/repasa-spec` = gaps → mejora → aplica → gaps, chat-only phase table, pipeline override of stop lines | FACT | `.claude/skills/repasa-spec/SKILL.md` §2–§4 |
 | `/gaps-spec` canonical last line `Gaps pending (mejora + apply): N` in chat **and** `GAPS.md` `## Pending count` | FACT | `.claude/skills/openspec-gap-analysis/SKILL.md` §2 "Pending count — mandatory", §7 |
 | `/ejecuta-tests-reporte`, `/verifica-tarea`, `openspec-e2e-regression-guard`, `/finaliza-spec` (commit only, never push) exist with the described roles | FACT | `.claude/commands/ejecuta-tests-reporte.md`, `.claude/commands/verifica-tarea.md`, `.claude/skills/openspec-e2e-regression-guard/SKILL.md`, `.claude/commands/finaliza-spec.md` |
-| Consumer projects ship a `/deploy` command with own preflight + `AskUserQuestion` decision points and strict token budget | FACT | `/home/ivan/projects/htdocs/vitalcigar.es/.claude/commands/deploy.md`, `/home/ivan/projects/htdocs/app-residuos-oscar/.claude/commands/deploy.md` |
+| Consumer projects ship a `/deploy` command with own preflight + `AskUserQuestion` decision points and strict token budget | FACT | the `.claude/commands/deploy.md` of two consumer projects |
 | Claude Code `/loop` skill exists ("omit the interval to let the model self-pace"); `ScheduleWakeup` tool with `delaySeconds` (60–3600), `noop`, `stop`, `prompt`, `reason` | FACT (this session) | Skill listing + tool schema available in this session |
 | Cursor `/loop` uses monitored-shell sentinel + JSON prompt payload | FACT | `~/.cursor/skills-cursor/loop/SKILL.md` |
 | Frontmatter parity conventions (Claude Code vs Cursor commands/skills/rules) | FACT | `.claude/commands/repasa-spec.md`, `.cursor/commands/repasa-spec.md`, `.cursor/rules/repasa-spec-openspec-pipeline.mdc`, both `repasa-spec/SKILL.md` |
 | Toolkit repo has no `openspec init`; `openspec status/validate` fail here | FACT | CLI output: "No OpenSpec changes directory found. Run 'openspec init' first." |
-| The invocation authorizes **only** the P7 commit + push of the current branch; the deploy is always gated by an explicit dialog | FACT (developer decision, 2026-09-09) | Superseded the earlier "invocation = deploy order" inference at the developer's request: publish is automatic, `AskUserQuestion` gates P8, new verdict `AWAITING DEPLOY APPROVAL`. See design D8. |
+| The invocation authorizes **only** the P7 commit + push of the current branch; the deploy is always gated by an explicit dialog | FACT (design decision, 2026-09-09) | Superseded the earlier "invocation = deploy order" inference at the developer's request: publish is automatic, `AskUserQuestion` gates P8, new verdict `AWAITING DEPLOY APPROVAL`. See design D8. |
 | Near-no-op cost of repasa-spec inner phases when nothing is pending | INFERENCE | mejora-tarea exits when `isComplete: true`; aplica-tarea has no unchecked tasks to work — not measured. |
 | `ScheduleWakeup` available in every Claude Code surface / Cursor | UNKNOWN | Present in this session only; skill degrades to inline (REQ-RS-PACED-01). |
-| Bundle store for `/exporta-spec` (`ai-developer/templates/openspec-claude/`) | UNKNOWN | Path not found under `/home/ivan/projects/htdocs/ai-developer/`; propagation kept out of this change. |
+| Bundle store for `/exporta-spec` (`ai-developer/templates/openspec-claude/`) | UNKNOWN | Path not found in the local projects folder; propagation kept out of this change. |
 | Sub-agent primitive names (`Agent` in Claude Code, `Task` in Cursor) | FACT | This session's tool list; `.claude/skills/openspec-gap-analysis/SKILL.md` §3 uses `Task` naming for Cursor lineage |
 
 ## Requirement → task coverage

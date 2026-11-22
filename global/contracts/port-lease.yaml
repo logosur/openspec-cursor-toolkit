@@ -1,0 +1,12 @@
+piece: port-lease
+dest: scripts/port-lease
+kind: cli
+probes:
+  - name: list on an empty registry exits 0
+    args: [list]
+    exit: [0]
+    stdout: any
+  - name: a bad subcommand fails cleanly
+    args: [no-such-subcommand]
+    exit: [2]
+    stdout: any

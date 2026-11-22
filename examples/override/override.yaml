@@ -1,0 +1,13 @@
+schema: 1
+# Modules to install (default: openspec, core, devtools).
+modules: [openspec, core, devtools]
+
+# Toolkit files you do not want at all; their hooks go too.
+remove: []
+
+# Live files the toolkit must never manage (equivalence and drift ignore them).
+excluded:
+  - skills/some-third-party-skill/**
+
+# Intended differences between an install and your live dir, each with a reason and its proof.
+equivalence: []

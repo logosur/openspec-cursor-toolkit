@@ -1,6 +1,6 @@
 ---
 name: 00-openspec-stack-agnostic
-description: OpenSpec toolkit is stack-agnostic — resolve commands, paths, and URLs from the target project
+description: "Keeps the OpenSpec toolkit stack-agnostic: base URL, auth helper, test, lint and build commands come from the target project's own docs (CLAUDE.md, README.md, Makefile, package.json, compose files), never from toolkit examples or another project. Use when a skill needs a runtime command, URL, path or E2E auth in a consuming project, or that project documents no local dev flow (nunca hardcodear host/puerto)."
 ---
 
 # OpenSpec — stack-agnostic toolkit

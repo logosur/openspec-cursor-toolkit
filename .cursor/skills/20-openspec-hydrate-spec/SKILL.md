@@ -1,6 +1,6 @@
 ---
 name: 20-openspec-hydrate-spec
-description: Hydrate weak OpenSpec proposals until testable (numbered OpenSpec series)
+description: "Hydrates a weak OpenSpec proposal until every requirement can fail a test: measurable criteria, GIVEN/WHEN/THEN scenarios, edge and failure cases, source-of-truth references and small ordered tasks. Use when a proposal is vague, incomplete, risky or not testable, or the user asks to hidratar proposals."
 ---
 
 When an OpenSpec proposal is vague, incomplete, risky, or not testable, hydrate it before implementation.

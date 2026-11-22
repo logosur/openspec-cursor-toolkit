@@ -1,5 +1,5 @@
 ---
-description: OpenSpec orchestration layer
+description: "Default gate that sends change requests through OpenSpec instead of coding straight away; only a trivial direct change the user explicitly asks for skips it. Use when the user asks for a change, tests or TDD validation and has not asked to implement directly."
 alwaysApply: false
 ---
 

@@ -1,0 +1,25 @@
+name: openspec
+summary: >-
+  The OpenSpec catalog (commands, skills, list script and docs), installed globally from the
+  single source in .claude/ and docs/openspec/. The OpenSpec CLI skills grouped under
+  .claude/skills/openspec/ are installed flattened, one folder per skill, as Claude Code
+  discovers them.
+requires:
+  python: "3.10"
+optional:
+  binaries:
+    openspec: the skills call the OpenSpec CLI (npm i -g @fission-ai/openspec)
+    google-chrome: /html and /qa open reports in Chrome
+files:
+  - {src: .claude/commands/, dest: commands/}
+  - {src: .claude/skills/, dest: skills/, exclude: [openspec, README.md]}
+  - {src: .claude/skills/openspec/, dest: skills/}
+  - {src: .claude/scripts/openspec-list.sh, dest: scripts/openspec-list.sh, mode: "0755"}
+  - {src: docs/openspec/, dest: docs/openspec/}
+# Paths the catalog cites relative to a consumer project and that the project provides itself
+# (checked by the validator's dependency closure, not installed here).
+project_provided:
+  - .claude/scripts/harness
+  - .claude/scripts/openspec-extract-doc.py
+  - .claude/scripts/open-html-in-chrome.sh
+  - .claude/scripts/count-always-on-rules.sh

@@ -1,42 +1,161 @@
-# OpenSpec + Cursor + Claude Code toolkit
+# Claude Code toolkit (global, with OpenSpec)
 
-Portable package for **OpenSpec workflows** in both **Cursor** and **Claude Code**: slash commands (`run-spec`, `prepara-tarea`, `opsx-*`, `gaps-spec`, `repasa-spec`, …), **skills** (`SKILL.md`), documentation under `docs/openspec/`, and rules aligned with the OpenSpec lifecycle. The two toolkits are kept in parity: `.cursor/` is the original Cursor package (commands + skills + `.mdc` rules), `.claude/` is the equivalent native Claude Code package (commands + skills — Claude Code has no separate rules file, so rule content is folded into the matching skill's `SKILL.md`).
+A general toolkit for **Claude Code**, installed once per machine into `~/.claude` and personalised
+with a private **override** that lives outside this repository. It bundles:
 
-**Stack-agnostic:** this repo does not assume Drupal, DDEV, Symfony, or any specific framework. Each consuming application documents its own stack (local dev, tests, URLs) in project rules; the toolkit references those at runtime. See `.cursor/rules/00-openspec-stack-agnostic.mdc` (Cursor) / `.claude/skills/00-openspec-stack-agnostic/SKILL.md` (Claude Code).
+- the **OpenSpec** workflow catalog: slash commands (`run-spec`, `prepara-tarea`, `opsx-*`,
+  `gaps-spec`, `repasa-spec`, …), skills and the `docs/openspec/` templates;
+- **guard rails for unattended agent work**: a commit-authorship gate, a gate that only lets a
+  session kill its own processes, worktree placement, and a decision panel that replaces questions;
+- **local development helpers**: one fixed block of ports per project and a private store of
+  test users.
 
-This repository ships **no product** `openspec/` tree for a consuming application — active changes, promoted specs and CLI config live in each application repo that installs the OpenSpec CLI. It does version its **own** OpenSpec work under `openspec/` (the toolkit's changes and specs, e.g. `openspec/changes/loop-skill/`), because the toolkit's features are themselves specified with OpenSpec.
+Claude Code is the default target. The original **Cursor** package (`.cursor/`) is still kept in
+parity and exported per project, as a secondary target.
+
+**Stack-agnostic:** nothing assumes Drupal, DDEV, Symfony or any framework. Each consuming project
+documents its own stack (commands, tests, URLs) in its `CLAUDE.md`; the toolkit reads it at runtime.
+
+## Install on a machine
+
+Needs Linux, Python 3.10+, PyYAML and git.
+
+```bash
+git clone https://github.com/<org>/openspec-cursor-toolkit.git
+cd openspec-cursor-toolkit
+./install.sh install --dry-run     # what would change, nothing written
+./install.sh install
+```
+
+| Command | What it does |
+|---|---|
+| `install [--modules a,b] [--override DIR] [--target DIR] [--dry-run] [-v]` | copies the modules' files, writes per-piece config, merges hook entries into `settings.json`; idempotent |
+| `uninstall` | removes what the last install wrote (files you edited since are kept), restores the files it replaced, removes its hook entries and its block in `CLAUDE.md` |
+| `status` | modules, files and hooks currently installed |
+| `verify` | runs each installed piece's contract probes; only inside a sandbox `HOME` |
+| `drift`, `pull`, `equivalence` | keep the live dir, the override and the toolkit in sync (see below) |
+
+What the installer guarantees:
+
+- **Only the `hooks` key of `settings.json` is touched**, and an entry that is already there (same
+  event, matcher and command) is never duplicated. A `settings.json` that is not valid JSON stops the
+  install with exit 2 and nothing written.
+- **Every file it replaces is backed up** (`~/.claude/backups/toolkit-<stamp>/`) and recorded in
+  `~/.claude/toolkit/installed.json` with its hash, so `uninstall` can put it back.
+- Your own `~/.claude/CLAUDE.md` is kept: the toolkit's global rules go in a **managed block**
+  between `<!-- claude-toolkit:begin … -->` and `<!-- claude-toolkit:end -->`.
+- It never installs symlinks, never touches systemd or the desktop app, and never runs a piece outside
+  a throwaway `HOME`. A missing required binary stops it with exit 2; a missing optional one is a
+  warning.
+
+## Modules
+
+| Module | Contents |
+|---|---|
+| `openspec` | `.claude/commands/`, `.claude/skills/`, `openspec-list.sh` and `docs/openspec/` (the catalog below) |
+| `core` | `commit-authorship-gate`, `process-kill-gate`, `worktree-location-gate` + `worktree-location`, the config helper, the rules that explain them, the `panel-de-decision` skill and the global `CLAUDE.md` block |
+| `devtools` | `port-lease` (a fixed block of local ports per project) and `test-account` (private store of the test users sessions create), with their rules |
+| `sessions` | for the Claude desktop app: `start-session-bypass-gate` (sessions started to work now are born in bypassPermissions: one approval card for the caller instead of one per session) and `spawn-task-duplicate-gate` (denies a proposal card that repeats one already offered for the same project) |
+
+Manifests are in `global/modules/<name>.yaml`; the files they install are in `global/` (and, for
+`openspec`, in `.claude/`). The rule texts of `core` and `devtools` are written in Spanish, like the
+catalog's task aliases.
+
+## Override layer
+
+Your personal layer: by default `~/.config/claude-toolkit/`, or `CLAUDE_TOOLKIT_OVERRIDE`, or
+`--override DIR` (`--override ''` installs the toolkit alone). See [`examples/override/`](examples/override/README.md)
+for a complete example and how to version it in a private repository of your own.
+
+Precedence, highest first:
+
+- **files:** `override/files/<dest>` replaces the toolkit file → toolkit file + `override/append/<dest>`
+  → toolkit file. `remove:` in `override.yaml` drops a toolkit file and the hooks that run it.
+- **values:** `CLAUDE_TOOLKIT_CONFIG_DIR` (tests) → `override/config/<piece>.json` →
+  `global/config/<piece>.json` → the defaults in the piece's code.
+
+Each configurable piece reads only its own small file, `~/.claude/toolkit/config/<piece>.json`, through
+`scripts/lib/toolkit_config.py`; a missing or corrupt file falls back to the defaults, so hooks fail
+open. No piece hard-codes a path, host or project of a particular machine.
+
+**Contracts.** A piece the override replaces must behave like the one it replaces (Liskov).
+`global/contracts/<piece>.yaml` lists probes (input, expected exit code and output); `install` runs
+them on the override's replacements in a throwaway `HOME` and refuses with exit 3 if one breaks
+(`--allow-contract-failures` to force).
+
+## Privacy
+
+This repository is public; the override is not. `scripts/privacy-check.py` runs before every commit
+and in CI:
+
+- generic patterns in the repo (`scripts/privacy-patterns.yaml`): public IPs, e-mail addresses,
+  account UUIDs, home paths, dated personal orders, API keys and private keys; exceptions only with a
+  reason (`scripts/privacy-allow.yaml`);
+- a private layer that is never published: terms from the override's `privacy-denylist.txt` and the
+  literal quotes found in the override's files. Its findings never repeat the term, only its entry number.
+
+```bash
+python3 scripts/privacy-check.py --staged --require-private    # before a commit
+python3 scripts/privacy-check.py --message .git/COMMIT_EDITMSG
+python3 scripts/privacy-check.py --range origin/main..HEAD       # a branch's commits
+```
+
+## Keeping the live dir, the override and the toolkit in sync
+
+- `./install.sh drift` lists files that are `missing`, `live-changed`, `toolkit-changed`,
+  `override-base-changed` (the toolkit moved on since you replaced its file) or `untracked`.
+- `./install.sh pull <dest>` copies a live file into the override (private, the default) and records
+  the toolkit version it was based on; `--to toolkit` copies it into the repo only if the privacy check
+  is clean.
+- `./install.sh equivalence --live ~/.claude` installs toolkit + override into a temp `HOME` (the live
+  dir is only read) and explains every difference: `identical`, `override`, `toolkit-newer` (the live
+  file is an earlier version from this repo's history), `neutral-text` (same Python AST), `declared`
+  (in `override.yaml` with reason and proof), `added`, `excluded`. Anything else is `unexplained` and
+  makes it exit 1.
+
+## Migrating a machine that already has its own `~/.claude`
+
+1. Put your personal pieces in the override (`files/`, `append/`, `config/`, `hooks/`) and list what the
+   toolkit must never manage under `excluded:`.
+2. Run `./install.sh equivalence --live ~/.claude` until it reports 0 unexplained differences.
+3. Only then run `./install.sh install` (it backs up everything it replaces; `uninstall` reverts it).
+
+## What is not in the toolkit, and why
+
+- **Session supervision** (the supervisor skill and its lock, census, question queue and cross-project
+  message gate): it is
+  personal today and lives in the developer's override. Making it general is planned, with acceptance
+  criteria, in `openspec/changes/global-claude-toolkit/tasks.md` §8.
+- Pieces that still carry machine values (a job semaphore, deploy gates, scheduled routines): listed one by one, with what each needs to enter, in
+  `openspec/changes/global-claude-toolkit/evidence/core-scope.md`.
+- **Third-party skills** are never redistributed; install them from their own source.
 
 ## Contents
 
 | Path | Description |
 |------|-------------|
-| `.cursor/commands/` | Cursor commands (Spanish task aliases + English `opsx-*`; `/run-spec`, `/gaps-spec`, `/repasa-spec`). |
-| `.cursor/skills/` | Workflow skills: explore, propose, apply, archive, gap analysis, pipeline (`repasa-spec`), run loop (`run-spec`), verification, multiagent. |
-| `.cursor/skills/README.md` | Skills index (OPSX ↔ ES map). |
-| `.cursor/rules/` | OpenSpec rules (numbered series + workflow, multiagent, stack-agnostic). |
-| `.cursor/scripts/openspec-list.sh` | List active OpenSpec changes (Markdown + HTML). |
-| `.claude/commands/` | Same command set, native Claude Code slash-command frontmatter (`description`, `argument-hint`). |
-| `.claude/skills/` | Same skills **plus** the former `.cursor/rules`-only content, each folded into its own `SKILL.md` (e.g. `00-openspec-stack-agnostic`, `openspec-e2e-regression-guard`, `openspec-extract-spec-from-doc`, `openspec-fix-changes-gitignore`). |
-| `.claude/skills/README.md` | Skills index (OPSX ↔ ES map + stack-agnostic skill list). |
-| `.claude/scripts/openspec-list.sh` | Same script, `.claude/context/` output path. |
-| `docs/openspec/` | Index, master prompts, GAPS + RUN-LOOP templates, operator notes — shared by both toolkits. |
+| `install.sh`, `scripts/toolkit/` | Installer (Python package) and its tests (`scripts/toolkit/tests/`). |
+| `global/` | Modules, the files they install, per-piece config defaults, hook fragments and contracts. |
+| `examples/override/` | A complete example override. |
+| `.claude/commands/`, `.claude/skills/` | The OpenSpec catalog for Claude Code (installed by the `openspec` module). Rule content is folded into each skill's `SKILL.md`. |
+| `.claude/scripts/openspec-list.sh` | List active OpenSpec changes (Markdown + HTML). |
+| `.cursor/commands/`, `.cursor/skills/`, `.cursor/rules/` | The same catalog as a Cursor package (secondary target), kept in parity, exported per project. |
+| `docs/openspec/` | Index, master prompts, GAPS + RUN-LOOP templates, operator notes. |
+| `scripts/` | Repo tooling, never installed: catalog validator, privacy check, their tests and declared exceptions. |
+| `openspec/` | The toolkit's own OpenSpec changes (e.g. `openspec/changes/global-claude-toolkit/`). It ships no product `openspec/` tree for consuming applications. |
 
-## Integrate into another project
+## Use the catalog in one project only (Cursor or Claude Code)
 
-**Cursor:**
+**Claude Code:** the global install already makes the catalog available in every project. To vendor it
+into one repository instead, copy `.claude/commands/`, `.claude/skills/` and `docs/openspec/` (or use
+`/exporta-spec`) and add a project-stack note to that project's `CLAUDE.md`.
 
-1. Copy or merge `.cursor/commands/`, `.cursor/skills/`, `.cursor/rules/`, and `docs/openspec/` into the target repo root (or use `/exporta-spec` from a repo that already has the export bundle).
-2. Add a **project-stack** rule in the target (e.g. `.cursor/rules/01-project-stack-quality-gate.mdc`) with real commands, paths, and URLs for that application.
+**Cursor:** copy `.cursor/commands/`, `.cursor/skills/`, `.cursor/rules/` and `docs/openspec/` into the
+target repo (or use `/exporta-spec`), and add a project-stack rule there (e.g.
+`.cursor/rules/01-project-stack-quality-gate.mdc`).
 
-**Claude Code:**
-
-1. Copy or merge `.claude/commands/`, `.claude/skills/`, and `docs/openspec/` into the target repo root (or use `/exporta-spec` from a repo that already has the export bundle).
-2. Add a **project-stack** note in the target's `CLAUDE.md` (or a project skill) with real commands, paths, and URLs for that application.
-
-**Both:**
-
-3. Adjust `.gitignore` so shared toolkit paths are versioned as you prefer.
-4. Install the [OpenSpec CLI](https://github.com/Fission-AI/OpenSpec) and maintain `openspec/` in the application repo.
+In both cases install the [OpenSpec CLI](https://github.com/Fission-AI/OpenSpec) and keep `openspec/`
+in the application repo.
 
 ## Recommended flow (including gap analysis)
 
@@ -82,24 +201,65 @@ Runs phases **one after another** (never in parallel) for an existing change und
 
 Once approved, the deploy is **delegated** to the consuming project's `/deploy` command, which keeps its own confirmation dialogs. A project without a deploy command ends at `BLOCKED (no deploy command)`, and a run with no dialog channel ends at `AWAITING DEPLOY APPROVAL` — the loop never improvises an FTP sync, an SSH release or a CI dispatch. See `.cursor/commands/run-spec.md` (Cursor) / `.claude/commands/run-spec.md` (Claude Code).
 
-## Publish on GitHub
+## Validate the catalog
 
-1. Ensure `.gitignore` excludes local artifacts (`.cursor/context/`, `.claude/context/`, `*.zip`, export registries).
-2. Commit the toolkit tree (`.cursor/` commands, skills, rules; `.claude/` commands, skills; `docs/openspec/`).
-3. Create the remote and push:
+`scripts/validate-toolkit.py` checks the catalog rules that used to be kept by hand, and CI (`.github/workflows/validate-toolkit.yml`) runs it with its tests on every push and pull request. It needs Python 3 and PyYAML (`pip install pyyaml`). Nothing in `scripts/` is exported to consumer projects.
 
 ```bash
-cd /path/to/openspec-cursor-toolkit
-git remote add origin https://github.com/<org>/openspec-cursor-toolkit.git
-git push -u origin main
+python3 -m unittest scripts/test_validate_toolkit.py
+python3 scripts/validate-toolkit.py
+```
+
+Each finding is one line — `ERROR` or `WARN`, the file, `[rule]` and a message — and the run ends with a summary line. Any `ERROR` makes it exit `1`; warnings never change the exit code.
+
+| Rule | What it checks |
+|------|----------------|
+| `command-parity`, `skill-parity` | The same commands and skills exist in `.cursor/` and `.claude/`, except declared asymmetries |
+| `description-parity` | A command or skill present in both trees has the same `description`, except declared divergences |
+| `frontmatter`, `keys` | Frontmatter parses as YAML and has the required keys, and only the allowed ones, for its file kind |
+| `name`, `skill-folder` | Skill `name` equals its folder; names are kebab-case; every folder under `skills/` has a `SKILL.md` or is a declared group |
+| `readme-coverage` | Each `skills/README.md` names every skill folder of its tree (as `` `name` ``, `name/` or a link) |
+| `trigger-clause`, `description-length`, `collision` | The routing contract below, for model-invocable skills |
+| `alias` | A `Deprecated alias of <skill>` is not model-invocable, names an existing skill and stays a short pointer (≤ 15 lines) |
+| `exceptions` | Every declared exception has a reason and still matches something |
+| `inner-frontmatter`, `homonym-rule` (`WARN`) | A stale second frontmatter block at the top of a skill body; a Cursor rule whose description differs from its homonym skill |
+
+**Declaring an intentional asymmetry.** Add an entry with a `reason` to `scripts/catalog-exceptions.yaml`, under `claude_only_skills`, `cursor_only_skills`, `claude_only_commands`, `cursor_only_commands`, `description_divergence` (with `kind: command` or `kind: skill`) or `skill_groups`. Remove it in the same change that removes its cause: an entry that matches nothing is an error.
+
+**Routing contract.** A skill without `disable-model-invocation: true` is picked by its description, so the description must:
+
+- say what the skill does and when to use it, with a trigger clause: `Use when`, `Use on`, `Auto-invoke on` or `Triggers on`;
+- take its trigger phrases, Spanish ones included, from text already in the repo: this README, the skills READMEs, the command files, `CLAUDE.md` or the skill body;
+- not list the skill's steps in order, and not name commands, files or behaviour the skill does not contain;
+- stay within 1024 characters and below 0.50 TF-IDF cosine against every other model-invocable skill of its tree (0.30 or more is a warning: justify it or reword).
+
+The validator checks the clause, the length and the collisions; the other points are checked in review.
+
+**Retiring a duplicate skill.** Turn it into a deprecated alias instead of deleting it: keep the folder and `name`, set `disable-model-invocation: true`, start the description with `Deprecated alias of <canonical>`, and leave a body of a few lines that points to the canonical skill. Do the same with its homonym Cursor rule. The exporter cannot delete files, so a pointer is what brings consumer copies back in line.
+
+**Changing the validator.** A new or changed rule ships with at least one passing and one failing case in `scripts/test_validate_toolkit.py`; a rule without a failing-case test is incomplete. The collision thresholds are named constants whose rationale is in the design of the OpenSpec change `toolkit-catalog-validation` (Decision 4). Changing them is a reviewed decision, never a way to turn CI green.
+
+
+**The global tree.** When `global/` exists the validator also checks it:
+
+| Rule | What it checks |
+|------|----------------|
+| `global-manifest` | Every module manifest parses; its sources, hook fragments, dependencies and config pieces exist |
+| `global-orphan` | Every file in `global/` is installed by exactly one manifest entry; every fragment and config piece is used |
+| `global-hooks` | A hook fragment only runs pieces its module (or a dependency) installs |
+| `global-contract` | Every installed hook has a contract with probes, and every contract a piece |
+| `global-citation` | A piece only cites `~/.claude/{rules,scripts,hooks,skills}/…` that its module closure installs |
+| `global-skill` | A skill in `global/` follows the routing contract and does not duplicate or collide with the catalog |
+
+The installer, contract, drift and equivalence tests run in throwaway `HOME`s:
+
+```bash
+python3 -m unittest discover -s scripts/toolkit/tests -t .
 ```
 
 Licensed under [MIT](LICENSE).
 
-## Reference consumer
-
-Use a **private or public app repo** that already deploys this toolkit and defines its own stack rule (e.g. Symfony + Next.js monorepo, Drupal site, etc.). Copy `.cursor/rules/01-project-stack-quality-gate.mdc` pattern from your application — not from this toolkit.
-
 ## Origin
 
-Extracted and generalized from production OpenSpec usage across multiple stacks (2025–2026). Gap-analysis workflow added 2026-07.
+Extracted and generalized from production OpenSpec usage across multiple stacks (2025–2026). Gap-analysis
+workflow added 2026-07; global install, override layer and privacy guard added 2026-11.

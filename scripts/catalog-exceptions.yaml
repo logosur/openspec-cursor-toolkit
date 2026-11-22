@@ -1,0 +1,31 @@
+# Declared catalog asymmetries, read by scripts/validate-toolkit.py.
+#
+# Every intentional difference between .claude/ and .cursor/ is recorded here once,
+# with the reason. An entry that no longer matches anything is an error: remove it
+# in the same change that removes its cause.
+#
+# Sections: claude_only_skills, cursor_only_skills, claude_only_commands,
+# cursor_only_commands, description_divergence (needs kind: command | skill),
+# skill_groups.
+
+claude_only_skills:
+  - name: 00-openspec-stack-agnostic
+    reason: Cursor ships it as a rule (.cursor/rules/00-openspec-stack-agnostic.mdc); Claude Code has no rules, so the content is folded into a skill.
+  - name: openspec-e2e-regression-guard
+    reason: Cursor ships it as a rule (.cursor/rules/openspec-e2e-regression-guard.mdc); Claude Code has no rules, so the content is folded into a skill.
+  - name: openspec-extract-spec-from-doc
+    reason: Cursor ships it as a rule (.cursor/rules/openspec-extract-spec-from-doc.mdc); Claude Code has no rules, so the content is folded into a skill.
+  - name: openspec-fix-changes-gitignore
+    reason: Cursor ships it as a rule (.cursor/rules/openspec-fix-changes-gitignore.mdc); Claude Code has no rules, so the content is folded into a skill.
+
+description_divergence:
+  - kind: command
+    name: exporta-spec
+    reason: Cursor exports command, skill and rule bundles; Claude Code has no rules, so its description names commands and skills only.
+  - kind: skill
+    name: exporta-spec
+    reason: Cursor exports command, skill and rule bundles; Claude Code has no rules, so its description names commands and skills only.
+
+skill_groups:
+  - name: openspec
+    reason: OpenSpec CLI skills (openspec-explore, openspec-propose, openspec-apply-change, openspec-archive-change) kept grouped as the CLI installs them.

@@ -1,5 +1,5 @@
 ---
-description: Use OpenSpec as the source of truth for E2E regression protection. Never weaken E2E assertions to make tests pass; surface conflicts instead of resolving them silently.
+description: "Treats OpenSpec as the source of truth for E2E tests: assertions are never weakened, skipped or rewritten to get green, and code, tests and spec that disagree are surfaced to the user instead of being resolved silently. Use when an application change touches flows covered by E2E tests or an E2E test fails (E2E regresión)."
 globs: tests/**,openspec/**
 alwaysApply: false
 ---

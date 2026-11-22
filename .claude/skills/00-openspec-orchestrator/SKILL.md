@@ -1,6 +1,6 @@
 ---
 name: 00-openspec-orchestrator
-description: OpenSpec orchestration layer
+description: "Default gate that sends change requests through OpenSpec instead of coding straight away; only a trivial direct change the user explicitly asks for skips it. Use when the user asks for a change, tests or TDD validation and has not asked to implement directly."
 ---
 
 When the user asks for a change, feature, bugfix, refactor, tests, API behavior, webhook behavior, or TDD validation, use the OpenSpec workflow.

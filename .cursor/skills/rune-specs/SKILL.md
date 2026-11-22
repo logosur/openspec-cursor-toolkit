@@ -1,6 +1,6 @@
 ---
 name: rune-specs
-description: RUNE specs — create formal specifications for business logic services before implementing (optional; PHP-oriented)
+description: "Writes RUNE specifications (SIGNATURE, INTENT, BEHAVIOR, TESTS) for business-logic services such as validators, guards, mappers and calculators before they are implemented; optional and PHP-oriented, only for projects that adopt RUNE. Use when creating, documenting or refactoring such a service in a RUNE project, or when the user mentions RUNE specs or .rune files."
 ---
 
 # RUNE Specs for Business Logic

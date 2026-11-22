@@ -1,0 +1,17 @@
+piece: worktree-location
+dest: scripts/worktree-location
+kind: cli
+probes:
+  - name: help exits 0
+    args: [--help]
+    exit: [0]
+    stdout: any
+  - name: where outside a repository fails cleanly
+    args: [where, --repo, /]
+    exit: [1, 2]
+    stdout: any
+  - name: a corrupt config does not crash
+    args: [--help]
+    corrupt_config: true
+    exit: [0]
+    stdout: any

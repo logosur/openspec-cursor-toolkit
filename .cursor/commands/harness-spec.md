@@ -13,7 +13,7 @@ Cuando el desarrollador invoca **`/harness-spec [<target>]`**, **`crea un harnes
 
 ## Obligatorio (este turno)
 
-1. Leer **`.claude/skills/harness-spec/SKILL.md`** en el mismo turno antes de ejecutar nada.
+1. Leer **`.cursor/skills/harness-spec/SKILL.md`** en el mismo turno antes de ejecutar nada.
 2. Ejecutar **Fase 0** (resolver target) y luego el **gate de completitud (Fase 0.25)**: si el target es un change con tareas de `tasks.md` sin marcar, **negarse a construir el harness** y parar (ver abajo), salvo override explícito del desarrollador en este mismo turno.
 3. Solo si el gate pasa: ejecutar **Fase 0.5** (evaluar proporcionalidad) **antes** de tocar ningún fichero — si las señales están en contra o son mixtas, puede terminar en "no procede" o en un diálogo `AskUserQuestion`, sin llegar a construir nada.
 4. Solo si la Fase 0.5 concluye que procede: ejecutar Fases 1–6 del skill (inventario → construir/actualizar harness → ejecutar → supervisor independiente → bucle acotado ≤3 ciclos → cierre).
@@ -61,7 +61,7 @@ Detalle completo de la escala de señales en el skill.
 | **5** | Bucle evaluator-optimizer — corregir y relanzar supervisor (nueva llamada), máx. 3 ciclos |
 | **6** | Cierre — `## Verification` → `## Qué se ha verificado` → `## Resumen` |
 
-Detalle completo: `.claude/skills/harness-spec/SKILL.md`.
+Detalle completo: `.cursor/skills/harness-spec/SKILL.md`.
 
 ## Artefactos
 
@@ -97,4 +97,4 @@ Detalle completo: `.claude/skills/harness-spec/SKILL.md`.
 
 ## Related skills
 
-- `.claude/skills/harness-spec/SKILL.md` — workflow completo, fundamento investigado y checklist anti-gaming.
+- `.cursor/skills/harness-spec/SKILL.md` — workflow completo, fundamento investigado y checklist anti-gaming.

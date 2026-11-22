@@ -1,0 +1,405 @@
+#!/usr/bin/env python3
+"""Places every git worktree where the global rule says (~/.claude/rules/worktrees-ubicacion.md).
+
+    project without DDEV:  <root>/<project>/worktree-<branch>-<YYYYMMDD>[-<HHMMSS>]
+    project with DDEV:     <repo>/.claude/worktrees/worktree-<branch>-<YYYYMMDD>[-<HHMMSS>]
+
+A DDEV web container mounts only its project folder at /var/www/html, so a worktree outside the
+repository is invisible to `ddev exec`. A repository "has DDEV" when its main checkout, a parent
+folder (inside $HOME) or a subfolder up to two levels down holds .ddev/config.yaml. For DDEV
+projects the script also makes sure git ignores .claude/worktrees/ (in .git/info/exclude if the
+project does not ignore it already).
+
+<project> is the folder name of the main checkout. <branch> is the branch with "/" and any other
+character outside [A-Za-z0-9._-] turned into "-"; a detached HEAD is "detached-<sha8>". The time
+suffix is added only when the dated folder is already taken.
+
+Usage:
+  worktree-location where [--repo DIR]
+      Print the folder that holds the worktrees of that repository.
+  worktree-location path [--repo DIR] BRANCH
+      Print the free folder for BRANCH. Creates nothing.
+  worktree-location add [--repo DIR] [--base REF] BRANCH
+      Create the worktree and print its folder. BRANCH is created from REF (default HEAD, no
+      upstream tracking) or, if it already exists, checked out. A branch already checked out in a
+      worktree of the right folder is reused; checked out anywhere else, it is refused.
+  worktree-location add [--repo DIR] [--base REF] --detach
+      Same, with a detached HEAD at REF (folder worktree-detached-<sha8>-<date>).
+  worktree-location hook-create
+      WorktreeCreate hook (desktop app, --worktree, EnterWorktree, isolation: "worktree", /fork).
+      Reads the hook JSON on stdin ({"name", "cwd", ...}); the branch is "name". Prints the folder.
+  worktree-location hook-remove
+      WorktreeRemove hook. Reads {"worktree_path", ...}. Runs `git worktree remove` without
+      --force, so a worktree with uncommitted or untracked work is kept and the hook fails. The
+      branch is deleted only if this script created it and it has no new commits, or it is merged.
+
+The app copies per-machine files (.worktreeinclude, settings.local.json...) only into worktrees
+under <repo>/.claude/worktrees/, so this script does it too: gitignored, untracked copies of
+.claude/settings.local.json, CLAUDE.local.md, .mcp.json and whatever .worktreeinclude matches.
+
+<root> comes from the toolkit config piece `worktree-location` (key `root`, default
+~/worktrees). CLAUDE_WORKTREES_ROOT and CLAUDE_WORKTREES_STATE override the root and the state
+folder; they exist for tests.
+"""
+
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), 'lib'))
+try:
+    from toolkit_config import load as _load_config
+except ImportError:  # the script copied without the toolkit lib still works with its defaults
+    def _load_config(piece, defaults=None):
+        return dict(defaults or {})
+
+CONFIG = _load_config('worktree-location', {'root': '~/worktrees'})
+ROOT = os.environ.get('CLAUDE_WORKTREES_ROOT') or os.path.expanduser(CONFIG['root'])
+STATE = os.environ.get('CLAUDE_WORKTREES_STATE', os.path.expanduser('~/.claude/state/worktree-location'))
+REGISTRY = os.path.join(STATE, 'registry.jsonl')
+IN_PROJECT = os.path.join('.claude', 'worktrees')
+PER_MACHINE_FILES = ('.claude/settings.local.json', 'CLAUDE.local.md', '.mcp.json')
+INCLUDE_FILE = '.worktreeinclude'
+MAX_INCLUDE_FILES = 2000
+DDEV_SCAN_SKIP = {'node_modules', 'vendor', 'var', 'build', 'dist', 'cache', 'tmp'}
+
+
+class Refused(Exception):
+    pass
+
+
+def git(repo, *args, check=True):
+    result = subprocess.run(['git', '-C', repo, *args], capture_output=True, text=True)
+    if check and result.returncode != 0:
+        raise Refused('git %s failed: %s' % (' '.join(args), (result.stderr or result.stdout).strip()))
+    return result
+
+
+def slug(text, limit=100):
+    value = re.sub(r'[^A-Za-z0-9._-]+', '-', text)
+    value = re.sub(r'\.{2,}', '.', value)
+    value = re.sub(r'-{2,}', '-', value).strip('-.')
+    return value[:limit].rstrip('-.')
+
+
+def worktrees(repo):
+    """Entries of `git worktree list --porcelain`: dicts with path, branch (short), bare, head."""
+    entries, current = [], {}
+    for line in git(repo, 'worktree', 'list', '--porcelain').stdout.splitlines() + ['']:
+        if not line:
+            if current:
+                entries.append(current)
+            current = {}
+        elif line.startswith('worktree '):
+            current['path'] = line[len('worktree '):]
+        elif line.startswith('branch refs/heads/'):
+            current['branch'] = line[len('branch refs/heads/'):]
+        elif line.startswith('HEAD '):
+            current['head'] = line[len('HEAD '):]
+        elif line == 'bare':
+            current['bare'] = True
+    return entries
+
+
+def main_checkout(repo):
+    """Working tree of the main checkout, also from a linked worktree or a submodule."""
+    probe = git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir', check=False)
+    if probe.returncode != 0:
+        raise Refused('%s is not a git repository; worktrees only exist for git repositories' % repo)
+    common = probe.stdout.strip()
+    if os.path.basename(common) == '.git':
+        return os.path.dirname(common)
+    configured = git(repo, '--git-dir=' + common, 'config', '--get', 'core.worktree', check=False).stdout.strip()
+    if configured:
+        return os.path.realpath(os.path.join(common, configured))
+    return worktrees(repo)[0]['path']
+
+
+def project_name(main):
+    name = os.path.basename(main.rstrip('/'))
+    if name.endswith('.git') and len(name) > 4:
+        name = name[:-4]
+    return slug(name) or 'proyecto'
+
+
+def has_ddev_config(folder):
+    return os.path.isfile(os.path.join(folder, '.ddev', 'config.yaml'))
+
+
+def ddev_root(main):
+    """The folder with the .ddev/config.yaml that covers this checkout, or None."""
+    if has_ddev_config(main):
+        return main
+    home = os.path.expanduser('~')
+    parent = os.path.dirname(main)
+    while parent.startswith(home + os.sep):
+        if has_ddev_config(parent):
+            return parent
+        parent = os.path.dirname(parent)
+    level = [main]
+    for _ in range(2):
+        children = []
+        for folder in level:
+            try:
+                names = sorted(os.listdir(folder))
+            except OSError:
+                continue
+            for name in names:
+                child = os.path.join(folder, name)
+                if name.startswith('.') or name in DDEV_SCAN_SKIP or not os.path.isdir(child) or os.path.islink(child):
+                    continue
+                if has_ddev_config(child):
+                    return child
+                children.append(child)
+        level = children
+    return None
+
+
+def worktrees_dir(main):
+    """(folder for this repository's worktrees, DDEV root or None)."""
+    ddev = ddev_root(main)
+    if ddev:
+        return os.path.join(main, IN_PROJECT), ddev
+    return os.path.join(ROOT, project_name(main)), None
+
+
+def inside(path, folder):
+    return os.path.realpath(path).startswith(os.path.realpath(folder) + os.sep)
+
+
+def free_folder(repo, parent, branch_slug):
+    registered = {os.path.realpath(entry['path']) for entry in worktrees(repo)}
+    taken = lambda candidate: os.path.lexists(candidate) or os.path.realpath(candidate) in registered
+    base = os.path.join(parent, 'worktree-%s-%s' % (branch_slug, time.strftime('%Y%m%d')))
+    if not taken(base):
+        return base
+    stamped = '%s-%s' % (base, time.strftime('%H%M%S'))
+    candidate, counter = stamped, 2
+    while taken(candidate):
+        candidate, counter = '%s-%d' % (stamped, counter), counter + 1
+    return candidate
+
+
+def target_folder(repo, branch, base='HEAD'):
+    main = main_checkout(repo)
+    parent, _ = worktrees_dir(main)
+    if branch:
+        branch_slug = slug(branch) or 'rama'
+    else:
+        branch_slug = 'detached-' + git(repo, 'rev-parse', '--short=8', base + '^{commit}').stdout.strip()
+    return main, parent, free_folder(repo, parent, branch_slug)
+
+
+def ensure_ignored(main):
+    """Make git ignore <repo>/.claude/worktrees/ without touching versioned files."""
+    probe = IN_PROJECT + '/worktree-probe/file'
+    if git(main, 'check-ignore', '-q', '--no-index', '--', probe, check=False).returncode == 0:
+        return False
+    common = git(main, 'rev-parse', '--path-format=absolute', '--git-common-dir').stdout.strip()
+    exclude = os.path.join(common, 'info', 'exclude')
+    os.makedirs(os.path.dirname(exclude), exist_ok=True)
+    with open(exclude, 'a', encoding='utf-8') as handle:
+        handle.write('\n# worktree-location: worktrees of this DDEV project live here\n/.claude/worktrees/\n')
+    return True
+
+
+def record(entry):
+    os.makedirs(STATE, exist_ok=True)
+    with open(REGISTRY, 'a', encoding='utf-8') as handle:
+        handle.write(json.dumps(entry, ensure_ascii=False) + '\n')
+
+
+def recorded(path):
+    real, found = os.path.realpath(path), None
+    try:
+        with open(REGISTRY, encoding='utf-8') as handle:
+            for line in handle:
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if entry.get('action') == 'create' and os.path.realpath(entry.get('path', '')) == real:
+                    found = entry
+    except OSError:
+        pass
+    return found
+
+
+def ignored_untracked(main, relative):
+    tracked = git(main, 'ls-files', '--error-unmatch', '--', relative, check=False).returncode == 0
+    ignored = git(main, 'check-ignore', '-q', '--no-index', '--', relative, check=False).returncode == 0
+    return ignored and not tracked
+
+
+def per_machine_files(main):
+    files = [name for name in PER_MACHINE_FILES if os.path.isfile(os.path.join(main, name))]
+    include = os.path.join(main, INCLUDE_FILE)
+    if os.path.isfile(include):
+        listed = git(main, 'ls-files', '-z', '--others', '--ignored', '--exclude-from=' + include, check=False)
+        files += [name for name in listed.stdout.split('\0') if name][:MAX_INCLUDE_FILES]
+    return [name for name in dict.fromkeys(files) if ignored_untracked(main, name)]
+
+
+def copy_per_machine_files(main, folder):
+    copied = []
+    for relative in per_machine_files(main):
+        source, dest = os.path.join(main, relative), os.path.join(folder, relative)
+        if os.path.lexists(dest) or not os.path.isfile(source):
+            continue
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        shutil.copy2(source, dest)
+        copied.append(relative)
+    return copied
+
+
+def add(repo, branch, base='HEAD'):
+    """Create the worktree for BRANCH (None: detached at BASE). Returns (folder, notes)."""
+    repo = os.path.abspath(repo)
+    if branch is not None and git(repo, 'check-ref-format', '--branch', branch, check=False).returncode != 0:
+        raise Refused('"%s" is not a valid branch name' % branch)
+
+    main = main_checkout(repo)
+    parent, ddev = worktrees_dir(main)
+    lock_name = '%s-%s.lock' % (project_name(main), hashlib.sha1(main.encode()).hexdigest()[:8])
+    os.makedirs(STATE, exist_ok=True)
+    with open(os.path.join(STATE, lock_name), 'w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+
+        for entry in worktrees(repo):
+            if branch is not None and entry.get('branch') == branch:
+                if inside(entry['path'], parent):
+                    return entry['path'], []
+                raise Refused('branch %s is already checked out in %s' % (branch, entry['path']))
+
+        notes = []
+        if ddev and ensure_ignored(main):
+            notes.append('added /.claude/worktrees/ to .git/info/exclude')
+        main, parent, folder = target_folder(repo, branch, base)
+        os.makedirs(parent, exist_ok=True)
+        exists = branch is not None and git(
+            repo, 'show-ref', '--verify', '--quiet', 'refs/heads/' + branch, check=False).returncode == 0
+        if branch is None:
+            base_sha = git(repo, 'rev-parse', '--verify', base + '^{commit}').stdout.strip()
+            git(repo, 'worktree', 'add', '--detach', folder, base_sha)
+        elif exists:
+            git(repo, 'worktree', 'add', folder, branch)
+            base_sha = git(folder, 'rev-parse', 'HEAD').stdout.strip()
+        else:
+            base_sha = git(repo, 'rev-parse', '--verify', base + '^{commit}').stdout.strip()
+            git(repo, 'worktree', 'add', '--no-track', '-b', branch, folder, base_sha)
+
+        copied = copy_per_machine_files(main, folder)
+        if copied:
+            notes.append('copied per-machine files: ' + ', '.join(copied))
+        record({
+            'action': 'create', 'at': time.strftime('%Y-%m-%dT%H:%M:%S%z'), 'path': folder, 'repo': main,
+            'ddev_root': ddev, 'branch': branch, 'created_branch': branch is not None and not exists,
+            'base_sha': base_sha, 'copied': copied,
+        })
+        return folder, notes
+
+
+def remove(path):
+    if not os.path.isdir(path):
+        return 'already gone'
+    probe = git(path, 'rev-parse', '--path-format=absolute', '--git-common-dir', check=False)
+    if probe.returncode != 0:
+        raise Refused('%s is not a git worktree; nothing removed' % path)
+    common = probe.stdout.strip()
+    entries = worktrees(path)
+    main = main_checkout(path)
+    real = os.path.realpath(path)
+    entry = next((e for e in entries[1:] if os.path.realpath(e['path']) == real), None)
+    if entry is None:
+        raise Refused('%s is not a linked worktree of %s; nothing removed' % (path, os.path.dirname(common)))
+
+    removed = git(main, 'worktree', 'remove', path, check=False)
+    if removed.returncode != 0:
+        raise Refused('kept %s: %s (remove it by hand once its work is saved)' % (path, removed.stderr.strip()))
+
+    note = 'removed'
+    branch, created = entry.get('branch'), recorded(path)
+    if branch and created and created.get('created_branch') and created.get('branch') == branch:
+        tip = git(main, 'rev-parse', '--verify', '--quiet', 'refs/heads/' + branch, check=False).stdout.strip()
+        if tip and tip == created.get('base_sha'):
+            git(main, 'branch', '-D', branch, check=False)
+            note += ', branch %s deleted (no new commits)' % branch
+        elif git(main, 'branch', '-d', branch, check=False).returncode == 0:
+            note += ', branch %s deleted (merged)' % branch
+        else:
+            note += ', branch %s kept (unmerged commits)' % branch
+
+    parent = os.path.dirname(real)
+    if inside(parent, ROOT):
+        try:
+            os.rmdir(parent)
+        except OSError:
+            pass
+    record({'action': 'remove', 'at': time.strftime('%Y-%m-%dT%H:%M:%S%z'), 'path': path, 'note': note})
+    return note
+
+
+def read_hook_input():
+    try:
+        return json.load(sys.stdin)
+    except ValueError:
+        raise Refused('the hook input is not JSON')
+
+
+def main():
+    parser = argparse.ArgumentParser(prog='worktree-location', description=__doc__.split('\n\n')[0])
+    sub = parser.add_subparsers(dest='command', required=True)
+    where_cmd = sub.add_parser('where')
+    where_cmd.add_argument('--repo', default='.')
+    path_cmd = sub.add_parser('path')
+    path_cmd.add_argument('--repo', default='.')
+    path_cmd.add_argument('branch')
+    add_cmd = sub.add_parser('add')
+    add_cmd.add_argument('--repo', default='.')
+    add_cmd.add_argument('--base', default='HEAD')
+    add_cmd.add_argument('--detach', action='store_true')
+    add_cmd.add_argument('branch', nargs='?')
+    sub.add_parser('hook-create')
+    sub.add_parser('hook-remove')
+    args = parser.parse_args()
+
+    try:
+        if args.command == 'where':
+            print(worktrees_dir(main_checkout(os.path.abspath(args.repo)))[0])
+        elif args.command == 'path':
+            print(target_folder(os.path.abspath(args.repo), args.branch)[2])
+        elif args.command == 'add':
+            if bool(args.branch) == args.detach:
+                parser.error('add takes a BRANCH or --detach, not both and not neither')
+            folder, notes = add(args.repo, None if args.detach else args.branch, args.base)
+            for note in notes:
+                print(note, file=sys.stderr)
+            print(folder)
+        elif args.command == 'hook-create':
+            payload = read_hook_input()
+            name = payload.get('name') or payload.get('worktree_name')
+            if not name:
+                raise Refused('the WorktreeCreate input has no worktree name')
+            cwd = payload.get('cwd') or os.environ.get('CLAUDE_PROJECT_DIR') or os.getcwd()
+            folder, _ = add(cwd, name, payload.get('base_ref') or 'HEAD')
+            print(folder)
+        elif args.command == 'hook-remove':
+            payload = read_hook_input()
+            path = payload.get('worktree_path')
+            if not path:
+                raise Refused('the WorktreeRemove input has no worktree_path')
+            print(remove(path), file=sys.stderr)
+    except Refused as error:
+        print('worktree-location: %s' % error, file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()

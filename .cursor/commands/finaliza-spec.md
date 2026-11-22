@@ -52,10 +52,7 @@ Only when the gate passes (**all artifacts complete and every task `- [x]`**) co
    ```bash
    git add -A
    ```
-4. Commit with a **single, meaningful English message** in imperative mood that summarizes the window's work and references the change. First line ≤72 chars. End the message body with the trailer:
-   ```
-   Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
-   ```
+4. Commit with a **single, meaningful English message** in imperative mood that summarizes the window's work and references the change. First line ≤72 chars. The developer's git identity is the only author: no co-author trailer and no attribution to Claude, Anthropic or an AI (global rule `autoria-commits.md`).
    Example first line: `Complete <slug> and archive OpenSpec change`.
 5. Report the resulting commit hash and short subject. **Do not push.**
 

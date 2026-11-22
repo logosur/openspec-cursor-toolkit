@@ -166,6 +166,70 @@ Deploy all: bash ai-developer/scripts/exporta-spec.sh --all
 
 ---
 
+## Phase 3b — Exclusion list and drift (before any wide export)
+
+### Exclusion list
+
+A project that keeps its own version of a bundle is declared, not patched back by hand after each run:
+
+```text
+# <bundle>/bundle.exclude
+my-app  # master is production; each session publishes its own verified work
+```
+
+Sources, in load order: `templates/openspec-cursor/exclude.global` (all bundles), `<bundle>/bundle.exclude` (this bundle), `--exclude-file FILE`, `--exclude PATTERN`. A pattern containing `/` matches the absolute project path (glob allowed); a bare word matches the project directory name. Reason after `#` is printed on every run.
+
+Excluded projects are skipped entirely and listed in `## EXPORT_EXCLUDED` as `EXCLUDED:<path>|<pattern>|<reason>|<source>`.
+
+### Drift
+
+The exporter records what it delivered — `sha256` per file — in the local registry, outside every repo:
+
+```text
+<PROJECTS_BASE>/.cursor-local/export-spec/baselines/<project>/<slug>.sha256
+```
+
+Never inside the project: `.cursor/context/` is gitignored in some repos and not in others, and a baseline written there shows up as a dirty file in the ones where it is not.
+
+Classification per file: `new`, `unchanged`, `updated` (differs from bundle but matches baseline — the bundle moved on), `updated-nobaseline` (no baseline, file clean), `drift` (differs from both baseline and bundle, or no baseline and uncommitted local changes).
+
+**Drift is never overwritten.** The run reports it, stats carry `FILES_DRIFT` / `PROJECTS_DRIFT`, the `## EXPORT_DRIFT` block lists `DRIFT:<root>|<dst>`, and the exit code is **3**. The baseline is kept as it was, so the drift keeps surfacing until somebody decides.
+
+On drift, the agent **must** diff the project file against the bundle and report which of the three it is — improvement to port upstream, intentional divergence to declare in `bundle.exclude`, or stale copy to discard with `--accept-drift`. Reporting "exit 3" without that reading is not a result.
+
+`--check-drift` audits without writing (implies `--dry-run`). Run it before any `--all` export.
+`--check-drift` y `--dry-run` no escriben nada, y su informe lo dice: `Done (plan only, nothing written)`, `WRITES_PERFORMED=0` y contadores `WOULD_FILES_NEW` / `WOULD_FILES_UPDATED` / `WOULD_PROJECTS_TOUCH`. Nunca leer un log de auditoría como prueba de despliegue: solo una pasada real emite `FILES_NEW` / `FILES_UPDATED`.
+
+
+### Adding new entries to an existing bundle
+
+A new manifest entry has no baseline anywhere, so a consumer that already has a file at that path is unprotected on the first run: tracked and clean it is overwritten as `FIRSTRUN`, untracked it is overwritten silently as `no baseline`. Before the first export of new entries:
+
+1. For every consumer and every new destination that already exists and differs from the bundle, compare it with **every historical version** of that path — this repo, any fork of it, and the files ever stored in `ai-developer/templates`. A match is an old delivery: safe to update.
+2. Anything without a known origin is the project's own work until proven otherwise. Protect it before exporting by seeding its baseline with the bundle's sha (`<sha>  <dst>` in `<PROJECTS_BASE>/.cursor-local/export-spec/baselines/<project>/<slug>.sha256`): it then reports as `DRIFT` and is never written.
+3. Run `--check-drift` and confirm the protected set is entirely inside `## EXPORT_DRIFT` before the real run.
+
+On 2026-10-15 adding the Claude surface and the lifecycle commands found 228 such files across consumers: 102 were old deliveries and 126 had no known origin, mostly in projects with their own evolved tooling.
+
+### Symlinked layouts
+
+When `.claude/commands` (or `skills`, `scripts`) is a symlink to `.cursor/…`, two entries resolve to one real file. The script resolves every destination with `realpath -m` — which works even when intermediate directories do not exist yet, unlike `readlink -f` — and keeps the entry whose path does **not** traverse a symlink: that surface owns the files. Manifest order never decides which variant the project gets.
+
+### Excluding a project by hand (when there is no other way)
+
+If a project must be left out for one run and no pattern fits, back up **every** entry of the manifest for it — not only the ones a `--dry-run` flagged as divergent. Files that match the bundle are rewritten too, and that is where an incoherent half-and-half state comes from (learned the hard way on a real export).
+
+## Locking — two sessions never interleave an export
+
+Only one export of a given bundle runs at a time. A second run of the same bundle prints `WAIT: another export of '<slug>' holds the lock (…)` and continues on its own when the first finishes; different bundles may run in parallel. The shared projects registry has its own short lock.
+
+- Locks live in `<PROJECTS_BASE>/.cursor-local/export-spec/locks/` (`<slug>.lock`, `registry.lock`), outside every repo.
+- The kernel releases a lock when its holder exits or is killed, so a crashed run never leaves it stuck. The lock file records the last holder; the `WAIT` line says whether that process is still alive instead of trusting a stale record.
+- `--lock-timeout SECONDS` (default 1800) bounds the wait; on timeout the script exits **4** without writing anything.
+- Audits (`--check-drift`, `--dry-run`) take the lock too, so they never read a half-finished export.
+
+Why it exists: on 2026-10-15 two sessions exported the same bundle a minute apart. Nothing broke only because the content matched; with different bundle versions one would have overwritten the other and the baselines would describe a delivery that no longer exists, which silently disables drift detection.
+
 ## Phase 4 — Deploy (smart update)
 
 Default: **compare before copy**. For each manifest entry in each target project:
@@ -208,6 +272,8 @@ bash "${AI_DEV}/scripts/exporta-spec.sh" --slug "${SLUG}" --projects-base "${PRO
 | `0` | Parse `discovered=N` and `## EXPORT_STATS`; **paste all `TARGET:` lines** under `## Directorios exportados`; mention `REGISTRY=` path |
 | `1` | Show stderr; fix manifest/files |
 | `2` | Ask for `PROJECTS_BASE`; do not proceed until answered |
+| `4` | Lock timeout: another export of the same bundle is still running. Nothing was written. Never delete a lock file to get past it |
+| `3` | Drift: read `## EXPORT_DRIFT`, diff each file, and report improvement / intentional divergence / stale copy. Never re-run with `--accept-drift` on your own initiative |
 
 ---
 

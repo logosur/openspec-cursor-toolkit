@@ -1,6 +1,6 @@
 ---
 name: openspec-extract-spec-from-doc
-description: How to convert a .doc/.docx/.odt ticket reference document (text + screenshots) into a precise OpenSpec spec/design/tasks/VERIFY
+description: "Converts a .doc, .docx or .odt ticket reference document (text plus annotated screenshots, PDF as a last resort) into a precise OpenSpec proposal, design, spec, tasks and VERIFY, analysing every image and inferring nothing the document does not say. Use when the developer attaches or points to such a document as the source of truth for a ticket, for example with prepara-tarea or mejora-tarea (spec desde .doc/.docx)."
 ---
 
 

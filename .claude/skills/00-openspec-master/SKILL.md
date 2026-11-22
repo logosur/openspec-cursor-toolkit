@@ -1,6 +1,6 @@
 ---
 name: 00-openspec-master
-description: Master OpenSpec workflow for creating strong implementation specifications
+description: "Full OpenSpec lifecycle for strong implementation specifications, ending in a verify verdict (READY TO APPLY, NEEDS HYDRATION, BLOCKED BY UNKNOWN or UNSAFE TO APPLY) before any code is written. Use when the user asks to create, improve, audit, hydrate or implement a feature, bugfix, refactor, test strategy, API, webhook or backend flow using OpenSpec, or asks for a spec fuerte."
 ---
 
 When the user asks to create, improve, audit, hydrate, or implement a feature, bugfix, refactor, test strategy, API behavior, webhook behavior, or backend flow using OpenSpec, follow this workflow:

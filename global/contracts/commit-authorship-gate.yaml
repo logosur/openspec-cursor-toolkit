@@ -1,0 +1,18 @@
+piece: commit-authorship-gate
+dest: hooks/commit-authorship-gate
+kind: hook
+event: PreToolUse
+probes:
+  - name: unrelated command passes silently
+    stdin: {tool_name: Bash, tool_input: {command: ls}}
+    exit: [0]
+    stdout: empty
+  - name: skipping git hooks is denied with a JSON decision
+    stdin: {tool_name: Bash, tool_input: {command: "git commit --no-verify -m x"}}
+    exit: [0]
+    stdout: json
+    contains: '"deny"'
+  - name: unparseable stdin fails open
+    stdin_raw: "{not json"
+    exit: [0]
+    stdout: empty

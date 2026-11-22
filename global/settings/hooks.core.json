@@ -1,0 +1,56 @@
+{
+  "PreToolUse": [
+    {
+      "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 ~/.claude/hooks/commit-authorship-gate",
+          "timeout": 10
+        }
+      ]
+    },
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 ~/.claude/hooks/worktree-location-gate",
+          "timeout": 10
+        }
+      ]
+    },
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 ~/.claude/hooks/process-kill-gate",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "WorktreeCreate": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 ~/.claude/scripts/worktree-location hook-create",
+          "timeout": 600
+        }
+      ]
+    }
+  ],
+  "WorktreeRemove": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 ~/.claude/scripts/worktree-location hook-remove",
+          "timeout": 120
+        }
+      ]
+    }
+  ]
+}

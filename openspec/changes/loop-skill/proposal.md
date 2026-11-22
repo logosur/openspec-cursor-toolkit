@@ -5,7 +5,7 @@
 
 ## Why
 
-The toolkit already ships every OpenSpec phase as a separate command: `/prepara-tarea` (bootstrap), `/repasa-spec` (gaps → hydrate → apply → gaps), `/ejecuta-tests-reporte` (scoped tests), `/verifica-tarea` (scenario matrix), `/finaliza-spec` (commit + archive). Consumer projects add their own `/deploy` (FACT: `vitalcigar.es/.claude/commands/deploy.md`, `app-residuos-oscar/.claude/commands/deploy.md`).
+The toolkit already ships every OpenSpec phase as a separate command: `/prepara-tarea` (bootstrap), `/repasa-spec` (gaps → hydrate → apply → gaps), `/ejecuta-tests-reporte` (scoped tests), `/verifica-tarea` (scenario matrix), `/finaliza-spec` (commit + archive). Consumer projects add their own `/deploy` (FACT: the `.claude/commands/deploy.md` of two consumer projects).
 
 What is missing is the **top layer**: a single entry point that takes an idea (`slug` + description) and drives the whole lifecycle **unattended** until the feature is specified, implemented, gap-free, tested, regression-free and deployed — or until an honest, machine-readable blocker stops it. Today the developer has to:
 

@@ -5,7 +5,7 @@ description: Build a persistent, re-runnable test harness for an OpenSpec spec/c
 
 # Harness spec — persistent harness + independent supervisor verifier
 
-> **Command:** `.claude/commands/harness-spec.md`
+> **Command:** `.cursor/commands/harness-spec.md`
 > **OpenSpec:** `openspec/changes/<slug>/specs/**/spec.md` or `openspec/specs/<capability>/spec.md`
 > **Stack:** Symfony/PHPUnit (`apps/api`), Next.js/Playwright (`apps/web`), Docker Compose
 
@@ -127,7 +127,7 @@ Crear/actualizar `.claude/scripts/harness/<slug>/run.sh` que ejecute exactamente
 docker compose exec -T api php bin/phpunit --filter='HarnessTest' --testdox
 
 # Web layer
-npm run test:e2e --workspace @residuos/web -- "apps/web/e2e/harness-<slug>.spec.ts"
+npm run test:e2e --workspace @my-app/web -- "apps/web/e2e/harness-<slug>.spec.ts"
 ```
 
 Ejecutar `run.sh` en esta sesión, después del último cambio (nunca reusar resultados pre-edición). Guardar salida cruda + resumen estructurado en `.claude/context/verification/harness-<slug>/run-<timestamp>.json` (`scenario_id → PASS/FAIL/BLOCKED`, comando, exit code, duración).

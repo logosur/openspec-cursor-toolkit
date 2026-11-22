@@ -1,84 +1,63 @@
-# GAPS — inbound-external-orders (revisión multiagente honesta)
+# GAPS — loan-reminders (revisión multiagente honesta)
 
-> **Nota:** ejemplo histórico con nombres Drupal/Drush. Usa la **estructura**; el stack lo define cada proyecto (`00-openspec-stack-agnostic.mdc`).
+> **Nota:** ejemplo ilustrativo con un dominio inventado (avisos de préstamos de una biblioteca). Usa la **estructura**; el stack lo define cada proyecto (`00-openspec-stack-agnostic.mdc`).
 
 > **Fecha:** 2026-06-24  
-> **Estado real:** gaps **verificados** hidratados en `spec.md` como **REQ-IO-13…REQ-IO-19**.  
-> **Corrección:** una versión anterior de este fichero afirmaba falsamente «hidratado REQ-IO-13…28»; `spec.md` solo tenía REQ-IO-01…12 hasta esta revisión.
+> **Estado real:** gaps **verificados** hidratados en `spec.md` como **REQ-LN-13…REQ-LN-17**.  
+> **Corrección:** una versión anterior de este fichero afirmaba «hidratado REQ-LN-13…25»; `spec.md` solo tenía REQ-LN-01…12 hasta esta revisión.
 
 ## Metodología — bucle de 5 iteraciones (parada anticipada en iter. 5)
 
 | Iter | Foco | Resultado honesto |
 |------|------|-------------------|
-| **1** | Cadena Deliverect async (pending KV, DL, lock, dry-run) | **4 gaps FACT** → REQ-IO-13, 14, 15, 16 |
-| **2** | `sweetrail_external_orders` + IDs por proveedor | **2 gaps FACT** → REQ-IO-17, 18; casuísticas marketplace documentadas como limitación v1 |
-| **3** | Ops / seguridad / coexistencia herramientas | **1 gap FACT** (matriz operador no era REQ) → REQ-IO-19; resto **INFERENCIA** o **ya cubierto** |
-| **4** | Verificación cruzada spec ↔ código ↔ GAPS.md | Detectada **afirmación falsa** de hidratación previa; confirmados ficheros ausentes (`UberEatsProcessor.php`, `JustEatProcessor.php`) |
-| **5** | ¿Más gaps útiles sin inventar? | **STOP** — candidatos restantes son política de producto, UNKNOWN en PRO, o duplicados de REQ existentes |
+| **1** | Cola de recordatorios async (reintentos, dead-letter, cerrojo, dry-run) | **3 gaps FACT** → REQ-LN-13, 14, 15 |
+| **2** | Identificadores externos por proveedor de correo y SMS | **1 gap FACT** → REQ-LN-16; casuísticas de proveedores secundarios documentadas como limitación v1 |
+| **3** | Ops / seguridad / coexistencia de herramientas | **1 gap FACT** (matriz del operador no era REQ) → REQ-LN-17; resto **INFERENCIA** o **ya cubierto** |
+| **4** | Verificación cruzada spec ↔ código ↔ GAPS.md | Detectada **afirmación falsa** de hidratación previa; confirmado un fichero ausente (`SmsReminderSender.php`) |
+| **5** | ¿Más gaps útiles sin inventar? | **STOP** — los candidatos restantes son política de producto, UNKNOWN en producción o duplicados de REQ existentes |
 
-**Criterio de parada (iter. 5):** no quedan casuísticas **demostrables en código** que cambien el contrato de APPLY sin especular. Lo que sigue abajo como «no hidratado» queda en diseño/OPERATOR como notas, no como REQ duro.
+**Criterio de parada (iter. 5):** no quedan casuísticas **demostrables en código** que cambien el contrato de APPLY sin especular. Lo que sigue como «no hidratado» queda en design/OPERATOR como nota, no como REQ duro.
 
 ---
 
 ## Matriz consolidada
 
-Leyenda estado: **HYDRATED** = REQ añadido | **ALREADY** = ya en REQ-IO-01…12 | **INFERENCE** = recomendación, no gap FACT | **REJECTED** = descartado (inventado, duplicado o UNKNOWN)
+Leyenda: **HYDRATED** = REQ añadido | **ALREADY** = ya en REQ-LN-01…12 | **INFERENCE** = recomendación, no gap FACT | **REJECTED** = descartado (inventado, duplicado o UNKNOWN)
 
 | ID | Sev | Gap | Evidencia (FACT) | Estado | Req |
 |----|-----|-----|------------------|--------|-----|
-| G-01 | must | Recovery no cubre **pending KV** ni **dead-letter** tras backup/watchdog | `DispatchCreateAsyncEnqueuerInterface::PENDING_KV_COLLECTION`, `DeliverectDispatchCreateReplayer`, OPERATOR L35 | **HYDRATED** | REQ-IO-13 |
-| G-02 | must | Recovery Deliverect debe resolver **store_id** vía `DeliverectStoreResolver` | `DeliverectDispatchCreateReplayer` L63–69, `DispatchCreateMaterializer::materialize()` L64–71 | **HYDRATED** | REQ-IO-14 |
-| G-03 | must | Lock compartido worker / DL replay / admin recovery | Worker + replayer `deliverect_dispatch_create_materialize:{jobId}`, 120 s | **HYDRATED** | REQ-IO-15 |
-| G-04 | must | No capturar/recuperar como Create real el tráfico **Postman dry-run** | `DispatchWebhookController` L226–229, `DispatchProductionDryRunHandler` | **HYDRATED** | REQ-IO-16 |
-| G-05 | should | Cola capture con política important-queue / DL | `important-items-harness.mdc` — **no** fallo observable hoy (módulo no existe) | **INFERENCE** | design.md nota |
-| G-06 | must | Marketplace: handlers rotos o stub; recovery frágil | `WebhookController` referencia clases ausentes; `GlovoProcessor::processNotification` no materializa; JustEat L212–214 | **HYDRATED** | REQ-IO-17 |
-| G-07 | must | ID externo distinto por integrador (`order_number` vs `field_external_order_id`) | Plugins `UberEats.php`/`Glovo.php`/`JustEat.php` vs Deliverect `orderId` | **HYDRATED** | REQ-IO-18 |
-| G-08 | must | Matriz coexistencia admin tab vs Drush DL | OPERATOR L31–38 existía pero no en spec | **HYDRATED** | REQ-IO-19 |
-| G-09 | should | Preview admin ≠ dry-run materialization | Patrón dry-run en replayer L80–81 — Drush ya lo cubre | **INFERENCE** | OPERATOR |
-| G-10 | should | Permisos granulares list vs recover vs outbound | Buena práctica genérica | **INFERENCE** | post-v1 |
-| G-11 | should | PII extendida en backup/preview | `HttpExchangePayloadFormatter` redacta secrets; backup no existe aún | **INFERENCE** | post-v1 |
-| G-12 | should | Auditoría `recovered_by_uid` | No conflicto con código actual | **INFERENCE** | design D2 |
-| G-13 | should | Watchdog repo cap 4000 filas | `IntegrationHttpExchangeWatchdogRepository::MAX_ROWS` | **ALREADY** | REQ-IO-11 edge + OPERATOR |
-| G-14 | should | Materialización parcial multi-location | Loop en `DispatchCreateMaterializer` | **ALREADY** | spec Edge cases |
-| G-15 | should | Tab 3 no aplica a marketplace inbound-only | REQ-IO-08/09 ya dashboard commerce order | **ALREADY** | REQ-IO-17 |
-| G-16 | should | Banner cola capture atascada | Cola aún no implementada | **INFERENCE** | post-v1 |
-| G-17 | should | dblog retention PRO vs lookback 168h | **No verificado** en PRO | **REJECTED** | U-04 UNKNOWN |
-| G-18 | should | Cap entradas KV backup además de TTL | No hay storage backup en código | **INFERENCE** | T-R2 área |
-| G-19 | could | Uber notification-only sin API fetch | `UberEats.php` fetch — no bloquea Deliverect v1 | **INFERENCE** | REQ-IO-17 nota |
-| G-20 | could | PRO default `capture_enabled=false` | Política deploy, no evidencia runtime | **REJECTED** | design nota |
+| G-01 | must | La recuperación no cubre los mensajes en **dead-letter** | `ReminderQueue::DEAD_LETTER`, `ReminderReplayer`, OPERATOR L35 | **HYDRATED** | REQ-LN-13 |
+| G-02 | must | Cerrojo compartido entre worker, reintento manual y panel de administración | `reminder_send:{loanId}`, 120 s, en worker y replayer | **HYDRATED** | REQ-LN-14 |
+| G-03 | must | Un envío en **dry-run** no debe marcar el préstamo como avisado | `ReminderController` L120–128, `DryRunSender` | **HYDRATED** | REQ-LN-15 |
+| G-04 | must | Id externo distinto por proveedor (`message_id` vs `sid`) | `MailProvider.php` / `SmsProvider.php` | **HYDRATED** | REQ-LN-16 |
+| G-05 | must | Matriz de qué herramienta usa el operador según el estado | OPERATOR L31–38 existía pero no en spec | **HYDRATED** | REQ-LN-17 |
+| G-06 | should | Permisos separados para listar y reintentar | Buena práctica genérica | **INFERENCE** | post-v1 |
+| G-07 | should | Datos personales en el registro de envíos | `PayloadFormatter` ya redacta secretos | **INFERENCE** | post-v1 |
+| G-08 | should | Tope de 4000 filas en el registro de envíos | `SendLogRepository::MAX_ROWS` | **ALREADY** | REQ-LN-11 |
+| G-09 | should | Retención del registro en producción frente a ventana de 168 h | **No verificado** en producción | **REJECTED** | U-04 UNKNOWN |
+| G-10 | could | Proveedor SMS sin API de consulta de estado | `SmsProvider.php` no hace fetch — no bloquea v1 | **INFERENCE** | REQ-LN-16 nota |
 
 ---
 
 ## Casuísticas útiles (documentación, no REQ nuevos)
 
-### Deliverect
-- Backup expirado pero pending KV / DL aún con payload → usar REQ-IO-13 (enlace operador a Drush si admin no puede).
-- Payload watchdog truncado (6000 chars) → REQ-IO-11 + pending KV / DL.
-- `canDeliver=false` → payload en `DispatchValidateFalseLogStorage` (auxiliar REQ-IO-11); **no** materializar como Create exitoso.
-
-### Marketplace
-- Modo 2 manual: claves por proveedor (REQ-IO-18).
-- Recovery v1 **Deliverect-first**; marketplace con aviso explícito si handler no materializa (REQ-IO-17).
-
-### Operación
-- Dos admins recovery simultáneo → REQ-IO-15 lock + mensaje «lock busy».
-- Herramienta recomendada según estado → REQ-IO-19.
+- Mensaje en dead-letter con plantilla ya borrada → REQ-LN-13 con aviso al operador.
+- Dos administradores reintentando a la vez → REQ-LN-14, mensaje «lock busy».
+- Herramienta recomendada según el estado del envío → REQ-LN-17.
 
 ---
 
-## Fuera de v1 (sin bloquear APPLY Deliverect)
+## Fuera de v1 (sin bloquear APPLY)
 
-- Rate limits por uid/hora en PRO.
-- Email ops automático.
-- Permisos granulares (G-10).
-- Export legal hold / congelar entry más allá de TTL.
-- E2E permisos negativos por rol (VERIFY ampliado opcional).
+- Límite de reintentos por usuario y hora.
+- Permisos granulares (G-06).
+- E2E de permisos negativos por rol (VERIFY ampliado opcional).
 
 ---
 
 ## Verification (this document)
 
-- **Verified:** `grep '^## Requirement REQ-IO-' spec.md` — antes solo IO-01…12; tras revisión IO-13…19 añadidos en el mismo turno.
-- **Verified:** `Glob **/UberEatsProcessor.php` → 0 ficheros; `GlovoProcessor.php` L186–201 stub; `JustEat` handler L212–214 not implemented.
-- **Verified:** `DeliverectDispatchCreateReplayer.php` pending store + lock; `DispatchWebhookController.php` L226–234 dry-run / canDeliver=false.
-- **Not verified:** Runtime DDEV con servicios rotos de `WebhookController` (autowire fail al habilitar módulo).
+- **Verified:** `grep '^## Requirement REQ-LN-' spec.md` — antes solo LN-01…12; tras la revisión, LN-13…17 añadidos en el mismo turno.
+- **Verified:** `Glob **/SmsReminderSender.php` → 0 ficheros; `SmsProvider.php` L186–201 stub.
+- **Verified:** `ReminderReplayer.php` cerrojo + dead-letter; `ReminderController.php` L120–128 dry-run.
+- **Not verified:** ejecución en el entorno local con el proveedor SMS real.

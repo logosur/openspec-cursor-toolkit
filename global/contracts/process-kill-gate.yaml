@@ -1,0 +1,14 @@
+piece: process-kill-gate
+dest: hooks/process-kill-gate
+kind: hook
+event: PreToolUse
+probes:
+  - name: unrelated command passes silently
+    stdin: {tool_name: Bash, tool_input: {command: ls}}
+    exit: [0]
+    stdout: empty-or-json
+  - name: kill -1 is denied with a JSON decision
+    stdin: {tool_name: Bash, tool_input: {command: "kill -9 -1"}}
+    exit: [0, 2]
+    stdout: any
+    contains: deny

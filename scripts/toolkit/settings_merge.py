@@ -121,3 +121,8 @@ def dumps(settings: dict) -> bytes:
 
 def key_of(rec: dict) -> list[str]:
     return list(_key(rec))
+
+
+def normalise_identity(ident: tuple[str, str, str], home: str) -> tuple[str, str, str]:
+    event, matcher, command = ident
+    return (event, matcher or '', normalise(command, home))

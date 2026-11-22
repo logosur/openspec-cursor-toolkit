@@ -1,0 +1,14 @@
+piece: worktree-location-gate
+dest: hooks/worktree-location-gate
+kind: hook
+event: PreToolUse
+probes:
+  - name: unrelated command passes silently
+    stdin: {tool_name: Bash, tool_input: {command: ls}}
+    exit: [0]
+    stdout: empty-or-json
+  - name: a corrupt config falls open
+    stdin: {tool_name: Bash, tool_input: {command: ls}}
+    corrupt_config: true
+    exit: [0]
+    stdout: empty-or-json

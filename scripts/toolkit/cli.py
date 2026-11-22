@@ -70,6 +70,15 @@ def cmd_install(args) -> int:
     if not p.changes() and p.previous:
         print('already installed: nothing to do')
         return 0
+    from . import contracts
+    replaced = {d for d, x in p.desired.items() if x.source.startswith('override')}
+    if replaced & {c['dest'] for c in contracts.load_all()}:
+        ran, failures = contracts.check_plan_in_sandbox(p, {'override', 'override-extra'})
+        for f in failures:
+            print(f.render())
+        if failures and not args.allow_contract_failures:
+            print('install refused: a piece provided by the override breaks its contract (--allow-contract-failures to force)')
+            return 3
     target.mkdir(parents=True, exist_ok=True)
     apply_mod.install(p, toolkit_version())
     print(f'installed into {target}')
@@ -103,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
     _common(p_install)
     p_install.add_argument('--dry-run', action='store_true')
     p_install.add_argument('-v', '--verbose', action='store_true')
+    p_install.add_argument('--allow-contract-failures', action='store_true')
     p_install.set_defaults(func=cmd_install)
     p_un = sub.add_parser('uninstall', help='remove what the last install wrote and restore backups')
     p_un.add_argument('--target')

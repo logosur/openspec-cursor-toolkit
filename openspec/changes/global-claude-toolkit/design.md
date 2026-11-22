@@ -42,18 +42,18 @@ Facts that shape the design (measured 2026-11-22 on `develop` @ `3517c3b` and on
 ### D2. Modules with a manifest each
 `global/modules/<name>.yaml`:
 ```yaml
-name: core
+name: heavy-jobs
 summary: …
 requires: {binaries: [python3, git, flock], python: "3.10", os: linux}
 optional: {binaries: [gh, jq, docker, node]}
 files:            # src (repo-relative) -> dest (relative to the Claude dir)
   - {src: global/scripts/heavy-job, dest: scripts/heavy-job, mode: "0755"}
   - {src: global/rules/, dest: rules/}      # trailing slash = directory
-hooks: global/settings/hooks.core.json      # fragment merged into settings.json
-config: [heavy-job, worktree-location]      # pieces with a config file
-depends: []                                 # other modules
+hooks: [global/settings/hooks.heavy-jobs.json]  # fragments merged into settings.json
+config: [heavy-job]                         # pieces with a config file
+depends: [core]                             # other modules
 ```
-Modules today: `openspec` (catalog from `.claude/`), `core` (general mechanics). Planned: `supervision`. A file belongs to exactly one module (validator).
+Default modules: `openspec` (catalog from `.claude/`), `core` (guard rails), `devtools`. Opt-in: `sessions`, `supervision`, `heavy-jobs`. A file belongs to exactly one module (validator).
 
 ### D3. Override directory and precedence
 `$CLAUDE_TOOLKIT_OVERRIDE`, default `~/.config/claude-toolkit/`:
@@ -159,6 +159,16 @@ Third-party skills and plugins (listed in README as optional), skills of client 
   the toolkit and are not an earlier version of it; the rest moved to the override's `archive/`. An
   install therefore reproduces the live dir exactly (evidence/equivalence.md) and reconciling the 43
   differing files is left to `drift`/`pull`, file by file.
+- **A fifth module, `supervision`, and a sixth, `heavy-jobs`** (second batch, tasks §8), both opt-in.
+  `heavy-jobs` is separate because the semaphore is useful without supervising anything (SRP); it
+  works without the supervision module, and then refuses priority. Every exception of the
+  cross-project gate is off until the `supervision` config piece names it, and a mistyped value keeps
+  the code's default (`toolkit_config.load_checked`).
+- **Still outside: account switch, session nudge, cloud test runner, project pause, handoff guard and
+  routines.** The first three handle session tokens, an app socket or OAuth credentials; the others
+  belong to one machine's way of working. The published pieces name them as optional and work
+  without them, so D11's "only as a whole" no longer applies: the unit that ships is the one whose
+  tests pass with those six absent.
 - **Probes take raw stdin** (`stdin_raw`), so a contract can test unparseable input. A probe found that
   the authorship gate exits 1 on valid JSON that is not an object; the gate is edited only by its
   owner by hand, so it is recorded (core-scope.md) and not changed.

@@ -55,13 +55,13 @@ Requirement references: **GI** = `specs/global-install`, **OL** = `specs/overrid
 - [x] 7.4 Developer override prepared in `~/.config/claude-toolkit/` from the live tree (personal pieces, literal rules, supervision unit, config values, exclusions); verify the private denylist covers every private name it introduces.
 - [x] 7.5 Run `equivalence --live ~/.claude` (read-only on the live tree); save the counts to `evidence/equivalence.md` (paths of private pieces summarised by class, never named); verify 0 `unexplained`.
 
-## 8. Supervision unit (planned; acceptance criteria, not done in this change unless all hold)
+## 8. Supervision unit (second batch)
 
-Not done in this change: none of 8.1–8.6 was started. The unit stays in the developer's private override; see `evidence/core-scope.md`.
+Shipped so far, opt-in: the question queue, its prompt hook and the cross-project message gate (module `supervision`), and the job semaphore with its gate (module `heavy-jobs`). Account switch, session nudge, cloud test runner, project pause, handoff guard and routines stay out (design, Changes during implementation); the published pieces work without them.
 
 - [ ] 8.1 Protocol strings (session titles, markers, watched rule names, skill anchors, app registry glob, claim windows, excluded-project list) moved to one config piece `supervision`; accept when every duplicate constant is read from it and the existing self-tests pass unchanged.
 - [ ] 8.2 Split the session supervisor into a package (`lock`, `census`, `watch`, `hook`, `backlog`, `lint`, `cloud`, `selftest`) behind the same `supervisor-lock <subcommand>` CLI; accept when `supervisor-lock self-test` and every test that loads it pass from the repo copy, the CLI help lists the same subcommands, and equivalence stays green.
-- [ ] 8.3 Extract heavy-job's command classifier into a library used by its gate; accept when both test files pass.
+- [x] 8.3 Extract heavy-job's command classifier into a library used by its gate; accept when both test files pass. Done: `global/scripts/lib/heavy_job_classifier.py`; `test_heavy_job.py` and `test_heavy_job_gate.py` pass in a network-less container with a throwaway HOME (223 tests in the installer suite).
 - [ ] 8.4 Neutral versions of the supervision skill, its references and the rules written around it (quotes and incidents stay in the override as appendices); accept when the privacy guard is 0, the supervisor's skill lint passes on the neutral text, and equivalence is green with the literal text in the override.
 - [ ] 8.5 Self-tests that use the desktop app's files or sockets run only after checking every path is redirected into the sandbox; accept when that check is written down per test.
 - [ ] 8.6 `supervision` module manifest + contracts; accept when `verify` passes on a fresh install with and without the override.

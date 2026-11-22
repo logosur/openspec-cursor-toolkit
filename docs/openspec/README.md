@@ -17,7 +17,7 @@ This **toolkit** repo ships commands/skills/rules (Cursor) and commands/skills (
 
 ## Stack-agnostic use
 
-Each consuming project adds its own **stack rule** (local dev, tests, URLs). The toolkit references `00-openspec-stack-agnostic.mdc` (Cursor) / `.claude/skills/00-openspec-stack-agnostic/SKILL.md` (Claude Code) at runtime — see `app-residuos-oscar` (Symfony + Next.js) as a reference consumer.
+Each consuming project adds its own **stack rule** (local dev, tests, URLs). The toolkit references `00-openspec-stack-agnostic.mdc` (Cursor) / `.claude/skills/00-openspec-stack-agnostic/SKILL.md` (Claude Code) at runtime.
 
 ## Quick links
 

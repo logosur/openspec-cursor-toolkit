@@ -11,7 +11,7 @@ Claude Code solo carga este archivo y `.claude/rules/*.md`; `.cursor/rules/*.mdc
 - `/exporta-spec <slug>` | `/exporta-spec all` | `/exporta-spec command|skill <slug>`.
 - Flujo: bundle `<ai-developer>/templates/openspec-cursor/<slug>/bundle.manifest` → `bash <ai-developer>/scripts/exporta-spec.sh --slug <slug> --projects-base "$PROJECTS_BASE"` (o `--all`). Diff `cmp -s`: NEW/UPDATE/SKIP; `--force` solo si se pide.
 - `PROJECTS_BASE` defecto `$HOME/projects`; si no existe, preguntar (exit 2), nunca adivinar.
-- Script en clon externo: `/home/ivan/projects/htdocs/auladrupal/ai-developer/scripts/exporta-spec.sh` (no aquí). Si falta: parar e informar.
+- Script en clon externo: `<ai-developer>/scripts/exporta-spec.sh` (ruta local del clon, fuera de este repo) (no aquí). Si falta: parar e informar.
 - Registro `<PROJECTS_BASE>/.claude-local/export-spec/` y `.claude/context/export-spec/`: gitignored, nunca commitear.
 - Tras exportar: pegar lista completa `## EXPORT_TARGETS` en chat.
 

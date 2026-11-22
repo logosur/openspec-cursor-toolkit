@@ -26,9 +26,9 @@
 
 - [x] 1.18 Skill §Publish: never `git add -A` blindly — inspect `git status --porcelain`, stage only the change's paths, ask when the split is unclear, and record the staged file list as evidence (REQ-RS-PUBLISH-01 — found by the end-to-end fixture test, which committed `__pycache__/*.pyc`, 2026-09-09)
 
-- [x] 1.19 Skill §Tests: separate "no test command documented" (skip, downgrades the deploy gate) from "command documented but the environment cannot run it" (`BLOCKED (test environment unavailable)`) — an unrunnable environment must never look like a clean skip (REQ-RS-TESTS-01 — found running the loop on vitalcigar.es, 2026-09-09)
+- [x] 1.19 Skill §Tests: separate "no test command documented" (skip, downgrades the deploy gate) from "command documented but the environment cannot run it" (`BLOCKED (test environment unavailable)`) — an unrunnable environment must never look like a clean skip (REQ-RS-TESTS-01 — found running the loop on a consumer project, 2026-09-09)
 
-- [x] 1.20 Skill §Regression: classify each failure against the branch's base commit — pre-existing failures are reported and let P7 publish but never open the P8 gate; failures the run introduced block both (REQ-RS-REGRESSION-01 — found publishing on vitalcigar.es with one pre-existing mobile-overflow failure, 2026-09-09)
+- [x] 1.20 Skill §Regression: classify each failure against the branch's base commit — pre-existing failures are reported and let P7 publish but never open the P8 gate; failures the run introduced block both (REQ-RS-REGRESSION-01 — found publishing on a consumer project with one pre-existing mobile-overflow failure, 2026-09-09)
 
 ## 2. Template
 

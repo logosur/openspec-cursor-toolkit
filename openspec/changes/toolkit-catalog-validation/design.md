@@ -15,7 +15,7 @@ See proposal.md for motivation. Facts that shape the approach (measured 2026-10-
 | READMEs omit 10 (`.claude`) / 19 (`.cursor`) skill folders | substring check per folder name |
 | TF-IDF cosine over the 24 model-invocable `.claude` descriptions: duplicates 0.66 and 0.57; next pair 0.29; then ≤ 0.24 | ad-hoc stdlib script (same algorithm as Decision 4) |
 | Local runtime: Python 3 with PyYAML 6.0.1, Node 24; no `yq` | `python3 -c 'import yaml'`, `node --version` |
-| No `.github/workflows/`; remote is `github.com/logosur/openspec-cursor-toolkit` | `ls`, `git remote -v` |
+| No `.github/workflows/`; remote is the public GitHub repository | `ls`, `git remote -v` |
 | The exporter reads **copies** under `ai-developer/templates/openspec-cursor/<bundle>/`, never this repo; no manifest exports a `.claude/` path; in `openspec-core` 10 of 35 copies already differ from this repo; the script has no delete/prune logic | `exporta-spec.sh` lines 119–160, `cmp` per manifest entry |
 
 ## Goals / Non-Goals

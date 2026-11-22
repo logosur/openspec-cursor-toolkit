@@ -15,7 +15,7 @@ Este skill **no ejecuta trabajo pendiente**: lo detecta y lo nombra. Arreglarlo 
 acción que puede ejecutar es la que el desarrollador elija en el diálogo de la Fase 2b (p. ej. commitear
 los cambios de esta sesión), porque esa elección **es** la orden explícita.
 
-**Excepción: la nota del vault.** La regla global obliga a anotar en `~/Obsidian/Knowledge` el trabajo
+**Excepción: la nota del vault.** La regla global obliga a anotar en la bóveda de notas el trabajo
 sustantivo (feature, decisión de arquitectura, bug no trivial, incidente) sin pedir permiso. Si falta, el
 skill la escribe **antes** del veredicto y lo dice en una línea. Nunca se ofrece como opcional ni se cierra
 con «dime anótalo»: la memoria automática del agente no la sustituye (corrección del desarrollador, 23-09-2026).

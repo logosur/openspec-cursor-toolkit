@@ -106,7 +106,7 @@ A project may diverge **on purpose** (its own policy makes the generic bundle wr
 
 Syntax: one pattern per line, optional reason after `#`. Excluded projects are never written to and appear in `## EXPORT_EXCLUDED` with pattern, reason and the file that declared it.
 
-**Prefer `bundle.exclude` over the flag** when the divergence is permanent: a flag is forgotten on the next run, a declared line is not. Real case: `job-offer-apply` keeps its own `cierra-sesion` because `master` is production there and each session publishes its own verified work without asking.
+**Prefer `bundle.exclude` over the flag** when the divergence is permanent: a flag is forgotten on the next run, a declared line is not. Typical case: a project keeps its own `cierra-sesion` because `master` is production there and each session publishes its own verified work without asking.
 
 ## Drift detection — the project edited its copy
 

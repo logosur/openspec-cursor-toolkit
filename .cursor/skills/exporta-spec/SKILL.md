@@ -174,7 +174,7 @@ A project that keeps its own version of a bundle is declared, not patched back b
 
 ```text
 # <bundle>/bundle.exclude
-job-offer-apply  # master is production; each session publishes its own verified work
+my-app  # master is production; each session publishes its own verified work
 ```
 
 Sources, in load order: `templates/openspec-cursor/exclude.global` (all bundles), `<bundle>/bundle.exclude` (this bundle), `--exclude-file FILE`, `--exclude PATTERN`. A pattern containing `/` matches the absolute project path (glob allowed); a bare word matches the project directory name. Reason after `#` is printed on every run.
@@ -205,7 +205,7 @@ On drift, the agent **must** diff the project file against the bundle and report
 
 A new manifest entry has no baseline anywhere, so a consumer that already has a file at that path is unprotected on the first run: tracked and clean it is overwritten as `FIRSTRUN`, untracked it is overwritten silently as `no baseline`. Before the first export of new entries:
 
-1. For every consumer and every new destination that already exists and differs from the bundle, compare it with **every historical version** of that path — this repo, its AulaDrupal twin, and the files ever stored in `ai-developer/templates`. A match is an old delivery: safe to update.
+1. For every consumer and every new destination that already exists and differs from the bundle, compare it with **every historical version** of that path — this repo, any fork of it, and the files ever stored in `ai-developer/templates`. A match is an old delivery: safe to update.
 2. Anything without a known origin is the project's own work until proven otherwise. Protect it before exporting by seeding its baseline with the bundle's sha (`<sha>  <dst>` in `<PROJECTS_BASE>/.cursor-local/export-spec/baselines/<project>/<slug>.sha256`): it then reports as `DRIFT` and is never written.
 3. Run `--check-drift` and confirm the protected set is entirely inside `## EXPORT_DRIFT` before the real run.
 
@@ -217,7 +217,7 @@ When `.claude/commands` (or `skills`, `scripts`) is a symlink to `.cursor/…`, 
 
 ### Excluding a project by hand (when there is no other way)
 
-If a project must be left out for one run and no pattern fits, back up **every** entry of the manifest for it — not only the ones a `--dry-run` flagged as divergent. Files that match the bundle are rewritten too, and that is where an incoherent half-and-half state comes from (learned the hard way in `job-offer-apply`, 2026-10-15).
+If a project must be left out for one run and no pattern fits, back up **every** entry of the manifest for it — not only the ones a `--dry-run` flagged as divergent. Files that match the bundle are rewritten too, and that is where an incoherent half-and-half state comes from (learned the hard way on a real export).
 
 ## Locking — two sessions never interleave an export
 

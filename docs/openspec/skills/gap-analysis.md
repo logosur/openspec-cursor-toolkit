@@ -70,7 +70,7 @@ Align with `.cursor/rules/30-openspec-anti-hallucination.mdc` / `.claude/skills/
 | File | Role |
 |------|------|
 | [`templates/GAPS-template.md`](../templates/GAPS-template.md) | Empty scaffold for new reviews |
-| [`templates/GAPS-example.md`](../templates/GAPS-example.md) | Real-world example (archived inbound-orders change) |
+| [`templates/GAPS-example.md`](../templates/GAPS-example.md) | Illustrative example (loan-reminders change) |
 
 ## After gap analysis
 

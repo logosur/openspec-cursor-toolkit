@@ -217,7 +217,7 @@ def scan_tree(root: Path, checker: Checker, staged: bool) -> None:
 
 def scan_range(root: Path, checker: Checker, rev_range: str) -> None:
     for sha in filter(None, git(root, 'rev-list', rev_range).split()):
-        checker.check_text(f'commit {sha[:12]} message', git(root, 'log', '-1', '--format=%an%n%ae%n%B', sha))
+        checker.check_text(f'commit {sha[:12]} message', git(root, 'log', '-1', '--format=%B', sha))
         diff = git(root, 'show', '--format=', '--unified=0', '--no-color', sha)
         for path, added, offsets in added_lines(diff):
             checker.check_text(f'commit {sha[:12]} {path}', '\n'.join(added), offsets)

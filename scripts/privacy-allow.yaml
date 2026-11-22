@@ -1,0 +1,13 @@
+# Declared exceptions to scripts/privacy-check.py. Every entry needs a reason.
+# Fields: path (glob, repo-relative), pattern (an id from privacy-patterns.yaml, "private",
+# or "*"), optional match (regex the matched text must also match), reason.
+allow:
+  - path: scripts/test_privacy_check.py
+    pattern: '*'
+    reason: Invented fixtures (documentation-style IP, fictional mail domain, random UUID, fictional user) that prove each pattern fires.
+  - path: 'commit * scripts/test_privacy_check.py'
+    pattern: '*'
+    reason: Same invented fixtures, seen through --range.
+  - path: scripts/privacy-patterns.yaml
+    pattern: '*'
+    reason: The pattern definitions themselves.

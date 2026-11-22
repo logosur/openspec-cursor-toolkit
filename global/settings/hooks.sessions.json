@@ -1,0 +1,24 @@
+{
+  "PreToolUse": [
+    {
+      "matcher": "mcp__ccd_session__spawn_task|mcp__ccd_session__start_session",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 ~/.claude/hooks/spawn-task-duplicate-gate",
+          "timeout": 10
+        }
+      ]
+    },
+    {
+      "matcher": "mcp__ccd_session__start_session|mcp__ccd_session__hand_off_to_session|mcp__ccd_session_mgmt__set_session_permission_mode",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 ~/.claude/hooks/start-session-bypass-gate",
+          "timeout": 10
+        }
+      ]
+    }
+  ]
+}

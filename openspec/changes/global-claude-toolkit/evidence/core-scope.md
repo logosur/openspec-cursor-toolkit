@@ -18,6 +18,8 @@ Criteria for a piece to enter (design D10): (a) the privacy guard finds nothing 
 | devtools | `scripts/port-lease` | contract (state under the sandbox HOME) |
 | devtools | `scripts/test-account` (forbidden notes folders from config) | its self-test (35 checks) from the installed copy |
 | devtools | rules: local ports per project, test accounts | privacy guard 0 |
+| sessions | `hooks/start-session-bypass-gate` (neutral header) | contract: 5 probes, including a deny |
+| sessions | `hooks/spawn-task-duplicate-gate` (neutral header and deny message) | contract: 3 probes |
 | openspec | the whole `.claude/` catalog and `docs/openspec/` | validator; installer tests |
 
 ## Left in the override for now, with the reason
@@ -32,10 +34,9 @@ Counts are privacy findings in the live copy (rule ids only; the text is not rep
 | `hooks/contexto-gate`, `harness-contexto.sh` | home path and a private name | config piece |
 | `hooks/cross-project-message-gate` | 11 findings, including private quotes; part of the supervision rules | supervision unit (tasks §8) |
 | `hooks/ask-queue-prompt`, `scripts/ask-queue` | private quotes; the question queue belongs to supervision | supervision unit (tasks §8) |
-| `hooks/start-session-bypass-gate`, `hooks/spawn-task-duplicate-gate` | privacy 0–1, but they guard the supervisor's session tools | supervision unit (tasks §8) |
 | `scripts/rewrite-claude-authorship` | 11 findings; it rewrites published history | neutral copy; it stays opt-in |
 | `supervisor-lock`, `supervisa-sesiones` and their hooks | personal (94 findings in the skill) and about 500 KB in one file | split planned in tasks §8 with acceptance criteria |
-| scheduled routines, account switching, vault sync | personal by nature | not toolkit material |
+| scheduled routines and other machine services | personal by nature | not toolkit material |
 
 ## Known gap found by a probe
 

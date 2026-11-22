@@ -41,6 +41,9 @@ patterns:
   - id: dated-order-en
     regex: "\\b(?:developer|user|owner)'?s?\\s+(?:orders?|corrections?|decisions?)\\s*,?\\s*(?:of\\s+)?(?:20\\d\\d-\\d\\d-\\d\\d|\\d\\d?[-/]\\d\\d?[-/]20\\d\\d)"
     why: A dated order quotes a specific person's instructions; state the rule neutrally.
+  - id: dated-order-bare
+    regex: '\b(?:[Oo]rders?|[Cc]orrections?|[Ii]ncidents?|[Ii]ncidente|[Ll]essons?)\s+(?:of|from|on)\s+(?:the\s+)?(?:20\d\d-\d\d-\d\d|\d\d?[-/]\d\d?[-/]20\d\d)'
+    why: '"Order of <date>" without naming the person still points at a private history; state the rule neutrally.'
   - id: secret-anthropic
     regex: 'sk-ant-[A-Za-z0-9_-]{10,}'
     case_sensitive: true

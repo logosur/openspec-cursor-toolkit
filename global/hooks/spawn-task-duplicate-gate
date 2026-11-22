@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""PreToolUse(mcp__ccd_session__spawn_task, mcp__ccd_session__start_session): one proposal card per problem.
+
+In the Claude desktop app a session proposes work as a card: `start_session` with `initiation: "own_initiative"`
+(nothing runs until the developer starts it; older app builds call it `spawn_task`). A card is a prompt copied out of
+one session's context, and a session cannot see the cards other sessions already offered. Two sessions looking at the
+same problem then offer the same fix, the developer starts both, and two sessions write the same change.
+
+Not gated, on purpose: `user_asked` (the developer or a supervisor asked for that session now: a relaunch or a
+hand-over with a similar title is legitimate, and a false deny would stall it), `offer` (title alone, answered by the
+developer on a card) and a `proposal_id`-only call (the proposal already passed this gate).
+
+The hook keeps a registry of the cards it let through (`~/.claude/state/spawn-task-gate/chips.json`, 48 h, under
+flock so two sessions racing see each other) and denies a card that says the same thing as one already offered for
+the same project:
+
+  - title + tldr share enough words (Jaccard >= 0.33), AND
+  - the prompts share >= 2 distinctive anchors (ids, UUIDs, message-ids, e-mails, `code identifiers`,
+    snake_case / camelCase / dotted names).
+
+The thresholds were calibrated on real proposal cards: identical pairs score 1.00, a reworded duplicate about 0.4
+with several anchors, and unrelated cards of the same project within 24 h stay below 0.25. A live session of the same
+project whose name is almost the card title (Jaccard >= 0.5) is a second signal (cards become sessions named after
+their title).
+
+On a match the call is denied, in every permission mode: the agent has to tell the developer, who decides. If a
+second card is really wanted, the agent repeats the call with «[duplicate-ok]» at the start of the title. Any error
+lets the call through.
+"""
+import fcntl, glob, json, os, re, subprocess, sys, time, unicodedata
+
+STATE_DIR = os.environ.get("SPAWN_TASK_GATE_STATE") or os.path.expanduser("~/.claude/state/spawn-task-gate")
+SESSIONS = os.environ.get("SPAWN_TASK_GATE_SESSIONS") or os.path.expanduser("~/.claude/sessions")
+TOOLS = ("mcp__ccd_session__spawn_task", "mcp__ccd_session__start_session")
+START_SESSION = "mcp__ccd_session__start_session"
+GATED_INITIATIONS = ("own_initiative",)
+TTL = 48 * 3600
+KEEP = 7 * 24 * 3600
+OK_MARK = "[duplicate-ok]"
+MIN_TEXT = 0.33
+MIN_ANCHORS = 2
+MIN_NAME = 0.5
+
+STOP = set("""that this with from have been were their there which when will would could should about into over after
+before than then them they what your you the and for are not but can its also more only some such each other these those
+where while still just very much many most both same make made does doing done being because between during without within
+across using used use via per para como sobre cuando donde desde hasta entre pero porque aunque tambien esta este estos
+estas esos esas esto eso cada todo toda todos todas otro otra otros otras puede pueden hacer hecho debe deben tiene tienen
+sido siendo sera seran solo solamente mismo misma fix stop make add use run test tests code file files session sessions
+project worktree master main production claude task chip prompt issue error bug change changes line lines""".split())
+
+ANCHORS = [
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    r"<[^<>\s]{12,}@[^<>\s]+>",
+    r"[\w.+-]+@[\w-]+\.[\w.]+",
+    r"`([^`\n]{4,60})`",
+    r"\b[A-Za-z]+[_.][A-Za-z_.]{3,}\b",
+    r"\b[A-Z]{2,}-\d+\b",
+    r"\b[a-z]+[A-Z][A-Za-z]+\b",
+]
+
+
+def norm(s: str) -> str:
+    return unicodedata.normalize("NFD", s.lower()).encode("ascii", "ignore").decode()
+
+
+def words(s: str) -> set:
+    return {w for w in re.findall(r"[a-z][a-z0-9_]{3,}", norm(s)) if w not in STOP}
+
+
+def anchors(s: str) -> set:
+    out = set()
+    for pattern in ANCHORS:
+        for m in re.finditer(pattern, s):
+            a = (m.group(1) if m.groups() else m.group(0)).strip().lower()
+            if len(a) >= 5 and not a.startswith(("/home", "src/", ".claude", "http")):
+                out.add(a)
+    return out
+
+
+def jaccard(a: set, b: set) -> float:
+    return len(a & b) / len(a | b) if a and b else 0.0
+
+
+def fingerprint(inp: dict) -> dict:
+    title, tldr, prompt = (str(inp.get(k) or "") for k in ("title", "tldr", "prompt"))
+    return {"t": sorted(words(f"{title} {tldr}")), "a": sorted(anchors(f"{prompt} {title} {tldr}"))}
+
+
+def project_root(cwd: str) -> str:
+    if not cwd:
+        return ""
+    try:
+        out = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            common = out.stdout.strip()
+            return os.path.dirname(common) if os.path.basename(common) == ".git" else common
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return os.path.realpath(cwd)
+
+
+def log(sid: str, action: str, title: str, why: str) -> None:
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(os.path.join(STATE_DIR, "decisions.log"), "a") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\t{sid[:8]}\t{action}\t{title[:60]}\t{why[:140]}\n")
+    except OSError:
+        pass
+
+
+def live_session_named_like(title: str, root: str, my_sid: str):
+    want = words(title)
+    for path in glob.glob(os.path.join(SESSIONS, "*.json")):
+        try:
+            with open(path) as fh:
+                row = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not os.path.exists(f"/proc/{row.get('pid')}") or row.get("sessionId") == my_sid:
+            continue
+        name = str(row.get("name") or "")
+        if name and jaccard(want, words(name)) >= MIN_NAME and project_root(row.get("cwd", "")) == root:
+            return name
+    return None
+
+
+def deny(reason: str, short: str) -> int:
+    json.dump({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        },
+        "systemMessage": f"spawn-task-duplicate-gate: {short}",
+    }, sys.stdout)
+    return 0
+
+
+def main() -> int:
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:
+        return 0
+    if payload.get("tool_name") not in TOOLS:
+        return 0
+    inp = payload.get("tool_input")
+    inp = inp if isinstance(inp, dict) else {}
+    if payload.get("tool_name") == START_SESSION:
+        if inp.get("initiation") not in GATED_INITIATIONS or not inp.get("title"):
+            return 0
+        # the brief of a fresh session is `prompt` + `background`: anchors and the duplicate-ok mark live in both
+        inp = dict(inp, prompt=f"{inp.get('prompt') or ''}\n{inp.get('background') or ''}")
+    title = str(inp.get("title") or "")
+    sid = str(payload.get("session_id") or "unknown")
+    if OK_MARK in title or OK_MARK in str(inp.get("prompt") or ""):
+        log(sid, "allow-marked", title, "duplicate-ok")
+        return 0
+
+    root = project_root(str(inp.get("cwd") or payload.get("cwd") or os.getcwd()))
+    mine = fingerprint(inp)
+    now = time.time()
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(os.path.join(STATE_DIR, "chips.lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        path = os.path.join(STATE_DIR, "chips.json")
+        try:
+            with open(path) as fh:
+                chips = json.load(fh)
+        except (OSError, ValueError):
+            chips = []
+        chips = [c for c in chips if now - c.get("ts", 0) < KEEP]
+
+        for c in chips:
+            if c.get("root") != root or now - c.get("ts", 0) > TTL:
+                continue
+            text = jaccard(set(mine["t"]), set(c["t"]))
+            shared = len(set(mine["a"]) & set(c["a"]))
+            if text >= MIN_TEXT and shared >= MIN_ANCHORS:
+                ago = int((now - c["ts"]) / 60)
+                who = "esta misma sesión" if c.get("sid") == sid else f"la sesión {c.get('sid', '?')[:8]}"
+                why = f"«{c['title']}» ({who}, hace {ago} min; texto {text:.2f}, {shared} anclas compartidas)"
+                log(sid, "deny-chip", title, why)
+                return deny(
+                    f"spawn-task-duplicate-gate: ya se ofreció un chip igual para este proyecto: {why}. "
+                    "No lo repitas: dos sesiones haciendo el mismo arreglo es trabajo tirado. "
+                    "Díselo al desarrollador en una línea (qué chip y qué sesión). Si de "
+                    "verdad quiere uno segundo, pregúntaselo con AskUserQuestion y, solo con su sí, repite "
+                    f"la llamada con «{OK_MARK}» al principio del título.",
+                    f"chip duplicado de «{c['title'][:50]}»",
+                )
+
+        named = live_session_named_like(title, root, sid)
+        if named:
+            log(sid, "deny-session", title, named)
+            return deny(
+                f"spawn-task-duplicate-gate: hay una sesión viva de este proyecto con casi el mismo nombre, "
+                f"«{named}». Probablemente ya trabaja en esto: compruébalo con ListAgents y "
+                "dile al desarrollador en una línea qué sesión es. Si quiere otra aparte, pregúntaselo con "
+                f"AskUserQuestion y, solo con su sí, repite la llamada con «{OK_MARK}» al principio del título.",
+                f"sesión viva «{named[:50]}»",
+            )
+
+        chips.append({"ts": now, "sid": sid, "root": root, "title": title, **mine})
+        tmp = path + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(chips, fh)
+        os.replace(tmp, path)
+    log(sid, "allow", title, "")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except Exception:
+        raise SystemExit(0)  # fail open: a broken gate must never block chips

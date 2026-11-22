@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""PreToolUse(start_session, hand_off_to_session, set_session_permission_mode): sessions started to work now are born in bypassPermissions.
+
+In the Claude desktop app a session starts another one with `mcp__ccd_session__start_session`. The new session's
+permission mode can only be the caller's or lower, and it inherits the caller's when `permission_mode` is omitted.
+A caller in another mode that starts sessions and then raises each one with
+`mcp__ccd_session_mgmt__set_session_permission_mode` costs one approval card per session, and every one of them waits
+for the developer.
+
+The policy: a session started to work now is born in bypassPermissions (for unattended setups that run sessions in
+that mode). A caller that is not in bypass raises ITSELF first (one card, once); from bypass, raising other sessions
+asks nothing.
+
+`mcp__ccd_session__hand_off_to_session` (title, remaining_plan) also starts a session: a fork of the caller. It has no
+permission_mode or initiation input, so the fork is born in the caller's mode (inference from the tool description, not
+verified in the app) and the gate treats it as a start with permission_mode omitted: allowed from bypass, denied (B)
+from any other mode unless the ESCAPE holds. Its deny message says "raise yourself, then hand off" (nothing to pass).
+
+Rules (`caller` is `permission_mode` in the hook input):
+  - start_session with initiation `offer` / `own_initiative`: allowed (the developer starts those from a card).
+  - any other start (`user_asked`, no initiation, a start from `proposal_id`) runs now:
+      caller in bypass: allowed if permission_mode is omitted, `bypassPermissions` or `plan`; else denied (A).
+      caller not in bypass: denied (B) unless the ESCAPE holds.
+  - set_session_permission_mode: allowed for `self`, from bypass, for any mode other than bypassPermissions, or
+    when the ESCAPE holds; else denied (C).
+  - any other tool: allowed.
+
+ESCAPE: the caller's transcript holds a set_session_permission_mode {"session_id": "self", "mode":
+"bypassPermissions"} whose tool_result failed (is_error, or text with denied / rejected / declined / doesn't want /
+not allowed). The developer said no to the card, so the start goes ahead in the caller's current mode.
+
+Never fails the session: any exception allows the call and appends the traceback to errors.log. A missing
+`permission_mode` in the input is also allowed, because the caller's mode cannot be judged.
+State dir: ~/.claude/state/start-session-bypass-gate (override: START_SESSION_BYPASS_GATE_STATE), with
+decisions.log (denies and escapes) and errors.log.
+"""
+import json
+import os
+import sys
+import time
+import traceback
+
+STATE_DIR = os.environ.get("START_SESSION_BYPASS_GATE_STATE") or \
+    os.path.expanduser("~/.claude/state/start-session-bypass-gate")
+START = "mcp__ccd_session__start_session"
+HAND_OFF = "mcp__ccd_session__hand_off_to_session"
+SET_MODE = "mcp__ccd_session_mgmt__set_session_permission_mode"
+BYPASS = "bypassPermissions"
+FAILURE_WORDS = ("denied", "rejected", "declined", "doesn't want", "not allowed")
+
+REASON_A = (
+    "start-session-bypass-gate: you are in bypassPermissions, and a session started now must be too. "
+    'Omit permission_mode (it inherits yours) or pass "bypassPermissions". Starting it lower and raising it '
+    "later costs one approval card per session and leaves it stopped until the developer sees it."
+)
+REASON_B = (
+    "start-session-bypass-gate: this session is in {mode}, so a session started now would be born in {mode} and "
+    "stop at every permission prompt while nobody watches. Raise yourself first with "
+    'mcp__ccd_session_mgmt__set_session_permission_mode {{"session_id": "self", "mode": "bypassPermissions"}} '
+    '(one card, once), then start it with permission_mode "bypassPermissions". Never start it lower and raise it '
+    "afterwards: that is one card per session. If the developer rejects your card, this gate lets the start "
+    "through in your current mode; say so in one line. If that tool is unavailable here, tell the developer and "
+    "do not start the session."
+)
+REASON_B_HAND_OFF = (
+    "start-session-bypass-gate: this session is in {mode}, so the forked session that hand_off_to_session creates "
+    "would be born in {mode} and stop at every permission prompt while nobody watches. Raise yourself first with "
+    'mcp__ccd_session_mgmt__set_session_permission_mode {{"session_id": "self", "mode": "bypassPermissions"}} '
+    "(one card, once), then call hand_off_to_session again: the fork inherits your mode. If the developer rejects "
+    "your card, this gate lets the hand-off through in your current mode; say so in one line. If that tool is "
+    "unavailable here, tell the developer and do not hand off."
+)
+REASON_C = (
+    'start-session-bypass-gate: raise yourself first (session_id "self"): one card, once. From bypassPermissions, '
+    "raising other sessions asks nothing; from {mode}, each one is a separate card that waits for the developer."
+)
+
+
+def _append(name: str, text: str) -> None:
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(os.path.join(STATE_DIR, name), "a") as fh:
+            fh.write(text)
+    except OSError:
+        pass
+
+
+def log_error() -> None:
+    _append("errors.log", f"--- {time.strftime('%Y-%m-%dT%H:%M:%S')}\n{traceback.format_exc()}\n")
+
+
+def log_decision(sid: str, tool: str, caller: str, target: str, decision: str) -> None:
+    _append("decisions.log", "\t".join((time.strftime("%Y-%m-%dT%H:%M:%S"), sid, tool, caller, target, decision)) + "\n")
+
+
+def _blocks(entry) -> list:
+    message = entry.get("message") if isinstance(entry, dict) else None
+    content = message.get("content") if isinstance(message, dict) else None
+    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+
+
+def _result_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(b.get("text") or "" for b in content if isinstance(b, dict) and isinstance(b.get("text"), str))
+    return ""
+
+
+def self_raise_rejected(transcript: str) -> bool:
+    """True if the transcript has a failed self-raise to bypassPermissions (the developer rejected the card)."""
+    if not transcript or not os.path.isfile(transcript):
+        return False
+    pending = set()  # tool_use ids of self-raises to bypass still waiting for their result
+    try:
+        with open(transcript, errors="replace") as fh:
+            for line in fh:
+                if "set_session_permission_mode" in line:  # cheap prefilter before json.loads
+                    try:
+                        entry = json.loads(line)
+                    except ValueError:
+                        continue
+                    for block in _blocks(entry):
+                        inp = block.get("input")
+                        if block.get("type") == "tool_use" and block.get("name") == SET_MODE and \
+                                isinstance(inp, dict) and inp.get("session_id") == "self" and \
+                                inp.get("mode") == BYPASS and block.get("id"):
+                            pending.add(block["id"])
+                    continue
+                if not pending or "tool_result" not in line or not any(i in line for i in pending):
+                    continue
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                for block in _blocks(entry):
+                    if block.get("type") != "tool_result" or block.get("tool_use_id") not in pending:
+                        continue
+                    text = _result_text(block.get("content")).lower()
+                    if block.get("is_error") is True or any(w in text for w in FAILURE_WORDS):
+                        return True
+    except OSError:
+        return False
+    return False
+
+
+def deny(reason: str) -> None:
+    json.dump({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": reason,
+    }}, sys.stdout)
+
+
+def decide(payload: dict) -> int:
+    tool = payload.get("tool_name") or ""
+    if tool not in (START, HAND_OFF, SET_MODE):
+        return 0
+    caller = payload.get("permission_mode") or ""
+    if not caller:
+        return 0  # the caller's mode is unknown: nothing to judge
+    inp = payload.get("tool_input")
+    inp = inp if isinstance(inp, dict) else {}
+    sid = payload.get("session_id") or "unknown"
+    transcript = payload.get("transcript_path") or ""
+
+    if tool in (START, HAND_OFF):
+        if inp.get("initiation") in ("offer", "own_initiative"):
+            return 0
+        requested = inp.get("permission_mode") or None
+        target = requested or "(inherit)"
+        if caller == BYPASS:
+            if requested in (None, BYPASS, "plan"):
+                return 0
+            log_decision(sid, tool, caller, target, "deny-a")
+            deny(REASON_A)
+            return 0
+        if self_raise_rejected(transcript):
+            log_decision(sid, tool, caller, target, "allow-escape")
+            return 0
+        log_decision(sid, tool, caller, target, "deny-b")
+        deny((REASON_B_HAND_OFF if tool == HAND_OFF else REASON_B).format(mode=caller))
+        return 0
+
+    # SET_MODE
+    target_session = inp.get("session_id")
+    mode = inp.get("mode")
+    if target_session == "self" or caller == BYPASS or mode != BYPASS:
+        return 0
+    target = f"{target_session}->{mode}"
+    if self_raise_rejected(transcript):
+        log_decision(sid, tool, caller, target, "allow-escape")
+        return 0
+    log_decision(sid, tool, caller, target, "deny-c")
+    deny(REASON_C.format(mode=caller))
+    return 0
+
+
+def main() -> int:
+    try:
+        payload = json.load(sys.stdin)
+        return decide(payload)
+    except Exception:
+        log_error()
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

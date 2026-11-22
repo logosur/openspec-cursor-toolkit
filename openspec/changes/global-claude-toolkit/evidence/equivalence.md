@@ -15,23 +15,23 @@ with the live dir. It exits 1 on any unexplained difference.
 | Class | Files | Meaning |
 |---|---:|---|
 | identical | 7 | toolkit file, byte for byte the live one |
-| override | 233 | supplied by the private override (`files/` or `append/`), byte for byte the live one |
+| override | 232 | supplied by the private override (`files/` or `append/`), byte for byte the live one |
 | toolkit-newer | 6 | the live file is an earlier version of the toolkit file (a blob in this repository's history) |
-| neutral-text | 2 | same Python AST, only docstrings and comments differ |
+| neutral-text | 3 | same Python AST, only docstrings and comments differ |
 | declared | 2 | intended difference declared in `override.yaml` with its reason and proof |
 | added | 22 | installed by the toolkit, not present live (new OpenSpec skills, docs, config pieces) |
 | excluded | 6 | live files the toolkit never manages (third-party skills, symlinks into other trees, backups) |
 | **unexplained** | **0** | |
 
-Hooks: 21 identical (5 from the toolkit, 16 from the override's hook fragment), 0 unexplained.
+Hooks: 21 identical (7 from the toolkit, 14 from the override's hook fragment), 0 unexplained.
 
-Installed from the toolkit: 39 files; from the override: 233.
+Installed from the toolkit: 40 files; from the override: 232.
 
 ## The non-trivial classes, by piece
 
 - toolkit-newer: `skills/00-openspec-master`, `skills/00-openspec-orchestrator`, `skills/20-hydrate-spec`,
   `skills/html`, `skills/openspec-anti-hallucination`, `skills/openspec-workflow`.
-- neutral-text: `hooks/process-kill-gate`, `hooks/worktree-location-gate`.
+- neutral-text: `hooks/process-kill-gate`, `hooks/start-session-bypass-gate`, `hooks/worktree-location-gate`.
 - declared (`config-injected`): `scripts/worktree-location` (worktree root) and `scripts/test-account`
   (forbidden notes folder) read from their config piece the value the live copy had as a literal.
   Proof: `OverrideLayer.test_replace_append_extra_and_config` and the `test-account` contract

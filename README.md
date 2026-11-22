@@ -55,6 +55,7 @@ What the installer guarantees:
 | `openspec` | `.claude/commands/`, `.claude/skills/`, `openspec-list.sh` and `docs/openspec/` (the catalog below) |
 | `core` | `commit-authorship-gate`, `process-kill-gate`, `worktree-location-gate` + `worktree-location`, the config helper, the rules that explain them, the `panel-de-decision` skill and the global `CLAUDE.md` block |
 | `devtools` | `port-lease` (a fixed block of local ports per project) and `test-account` (private store of the test users sessions create), with their rules |
+| `sessions` | for the Claude desktop app: `start-session-bypass-gate` (sessions started to work now are born in bypassPermissions: one approval card for the caller instead of one per session) and `spawn-task-duplicate-gate` (denies a proposal card that repeats one already offered for the same project) |
 
 Manifests are in `global/modules/<name>.yaml`; the files they install are in `global/` (and, for
 `openspec`, in `.claude/`). The rule texts of `core` and `devtools` are written in Spanish, like the
@@ -121,11 +122,11 @@ python3 scripts/privacy-check.py --range origin/main..HEAD       # a branch's co
 
 ## What is not in the toolkit, and why
 
-- **Session supervision** (the supervisor skill and its lock, census and question queue): it is
+- **Session supervision** (the supervisor skill and its lock, census, question queue and cross-project
+  message gate): it is
   personal today and lives in the developer's override. Making it general is planned, with acceptance
   criteria, in `openspec/changes/global-claude-toolkit/tasks.md` §8.
-- Pieces that still carry machine values (the heavy-job semaphore, deploy gates, account switching,
-  scheduled routines): listed one by one, with what each needs to enter, in
+- Pieces that still carry machine values (a job semaphore, deploy gates, scheduled routines): listed one by one, with what each needs to enter, in
   `openspec/changes/global-claude-toolkit/evidence/core-scope.md`.
 - **Third-party skills** are never redistributed; install them from their own source.
 

@@ -150,6 +150,9 @@ Third-party skills and plugins (listed in README as optional), skills of client 
 - **A third module, `devtools`** (port-lease, test-account and their rules), split from `core` so `core`
   stays the guard rails only (SRP); it depends on `core` for the config helper. Default modules:
   `openspec, core, devtools`, defined once in `scripts/toolkit/modules.py`.
+- **A fourth module, `sessions`**: the two desktop-app session guards (born-in-bypass and duplicate
+  proposal cards). Neither calls the supervisor's lock or question queue, so they meet D10 (a) and (c)
+  and ship now, with contracts, instead of waiting for the supervision unit.
 - **Override files the toolkit already provides** are kept in the override only when they differ from
   the toolkit and are not an earlier version of it; the rest moved to the override's `archive/`. An
   install therefore reproduces the live dir exactly (evidence/equivalence.md) and reconciling the 43

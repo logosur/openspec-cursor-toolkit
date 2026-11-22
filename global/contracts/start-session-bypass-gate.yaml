@@ -1,0 +1,26 @@
+piece: start-session-bypass-gate
+dest: hooks/start-session-bypass-gate
+kind: hook
+event: PreToolUse
+probes:
+  - name: unrelated tool passes silently
+    stdin: {tool_name: Bash, permission_mode: auto, tool_input: {command: ls}}
+    exit: [0]
+    stdout: empty
+  - name: a card the developer starts is allowed from any mode
+    stdin: {tool_name: mcp__ccd_session__start_session, permission_mode: auto, tool_input: {initiation: offer, title: x}}
+    exit: [0]
+    stdout: empty
+  - name: starting a session now from a non-bypass mode is denied
+    stdin: {tool_name: mcp__ccd_session__start_session, permission_mode: auto, tool_input: {initiation: user_asked, title: x, prompt: y}}
+    exit: [0]
+    stdout: json
+    contains: '"deny"'
+  - name: from bypass, a start that keeps bypass is allowed
+    stdin: {tool_name: mcp__ccd_session__start_session, permission_mode: bypassPermissions, tool_input: {initiation: user_asked, title: x, prompt: y}}
+    exit: [0]
+    stdout: empty
+  - name: unparseable stdin fails open
+    stdin_raw: "{not json"
+    exit: [0]
+    stdout: empty

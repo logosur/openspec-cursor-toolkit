@@ -24,8 +24,8 @@ Usage
   test-account list [--project DIR | --all]          metadata only (role, host, email, state, dates)
   test-account exec --role ROLE [--project DIR] -- CMD...
       Runs CMD with TEST_ACCOUNT_EMAIL, TEST_ACCOUNT_PASSWORD, TEST_ACCOUNT_HOST, TEST_ACCOUNT_ROLE set.
-      Its output is redacted (the password becomes ********). A heavy CMD still goes through heavy-job:
-      heavy-job run --kind e2e --label '...' -- test-account exec --role e2e -- e2e/run.sh
+      Its output is redacted (the password becomes ********). Wrap it in your job runner if CMD is heavy:
+      <runner> -- test-account exec --role e2e -- e2e/run.sh
   test-account env-file --role ROLE --out PATH [--project DIR] [--prefix TEST_ACCOUNT_]
       Writes PREFIX_EMAIL / PREFIX_PASSWORD / PREFIX_HOST to PATH (0600). Refuses a path that git does
       not ignore, or one inside a forbidden notes folder.

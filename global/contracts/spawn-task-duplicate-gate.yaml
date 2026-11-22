@@ -1,0 +1,17 @@
+piece: spawn-task-duplicate-gate
+dest: hooks/spawn-task-duplicate-gate
+kind: hook
+event: PreToolUse
+probes:
+  - name: unrelated tool passes silently
+    stdin: {tool_name: Bash, session_id: s1, tool_input: {command: ls}}
+    exit: [0]
+    stdout: empty
+  - name: a first proposal card is allowed
+    stdin: {tool_name: mcp__ccd_session__start_session, session_id: s1, cwd: /, tool_input: {initiation: own_initiative, title: Fix the parser of invoice_lines, prompt: "Fix `parse_invoice_lines` in billing/parser.py"}}
+    exit: [0]
+    stdout: empty-or-json
+  - name: unparseable stdin fails open
+    stdin_raw: "{not json"
+    exit: [0]
+    stdout: empty

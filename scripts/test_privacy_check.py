@@ -101,10 +101,15 @@ class GenericPatterns(unittest.TestCase):
 
     def test_dated_order_variants_fail(self):
         for text in ('Orden del desarrollador, 2026-11-08: x', 'corrección del desarrollador, 23-09-2026',
-                     "Developer's order, 2026-11-08.", 'Órdenes del 2026-10-24 y del 2026-11-09'):
+                     "Developer's order, 2026-11-08.", 'Órdenes del 2026-10-24 y del 2026-11-09',
+                     'Order of 2026-11-19 (rule x): do it', 'see the incident of 21-11-2026'):
             with self.subTest(text=text):
                 self.repo.write('a.md', text + '\n')
                 self.assertIn('[dated-order', self.repo.run()[1])
+
+    def test_word_order_without_a_date_passes(self):
+        self.repo.write('a.md', 'Run the phases in order of priority, from 2026 onwards.\n')
+        self.assertEqual(self.repo.run()[0], 0)
 
     def test_private_layer_cannot_be_allowlisted(self):
         self.repo.write('privacy-denylist.txt', 'acme-client\n', base=self.repo.override)

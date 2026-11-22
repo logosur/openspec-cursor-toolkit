@@ -17,7 +17,7 @@ class ManifestError(Exception):
     pass
 
 
-DEFAULT_MODULES = ['openspec', 'core', 'devtools']
+DEFAULT_MODULES = ['openspec', 'core', 'devtools', 'sessions']
 
 @dataclass
 class FileEntry:

@@ -1,0 +1,17 @@
+name: sessions
+summary: >-
+  Guards for sessions that start other sessions in the Claude desktop app: started sessions are born
+  in bypassPermissions (one approval card for the caller instead of one per session), and a proposal
+  card that duplicates one already offered for the same project is denied.
+requires:
+  python: "3.10"
+  os: linux
+  binaries: [python3, git]
+notes:
+  - Only useful in the Claude desktop app, whose session tools these hooks watch; elsewhere they never fire.
+  - The bypass policy fits unattended setups; leave the module out (or remove the hook) if you approve each session by hand.
+files:
+  - {src: global/hooks/start-session-bypass-gate, dest: hooks/start-session-bypass-gate, mode: "0755"}
+  - {src: global/hooks/spawn-task-duplicate-gate, dest: hooks/spawn-task-duplicate-gate, mode: "0755"}
+hooks:
+  - global/settings/hooks.sessions.json

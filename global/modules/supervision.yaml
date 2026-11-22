@@ -23,6 +23,24 @@ files:
   - {src: global/hooks/cross-project-message-gate, dest: hooks/cross-project-message-gate, mode: "0755"}
   - {src: global/rules/mensajes-entre-sesiones-solo-mismo-proyecto.md, dest: rules/mensajes-entre-sesiones-solo-mismo-proyecto.md}
   - {src: global/rules/dialogos-de-preguntas-legibles.md, dest: rules/dialogos-de-preguntas-legibles.md}
+  - {src: global/skills/supervisa-sesiones/SKILL.md, dest: skills/supervisa-sesiones/SKILL.md}
+  - {src: global/skills/supervisa-sesiones/reference/anti-patrones.md, dest: skills/supervisa-sesiones/reference/anti-patrones.md}
+  - {src: global/skills/supervisa-sesiones/reference/arranque.md, dest: skills/supervisa-sesiones/reference/arranque.md}
+  - {src: global/skills/supervisa-sesiones/reference/cambios.md, dest: skills/supervisa-sesiones/reference/cambios.md}
+  - {src: global/skills/supervisa-sesiones/reference/f1-f4.md, dest: skills/supervisa-sesiones/reference/f1-f4.md}
+  - {src: global/skills/supervisa-sesiones/reference/f4b-cierre-de-sesiones.md, dest: skills/supervisa-sesiones/reference/f4b-cierre-de-sesiones.md}
+  - {src: global/skills/supervisa-sesiones/reference/f5-decisiones.md, dest: skills/supervisa-sesiones/reference/f5-decisiones.md}
+  - {src: global/skills/supervisa-sesiones/reference/f6-f9.md, dest: skills/supervisa-sesiones/reference/f6-f9.md}
+  - {src: global/skills/supervisa-sesiones/reference/modo-publicar-primero.md, dest: skills/supervisa-sesiones/reference/modo-publicar-primero.md}
+  - {src: global/skills/supervisa-sesiones/reference/piezas-opcionales.md, dest: skills/supervisa-sesiones/reference/piezas-opcionales.md}
+  - {src: global/skills/supervisa-sesiones/reference/registro-y-cierre.md, dest: skills/supervisa-sesiones/reference/registro-y-cierre.md}
+  - {src: global/skills/supervisa-sesiones/reference/vigilancia.md, dest: skills/supervisa-sesiones/reference/vigilancia.md}
+  - {src: global/commands/supervisa-sesiones.md, dest: commands/supervisa-sesiones.md}
+  - {src: global/rules/despliegue-y-limites-duros.md, dest: rules/despliegue-y-limites-duros.md}
+  - {src: global/rules/desatencion-sin-preguntas.md, dest: rules/desatencion-sin-preguntas.md}
+  - {src: global/rules/supervisor-decide-lo-documentado.md, dest: rules/supervisor-decide-lo-documentado.md}
+  - {src: global/rules/cierre-con-todo-publicado.md, dest: rules/cierre-con-todo-publicado.md}
+  - {src: global/rules/modelo-por-rol.md, dest: rules/modelo-por-rol.md}
 hooks:
   - global/settings/hooks.supervision.json
 config: [supervision]

@@ -61,7 +61,7 @@ the override's `modules`.
 | `core` | `commit-authorship-gate`, `process-kill-gate`, `worktree-location-gate` + `worktree-location`, the config helper, the rules that explain them, the `panel-de-decision` skill and the global `CLAUDE.md` block |
 | `devtools` | `port-lease` (a fixed block of local ports per project) and `test-account` (private store of the test users sessions create), with their rules |
 | `sessions` | for the Claude desktop app: `start-session-bypass-gate` (sessions started to work now are born in bypassPermissions: one approval card for the caller instead of one per session) and `spawn-task-duplicate-gate` (denies a proposal card that repeats one already offered for the same project) |
-| `supervision` | `ask-queue` (decisions left for the developer) with the hook that shows each one in the session that queued it, and `cross-project-message-gate` (a session only messages sessions of its own project; every exception is off until configured) |
+| `supervision` | the `supervisa-sesiones` skill and command (one supervisor per project: census, write turns, watcher, decisions, closing; it integrates, deploys or archives only with written authorisation) with the rules it relies on, `ask-queue` (decisions left for the developer) with the hook that shows each one in the session that queued it, and `cross-project-message-gate` (a session only messages sessions of its own project; every exception is off until configured) |
 | `heavy-jobs` | `heavy-job` (one semaphore for the machine's suites, builds, installs, emulators and models; set `default_slots` for the machine) and `heavy-job-gate`, which denies a heavy command launched outside it |
 
 Manifests are in `global/modules/<name>.yaml`; the files they install are in `global/` (and, for

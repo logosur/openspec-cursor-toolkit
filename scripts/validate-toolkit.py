@@ -188,6 +188,8 @@ class Validator:
             self.check_routing(tree, skills[tree])
             self.check_inner_frontmatter(skills[tree])
         self.check_homonym_rules(rules, skills)
+        GlobalTree(self).check()
+        self.check_global_skills(skills['.claude'])
 
         severity_rank = {'ERROR': 0, 'WARN': 1}
         return sorted(set(self.findings), key=lambda f: (severity_rank[f.severity], f.path, f.rule, f.message))
@@ -447,6 +449,29 @@ class Validator:
 
     # -- hygiene warnings ------------------------------------------------------
 
+    def check_global_skills(self, catalog: dict[str, Item]) -> None:
+        """Skills in global/ obey the routing rules and do not collide with the catalog they install next to."""
+        gskills = self.discover_skills(GLOBAL_DIR)
+        if not gskills:
+            return
+        self.check_routing(GLOBAL_DIR, gskills)
+        self.check_inner_frontmatter(gskills)
+        for key, item in gskills.items():
+            if item.name in {c.name for c in catalog.values()}:
+                self.error(item.doc.rel, 'global-skill', f"skill '{item.name}' is also in the .claude catalog")
+            mine = item.doc.description()
+            if not isinstance(mine, str):
+                continue
+            pairs = [(f'{GLOBAL_DIR}:{key}', mine)] + [(k, c.doc.description()) for k, c in catalog.items()
+                                                      if isinstance(c.doc.description(), str)
+                                                      and c.doc.meta.get('disable-model-invocation') is not True]
+            for first, second, score in description_similarities(pairs):
+                if first == f'{GLOBAL_DIR}:{key}' or second == f'{GLOBAL_DIR}:{key}':
+                    other = second if first.startswith(GLOBAL_DIR + ':') else first
+                    if score >= COLLISION_ERROR:
+                        self.error(item.doc.rel, 'collision', f"description collides with '{other}' "
+                                   f'(TF-IDF cosine {score:.2f} >= {COLLISION_ERROR:.2f})')
+
     def check_inner_frontmatter(self, skills: dict[str, Item]) -> None:
         for key in sorted(skills):
             doc = skills[key].doc
@@ -467,6 +492,163 @@ class Validator:
                 self.warn(rule.rel, 'homonym-rule',
                           f"description differs from its homonym skill {skill.doc.rel}: "
                           f"rule {rule.description()!r} | skill {skill.doc.description()!r}")
+
+
+GLOBAL_DIR = 'global'
+GLOBAL_META = ('modules', 'settings', 'contracts', 'config')   # referenced by manifests, not installed as files
+CITATION_RE = re.compile(r'~/\.claude/((?:rules|scripts|hooks|skills)/[A-Za-z0-9_.\-/]+)')
+
+
+class GlobalTree:
+    """Checks of global/: manifests, orphans, hook fragments, contracts and cited pieces (task 6.1)."""
+
+    def __init__(self, v: Validator):
+        self.v = v
+        self.root = v.root
+        self.base = v.root / GLOBAL_DIR
+
+    def check(self) -> None:
+        if not (self.base / 'modules').is_dir():
+            return
+        mods = {}
+        for path in sorted((self.base / 'modules').glob('*.yaml')):
+            rel = self.v.rel(path)
+            try:
+                data = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
+            except yaml.YAMLError as exc:
+                self.v.error(rel, 'global-manifest', f'invalid YAML: {exc}')
+                continue
+            if data.get('name') != path.stem:
+                self.v.error(rel, 'global-manifest', f'name must be {path.stem!r}')
+            mods[path.stem] = (rel, data)
+        dests = {name: self.dests(rel, data) for name, (rel, data) in mods.items()}
+        for name, (rel, data) in mods.items():
+            for dep in data.get('depends') or []:
+                if dep not in mods:
+                    self.v.error(rel, 'global-manifest', f'depends on unknown module {dep!r}')
+            for frag in data.get('hooks') or []:
+                if not (self.root / frag).is_file():
+                    self.v.error(rel, 'global-manifest', f'hook fragment {frag} does not exist')
+            for piece in data.get('config') or []:
+                if not (self.base / 'config' / f'{piece}.json').is_file():
+                    self.v.error(rel, 'global-manifest', f'config piece {piece!r} has no global/config/{piece}.json')
+        self.check_orphans(mods)
+        self.check_hooks(mods, dests)
+        self.check_contracts(mods, dests)
+        self.check_citations(mods, dests)
+
+    def dests(self, rel: str, data: dict) -> dict[str, Path]:
+        out: dict[str, Path] = {}
+        for entry in data.get('files') or []:
+            src = self.root / entry.get('src', '')
+            dest = entry.get('dest', '')
+            if entry.get('src', '').endswith('/'):
+                if not src.is_dir():
+                    self.v.error(rel, 'global-manifest', f'source directory {entry.get("src")} does not exist')
+                    continue
+                excludes = [e.rstrip('/') for e in entry.get('exclude') or []]
+                for path in sorted(src.rglob('*')):
+                    r = path.relative_to(src).as_posix()
+                    if path.is_file() and '__pycache__' not in r and not any(r == e or r.startswith(e + '/') for e in excludes):
+                        out[f'{dest.rstrip("/")}/{r}'] = path
+            elif not src.is_file():
+                self.v.error(rel, 'global-manifest', f'source {entry.get("src")} does not exist')
+            else:
+                out[dest] = src
+        return out
+
+    def closure(self, mods: dict, name: str, seen: set | None = None) -> set[str]:
+        seen = seen if seen is not None else set()
+        if name in seen or name not in mods:
+            return seen
+        seen.add(name)
+        for dep in mods[name][1].get('depends') or []:
+            self.closure(mods, dep, seen)
+        return seen
+
+    def check_orphans(self, mods: dict) -> None:
+        sources = [(self.root / e.get('src', '')) for _, data in mods.values() for e in data.get('files') or []]
+        frags = {self.root / f for _, data in mods.values() for f in data.get('hooks') or []}
+        pieces = {p for _, data in mods.values() for p in data.get('config') or []}
+        for path in sorted(self.base.rglob('*')):
+            if not path.is_file() or '__pycache__' in path.parts:
+                continue
+            top = path.relative_to(self.base).parts[0]
+            rel = self.v.rel(path)
+            if top == 'modules' or top == 'contracts':
+                continue
+            if top == 'settings':
+                if path not in frags:
+                    self.v.error(rel, 'global-orphan', 'hook fragment not listed by any module')
+                continue
+            if top == 'config':
+                if path.stem not in pieces:
+                    self.v.error(rel, 'global-orphan', 'config piece not listed by any module')
+                continue
+            owners = sum(1 for s in sources if path == s or s in path.parents)
+            if owners == 0:
+                self.v.error(rel, 'global-orphan', 'file is not installed by any module')
+            elif owners > 1:
+                self.v.error(rel, 'global-orphan', f'file is installed by {owners} manifest entries')
+
+    def check_hooks(self, mods: dict, dests: dict) -> None:
+        for name, (rel, data) in mods.items():
+            reach = set().union(*(dests.get(m, {}).keys() for m in self.closure(mods, name)))
+            for frag in data.get('hooks') or []:
+                path = self.root / frag
+                if not path.is_file():
+                    continue
+                try:
+                    block = __import__('json').loads(path.read_text(encoding='utf-8'))
+                except ValueError as exc:
+                    self.v.error(frag, 'global-hooks', f'invalid JSON: {exc}')
+                    continue
+                for entries in block.values():
+                    for entry in entries or []:
+                        for hook in entry.get('hooks') or []:
+                            for cited in CITATION_RE.findall(hook.get('command', '')):
+                                if cited not in reach:
+                                    self.v.error(frag, 'global-hooks', f'command runs ~/.claude/{cited}, which module {name!r} does not install')
+
+    def check_contracts(self, mods: dict, dests: dict) -> None:
+        contracts = {}
+        for path in sorted((self.base / 'contracts').glob('*.yaml')) if (self.base / 'contracts').is_dir() else []:
+            try:
+                data = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
+            except yaml.YAMLError as exc:
+                self.v.error(self.v.rel(path), 'global-contract', f'invalid YAML: {exc}')
+                continue
+            contracts[data.get('dest')] = self.v.rel(path)
+            if not data.get('probes'):
+                self.v.error(self.v.rel(path), 'global-contract', 'contract has no probes')
+        installed = {d: m for m, ds in dests.items() for d in ds}
+        for dest, rel in contracts.items():
+            if dest not in installed:
+                self.v.error(rel, 'global-contract', f'contract for {dest}, which no module installs')
+        for dest, module in sorted(installed.items()):
+            if dest.startswith('hooks/') and dest not in contracts:
+                self.v.error(mods[module][0], 'global-contract', f'hook {dest} has no contract in {GLOBAL_DIR}/contracts/')
+
+    def check_citations(self, mods: dict, dests: dict) -> None:
+        for name, (rel, data) in mods.items():
+            reach = set().union(*(dests.get(m, {}).keys() for m in self.closure(mods, name)))
+            provided = set(data.get('project_provided') or [])
+            reach_dirs = {d.rsplit('/', 1)[0] for d in reach if d.startswith('skills/')}
+            for dest, src in dests.get(name, {}).items():
+                if not str(src).startswith(str(self.base)):
+                    continue   # the OpenSpec catalog is checked by the catalog rules
+                try:
+                    text = src.read_text(encoding='utf-8')
+                except (OSError, UnicodeDecodeError):
+                    continue
+                for cited in sorted(set(CITATION_RE.findall(text))):
+                    cited = cited.rstrip('.`/')
+                    if cited in reach or cited in provided or cited in reach_dirs:
+                        continue
+                    if cited.startswith('skills/') and any(d.startswith(cited + '/') for d in reach):
+                        continue
+                    self.v.error(self.v.rel(src), 'global-citation',
+                                 f'cites ~/.claude/{cited}, which module {name!r} and its dependencies do not install')
 
 
 def validate(root: Path) -> list[Finding]:

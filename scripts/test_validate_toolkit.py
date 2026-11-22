@@ -433,5 +433,78 @@ class Aliases(CatalogTestCase):
         self.assertFinding('ERROR', '.claude/skills/old-alpha/SKILL.md', 'alias', '16 non-blank lines')
 
 
+
+class GlobalTreeChecks(CatalogTestCase):
+    """global/: manifests, orphans, hook fragments, contracts, cited pieces."""
+
+    def setUp(self):
+        super().setUp()
+        self.write('global/modules/core.yaml', textwrap.dedent("""\
+            name: core
+            files:
+              - {src: global/hooks/gate, dest: hooks/gate, mode: "0755"}
+              - {src: global/rules/gate.md, dest: rules/gate.md}
+            hooks: [global/settings/hooks.core.json]
+            config: [gate]
+            """))
+        self.write('global/hooks/gate', '#!/usr/bin/env python3\n')
+        self.write('global/rules/gate.md', 'Enforced by `~/.claude/hooks/gate`.\n')
+        self.write('global/settings/hooks.core.json',
+                   '{"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/gate"}]}]}')
+        self.write('global/config/gate.json', '{}')
+        self.write('global/contracts/gate.yaml', 'piece: gate\ndest: hooks/gate\nprobes: [{name: p, exit: [0]}]\n')
+
+    def test_clean_global_tree(self):
+        for rule in ('global-manifest', 'global-orphan', 'global-hooks', 'global-contract', 'global-citation'):
+            self.assertNoRule(rule)
+
+    def test_missing_source(self):
+        (self.root / 'global/rules/gate.md').unlink()
+        self.assertFinding('ERROR', 'global/modules/core.yaml', 'global-manifest', 'global/rules/gate.md')
+
+    def test_missing_config_piece(self):
+        (self.root / 'global/config/gate.json').unlink()
+        self.assertFinding('ERROR', 'global/modules/core.yaml', 'global-manifest', 'config piece')
+
+    def test_orphan_file(self):
+        self.write('global/scripts/stray', 'x\n')
+        self.assertFinding('ERROR', 'global/scripts/stray', 'global-orphan', 'not installed')
+
+    def test_hook_runs_a_piece_not_installed(self):
+        self.write('global/settings/hooks.core.json',
+                   '{"Stop": [{"hooks": [{"type": "command", "command": "~/.claude/hooks/absent"}]}]}')
+        self.assertFinding('ERROR', 'global/settings/hooks.core.json', 'global-hooks', 'hooks/absent')
+
+    def test_hook_without_contract(self):
+        (self.root / 'global/contracts/gate.yaml').unlink()
+        self.assertFinding('ERROR', 'global/modules/core.yaml', 'global-contract', 'hooks/gate')
+
+    def test_contract_for_nothing(self):
+        self.write('global/contracts/ghost.yaml', 'piece: ghost\ndest: hooks/ghost\nprobes: [{name: p}]\n')
+        self.assertFinding('ERROR', 'global/contracts/ghost.yaml', 'global-contract', 'no module installs')
+
+    def test_cited_piece_outside_the_closure(self):
+        self.append('global/rules/gate.md', 'See `~/.claude/rules/elsewhere.md`.\n')
+        self.assertFinding('ERROR', 'global/rules/gate.md', 'global-citation', 'rules/elsewhere.md')
+
+    def test_cited_piece_from_a_dependency_is_fine(self):
+        self.write('global/modules/extra.yaml', 'name: extra\ndepends: [core]\nfiles:\n'
+                   '  - {src: global/rules/extra.md, dest: rules/extra.md}\n')
+        self.write('global/rules/extra.md', 'Uses `~/.claude/rules/gate.md`.\n')
+        self.assertNoRule('global-citation')
+
+    def test_global_skill_without_trigger_clause(self):
+        self.write('global/modules/core.yaml', (self.root / 'global/modules/core.yaml').read_text()
+                   .replace('files:\n', 'files:\n  - {src: global/skills/panel/SKILL.md, dest: skills/panel/SKILL.md}\n'))
+        self.write('global/skills/panel/SKILL.md', '---\nname: panel\ndescription: Decides things.\n---\nbody\n')
+        self.assertFinding('ERROR', 'global/skills/panel/SKILL.md', 'trigger-clause')
+        self.write('global/skills/panel/SKILL.md', '---\nname: panel\ndescription: Decides things. Use when stuck.\n---\nbody\n')
+        self.assertNoRule('trigger-clause')
+
+    def test_real_global_tree_is_clean(self):
+        repo = Path(__file__).resolve().parent.parent
+        found = [f.line() for f in vt.validate(repo) if f.rule.startswith('global-')]
+        self.assertEqual([], found)
+
 if __name__ == '__main__':
     unittest.main()

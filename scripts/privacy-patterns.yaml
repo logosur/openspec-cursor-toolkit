@@ -36,10 +36,10 @@ patterns:
     regex: '/(?:home|Users)/(?!user\b|USER\b|runner\b|<|\$|\{|\*)[A-Za-z_][\w.-]*'
     why: An absolute home path names a real user account; use ~ or $HOME.
   - id: dated-order
-    regex: '\b(?:[Oo]rden(?:es)?|[Óó]rdenes)\s+(?:literal(?:es)?\s+)?del?\s+(?:desarrollador\s+)?(?:del?\s+)?20\d\d-\d\d-\d\d'
-    why: A dated order quotes a specific person's instructions; state the rule neutrally.
+    regex: '\b(?:[Oo]rden(?:es)?|[Óó]rdenes|[Cc]orrecci[oó]n(?:es)?|[Ll]ecci[oó]n(?:es)?|[Dd]ecisi[oó]n(?:es)?|[Ii]ncidente)\s+(?:literal(?:es)?\s+)?del?\s+(?:desarrollador|usuario|due[ñn]o)?[\s,]*(?:del?\s+)?(?:20\d\d-\d\d-\d\d|\d\d?[-/]\d\d?[-/]20\d\d)'
+    why: A dated order, correction or incident quotes a specific person's history; state the rule neutrally.
   - id: dated-order-en
-    regex: "\\b(?:developer'?s|user'?s)\\s+orders?\\s+(?:of\\s+)?20\\d\\d-\\d\\d-\\d\\d"
+    regex: "\\b(?:developer|user|owner)'?s?\\s+(?:orders?|corrections?|decisions?)\\s*,?\\s*(?:of\\s+)?(?:20\\d\\d-\\d\\d-\\d\\d|\\d\\d?[-/]\\d\\d?[-/]20\\d\\d)"
     why: A dated order quotes a specific person's instructions; state the rule neutrally.
   - id: secret-anthropic
     regex: 'sk-ant-[A-Za-z0-9_-]{10,}'

@@ -18,7 +18,7 @@ los cambios de esta sesión), porque esa elección **es** la orden explícita.
 **Excepción: la nota del vault.** La regla global obliga a anotar en la bóveda de notas el trabajo
 sustantivo (feature, decisión de arquitectura, bug no trivial, incidente) sin pedir permiso. Si falta, el
 skill la escribe **antes** del veredicto y lo dice en una línea. Nunca se ofrece como opcional ni se cierra
-con «dime anótalo»: la memoria automática del agente no la sustituye (corrección del desarrollador, 23-09-2026).
+con «dime anótalo»: la memoria automática del agente no la sustituye.
 
 **Política del proyecto: `ask` (por defecto) o `publish-own-work`.** Qué pasa con el trabajo propio que quedó
 sin subir no lo decide este skill: lo declara el proyecto, y la declaración es una **autorización**, así que

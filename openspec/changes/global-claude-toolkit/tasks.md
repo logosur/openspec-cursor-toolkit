@@ -14,7 +14,7 @@ Requirement references: **GI** = `specs/global-install`, **OL** = `specs/overrid
 
 - [x] 2.1 Audit `~/.claude` read-only; inventory kept outside the repo; counts in proposal.
 - [x] 2.2 Proposal, design (with SOLID), specs and tasks; verify the privacy guard passes on them.
-- [ ] 2.3 Advisor review before implementation; record changes made because of it in design.
+- [x] 2.3 Advisor review before implementation; record changes made because of it in design (design → "Changes after the advisor review").
 
 ## 3. Installer package (GI, D6, D7)
 

@@ -164,6 +164,14 @@ class Checker:
         self.quotes = quotes
         self.findings: list[Finding] = []
 
+    def check_path(self, where: str, path_text: str) -> None:
+        """Check a file name (or a symlink target): names can leak as much as content."""
+        before = len(self.findings)
+        self.check_text(where, path_text, [0])
+        for i in range(before, len(self.findings)):
+            f = self.findings[i]
+            self.findings[i] = Finding(f.where, 0, f.rule, f.detail + ' (in the path)')
+
     def check_text(self, where: str, text: str, line_offsets: list[int] | None = None) -> None:
         lines = text.splitlines()
         for i, line in enumerate(lines, 1):
@@ -178,8 +186,8 @@ class Checker:
                     if allowed(self.allow_entries, where, p.id, value):
                         continue
                     self.findings.append(Finding(where, lineno, p.id, f'matches {value!r}'))
-            for n, term in self.terms:
-                if term.search(line) and not allowed(self.allow_entries, where, 'private', line):
+            for n, term in self.terms:  # the private layer is never allowlisted
+                if term.search(line):
                     self.findings.append(Finding(where, lineno, 'private', f'matches private denylist entry #{n}'))
         if self.quotes:
             flat = normalize(text)
@@ -199,6 +207,7 @@ def scan_tree(root: Path, checker: Checker, staged: bool) -> None:
     else:
         names = git(root, 'ls-files', '-co', '--exclude-standard', '-z').split('\0')
     for name in filter(None, names):
+        checker.check_path(name, name)
         if staged:
             try:
                 data = subprocess.run(['git', '-C', str(root), 'show', f':{name}'], check=True,
@@ -207,7 +216,10 @@ def scan_tree(root: Path, checker: Checker, staged: bool) -> None:
                 continue
         else:
             path = root / name
-            if not path.is_file() or path.is_symlink():
+            if path.is_symlink():
+                checker.check_path(name, os.readlink(path))
+                continue
+            if not path.is_file():
                 continue
             data = path.read_bytes()
         if len(data) > MAX_BYTES or not is_text(data):
@@ -219,6 +231,8 @@ def scan_range(root: Path, checker: Checker, rev_range: str) -> None:
     for sha in filter(None, git(root, 'rev-list', rev_range).split()):
         checker.check_text(f'commit {sha[:12]} message', git(root, 'log', '-1', '--format=%B', sha))
         diff = git(root, 'show', '--format=', '--unified=0', '--no-color', sha)
+        for name in filter(None, git(root, 'show', '--format=', '--name-only', sha).splitlines()):
+            checker.check_path(f'commit {sha[:12]} {name}', name)
         for path, added, offsets in added_lines(diff):
             checker.check_text(f'commit {sha[:12]} {path}', '\n'.join(added), offsets)
 

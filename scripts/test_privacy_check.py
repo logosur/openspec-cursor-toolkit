@@ -99,6 +99,28 @@ class GenericPatterns(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn('[dated-order]', out)
 
+    def test_dated_order_variants_fail(self):
+        for text in ('Orden del desarrollador, 2026-11-08: x', 'corrección del desarrollador, 23-09-2026',
+                     "Developer's order, 2026-11-08.", 'Órdenes del 2026-10-24 y del 2026-11-09'):
+            with self.subTest(text=text):
+                self.repo.write('a.md', text + '\n')
+                self.assertIn('[dated-order', self.repo.run()[1])
+
+    def test_private_layer_cannot_be_allowlisted(self):
+        self.repo.write('privacy-denylist.txt', 'acme-client\n', base=self.repo.override)
+        self.repo.write('a.md', 'acme-client\n')
+        self.repo.write('scripts/privacy-allow.yaml', 'allow:\n  - path: a.md\n    pattern: "*"\n    reason: x\n')
+        self.assertEqual(self.repo.run()[0], 1)
+
+    def test_file_names_and_symlink_targets_are_checked(self):
+        self.repo.write('privacy-denylist.txt', 'acme-client\n', base=self.repo.override)
+        self.repo.write('notes/acme-client-plan.md', 'clean\n')
+        (self.repo.root / 'link').symlink_to('/home/alice/x')
+        code, out = self.repo.run()
+        self.assertEqual(code, 1)
+        self.assertIn('(in the path)', out)
+        self.assertIn('[home-path]', out)
+
     def test_secret_fails(self):
         self.repo.write('a.md', 'key sk-ant-abcdefghijklmnop\n')
         self.assertIn('[secret-anthropic]', self.repo.run()[1])

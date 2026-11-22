@@ -135,6 +135,16 @@ The unit (session supervisor, nudger, handoff guard, project pause, account swit
 ### D12. What never enters the repo
 Third-party skills and plugins (listed in README as optional), skills of client origin or uncertain authorship, personal pieces (routines, project-specific scripts and hooks, account and machine rules), runtime state (`state/`, `supervisor/`, `routines/`, `projects/`, `sessions/`…), credentials and tokens, backups and caches.
 
+## Changes after the advisor review (before implementation)
+
+- **Privacy guard:** the private layer can no longer be allowlisted; file names and symlink targets are checked; dated-order patterns cover the comma forms and day-first dates; literal texts are copied into the private override **before** any neutral text is written, so the private-quote layer is active while neutral versions are produced (task 7.4 runs before 5.2).
+- **Sandbox:** a piece is executed (probes, self-tests) only when `HOME` is a temporary directory and the target is `$HOME/.claude`; `--target` alone never isolates, because pieces resolve `~/.claude` through `HOME`. `equivalence` compares files and never executes pieces.
+- **Catalog layout:** the OpenSpec CLI skills grouped under `.claude/skills/openspec/<name>/` are installed flattened as `skills/<name>/`, as the live tree has them. `docs/openspec/` is installed as `docs/openspec/` in the Claude dir so the paths the skills cite exist; the validator's dependency closure covers those citations.
+- **Equivalence classes need proof:** `toolkit-newer` only when the live file equals some historical version of its repo source (else it must be declared as a behaviour change on migration, with a reason); `neutral-text` for Python only when the AST without docstrings is equal; anything else is `injected` and must name the test that proves it.
+- **Installer details:** hook identity normalises a leading interpreter (`python3 `) and `~`/`$HOME`; a second install keeps the first backup, so uninstall restores the original; a `CLAUDE.md` not written by the toolkit is not replaced: the toolkit text goes in a managed block between markers, unless the override replaces the whole file; symlinks are never installed (live symlinks are declared exclusions); a piece with a missing or corrupt config falls back to its defaults, and a probe checks it.
+- **Scope of `core`:** evaluated piece by piece, not by excluding everything near supervision; the start-session gates, the duplicate-chip gate and the question-queue CLI are autonomous and tested, so they are candidates.
+- **Order:** a vertical slice first (installer, override, hook merge, equivalence, with `openspec` and two or three autonomous pieces), then `core` grows.
+
 ## SOLID
 
 | Principle | How the toolkit meets it | Where it is violated today (audit) and the fix |
@@ -149,7 +159,7 @@ Third-party skills and plugins (listed in README as optional), skills of client 
 
 - **Runtime config means the developer's installed scripts differ from today's files.** Mitigation: equivalence class `injected` requires the piece's tests to pass with his config.
 - **A temporary `HOME` does not isolate everything** (systemd, desktop-app files, sockets, real heavy-job state). Mitigation: no installer step touches systemd; self-tests that talk to the app or sockets are run only after checking they redirect every path, otherwise they are reported as not run; suites run through the real heavy-job outside the sandbox.
-- **The authorship gate protects `settings.json`.** The installer writes it from Python, which the gate does not intercept; it never removes the gate's own entry and keeps attribution keys untouched. The developer's real file is not written in this change.
+- **The authorship gate protects `settings.json`.** The merge preserves everything the gate protects: attribution keys stay untouched and the gate's own hook entry is never removed. The developer's real file is not written in this change.
 - **Override drift:** replaced files freeze the toolkit version they came from. Mitigation: `override.lock.json` + `drift` state `override-base-changed`.
 - **Spanish texts.** The toolkit's user-facing texts are Spanish where the source is; code, identifiers and docs are English. Translating is out of scope.
 - **History.** Personal references already published in this repo's history stay there; rewriting public history is the developer's decision (queued).

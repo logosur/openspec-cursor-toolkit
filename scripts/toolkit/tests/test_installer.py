@@ -242,8 +242,21 @@ class PiecesInSandbox(Sandbox):
         if not shutil.which('pgrep') or not shutil.which('setsid'):
             self.skipTest('pgrep/setsid not available')
         self.run_cli('install')
-        r = subprocess.run([sys.executable, str(self.target / 'hooks/process-kill-gate'), '--self-test'],
-                           capture_output=True, text=True, env=dict(os.environ), timeout=120)
+        # The self-test expects foreign processes that a desktop always has (a volume monitor whose name
+        # starts with gvfs). A CI runner has none, so start one: a copy of sleep under that name, detached
+        # with setsid and carrying another session id, killed by PID afterwards.
+        fake = self.tmp / 'bin' / 'gvfs-udisks2-volume-monitor'
+        fake.parent.mkdir()
+        shutil.copy(shutil.which('sleep'), fake)
+        env = dict(os.environ, CLAUDE_CODE_SESSION_ID='toolkit-test-foreign-session')
+        subprocess.run(['setsid', '-f', str(fake), '300'], env=env, check=True)
+        try:
+            r = subprocess.run([sys.executable, str(self.target / 'hooks/process-kill-gate'), '--self-test'],
+                               capture_output=True, text=True, env=dict(os.environ), timeout=120)
+        finally:
+            found = subprocess.run(['pgrep', '-f', f'^{fake} 300'], capture_output=True, text=True).stdout.split()
+            for pid in found:
+                os.kill(int(pid), 15)
         self.assertEqual(r.returncode, 0, r.stdout[-2000:] + r.stderr[-2000:])
 
 

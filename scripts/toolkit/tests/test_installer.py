@@ -16,7 +16,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from scripts.toolkit import cli, plan as plan_mod, settings_merge
+from scripts.toolkit import cli, modules, plan as plan_mod, settings_merge
 from scripts.toolkit.paths import REPO_ROOT, is_sandbox
 
 
@@ -25,7 +25,7 @@ def snapshot(root: Path) -> dict[str, bytes]:
 
 
 class Sandbox(unittest.TestCase):
-    modules = 'openspec,core,devtools,sessions'
+    modules = ','.join(modules.available())   # every module, opt-in ones too
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix='toolkit-test-'))
@@ -97,6 +97,16 @@ class InstallBasics(Sandbox):
         self.assertEqual(code, 2)
         self.assertIn("required binary 'git'", out)
         self.assertEqual(list(self.target.iterdir()), [])
+
+
+class DefaultModules(Sandbox):
+    """What an install gives when neither --modules nor an override chooses."""
+
+    def test_modules_that_widen_session_autonomy_are_opt_in(self):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main(['install', '--override', '', '--target', str(self.target)]), 0)
+        self.assertFalse((self.target / 'hooks' / 'start-session-bypass-gate').exists())
+        self.assertNotIn('start-session-bypass-gate', json.dumps(self.settings()))
 
 
 class SettingsMerge(Sandbox):

@@ -50,6 +50,10 @@ What the installer guarantees:
 
 ## Modules
 
+`openspec`, `core` and `devtools` are installed by default. `sessions` is opt-in, because it makes
+started sessions run without permission prompts: choose it with
+`--modules openspec,core,devtools,sessions` or in the override's `modules`.
+
 | Module | Contents |
 |---|---|
 | `openspec` | `.claude/commands/`, `.claude/skills/`, `openspec-list.sh` and `docs/openspec/` (the catalog below) |

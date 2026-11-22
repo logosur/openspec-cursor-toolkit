@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install and maintain the global Claude Code toolkit. See README.md -> Install.
-#   ./install.sh install [--dry-run]      install or update (default modules: openspec, core)
+#   ./install.sh install [--dry-run]      install or update (default modules: openspec, core, devtools)
 #   ./install.sh uninstall                 undo the last install, restore backups
 #   ./install.sh status | verify | drift | equivalence --live DIR
 set -euo pipefail

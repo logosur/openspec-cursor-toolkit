@@ -152,7 +152,9 @@ Third-party skills and plugins (listed in README as optional), skills of client 
   `openspec, core, devtools`, defined once in `scripts/toolkit/modules.py`.
 - **A fourth module, `sessions`**: the two desktop-app session guards (born-in-bypass and duplicate
   proposal cards). Neither calls the supervisor's lock or question queue, so they meet D10 (a) and (c)
-  and ship now, with contracts, instead of waiting for the supervision unit.
+  and ship now, with contracts, instead of waiting for the supervision unit. It is opt-in: the first
+  release listed it among the defaults by mistake, which would have put a bypass policy on every
+  install. A module that widens what sessions may do unattended is never a default.
 - **Override files the toolkit already provides** are kept in the override only when they differ from
   the toolkit and are not an earlier version of it; the rest moved to the override's `archive/`. An
   install therefore reproduces the live dir exactly (evidence/equivalence.md) and reconciling the 43

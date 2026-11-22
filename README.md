@@ -21,8 +21,8 @@ documents its own stack (commands, tests, URLs) in its `CLAUDE.md`; the toolkit 
 Needs Linux, Python 3.10+, PyYAML and git.
 
 ```bash
-git clone https://github.com/<org>/openspec-cursor-toolkit.git
-cd openspec-cursor-toolkit
+git clone https://github.com/<org>/openspec-skills-toolkit.git
+cd openspec-skills-toolkit
 ./install.sh install --dry-run     # what would change, nothing written
 ./install.sh install
 ```

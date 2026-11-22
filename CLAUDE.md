@@ -1,6 +1,6 @@
 Claude Code solo carga este archivo y `.claude/rules/*.md`; `.cursor/rules/*.mdc` NO se cargan solos — ver índice final.
 
-# openspec-cursor-toolkit
+# openspec-skills-toolkit
 
 **Qué es:** toolkit **global de Claude Code** (repo público): se instala una vez por máquina en `~/.claude` con `./install.sh install` (módulos `openspec`, `core`, `devtools`) y se personaliza con un **override privado fuera del repo** (`~/.config/claude-toolkit/`). Incluye el catálogo OpenSpec (commands, skills, `docs/openspec/`), que además se sigue **exportando** por proyecto; Cursor (`.cursor/`) es destino secundario. Stack-agnostic: el consumidor aporta su rule de stack (`01-project-stack-quality-gate.mdc` o su `CLAUDE.md`).
 

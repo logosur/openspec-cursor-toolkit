@@ -6,7 +6,7 @@ Thumbs.db
 
 # Local artifacts — never publish
 *.zip
-openspec-cursor-toolkit.zip
+openspec-skills-toolkit.zip
 
 # AI session output (per-project runtime; not part of the toolkit)
 .cursor/context/

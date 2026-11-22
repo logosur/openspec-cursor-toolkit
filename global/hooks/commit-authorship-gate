@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""PreToolUse gate for the global authorship rule (~/.claude/rules/autoria-commits.md), all projects.
+
+Denies, before they run:
+- commit, tag, note, pull request, issue and release texts (inline or in a message file) that carry
+  co-author or AI attribution;
+- skipping or disabling git hooks (--no-verify, commit -n, -c core.hooksPath, unsetting it, /dev/null);
+- committing as someone else or changing the git identity (--author, GIT_AUTHOR_*/GIT_COMMITTER_*,
+  -c user.*, git config user.name/user.email);
+- writing any Claude settings file that turns attribution back on, and writing ~/.claude/settings.json
+  without empty attribution or without this gate;
+- changing this gate or the rule file.
+
+Detection is textual: a shell command that only mentions these options can be denied too.
+Only the developer changes this gate, by hand.
+"""
+
+import json
+import os
+import re
+import sys
+
+HOME = os.path.expanduser('~')
+GATE = os.path.realpath(__file__)
+RULE = os.path.join(HOME, '.claude', 'rules', 'autoria-commits.md')
+USER_SETTINGS = os.path.join(HOME, '.claude', 'settings.json')
+GATE_NAME = 'commit-authorship-gate'
+
+FORBIDDEN = re.compile(
+    r'co-?authored|co-?developed-by|assisted-by:|noreply@anthropic\.com|claude-session:'
+    r'|generated (with|by) \[?claude|🤖',
+    re.IGNORECASE,
+)
+PUBLISHING = re.compile(
+    r'\bgit\b[^|;&\n]*\b(commit|commit-tree|tag|notes|merge|rebase|am|revert|cherry-pick)\b'
+    r'|\bgh\s+(pr|issue)\s+(create|edit|comment|review|merge|close|reopen)\b'
+    r'|\bgh\s+release\s+(create|edit)\b'
+    r'|\bgh\s+api\b[^|;&\n]*(\s-X\s*(POST|PATCH|PUT)|\s-[fF]\s|--field|--raw-field|--input)',
+    re.IGNORECASE,
+)
+FILE_OPTIONS = re.compile(r'(?:--body-file|--notes-file|--file|--input|-F)(?:=|\s+)(["\']?)([^\s"\';&|=]+)\1(?=\s|$|[;&|])')
+GIT = re.compile(r'\bgit\b')
+BYPASS = [
+    (re.compile(r'--no-verify\b'), 'skips the git hooks (--no-verify)'),
+    (re.compile(r'\bgit\b[^;&|\n]*\bcommit\b[^;&|\n]*\s-[a-zA-Z]*n[a-zA-Z]*(\s|$)'), 'skips the git hooks (commit -n)'),
+    (re.compile(r'\s-c\s*core\.hookspath\b', re.I), 'overrides the git hooks for one command (-c core.hooksPath)'),
+    (re.compile(r'\bconfig\b[^;&|\n]*--unset(-all)?\s+core\.hookspath\b', re.I), 'removes the git hooks (core.hooksPath)'),
+    (re.compile(r'\bconfig\b[^;&|\n]*\bcore\.hookspath\s+["\']?(/dev/null|["\']{2})', re.I), 'disables the git hooks (core.hooksPath)'),
+    (re.compile(r'\bGIT_(AUTHOR|COMMITTER)_(NAME|EMAIL)\s*='), 'commits as someone else (GIT_AUTHOR_*/GIT_COMMITTER_*)'),
+    (re.compile(r'\bgit\b[^;&|\n]*\s--author\b'), 'commits as someone else (--author)'),
+    (re.compile(r'\s-c\s*user\.(name|email)\b', re.I), 'commits as someone else (-c user.*)'),
+    (re.compile(r'\bgit\b[^;&|\n]*\bconfig\b[^;&|\n]*--unset(-all)?\s+user\.(name|email)\b', re.I), 'changes the git identity'),
+]
+IDENTITY_SET = re.compile(r'\bgit\b[^;&|\n]*\bconfig\b([^;&|\n]*)\buser\.(name|email)\s+\S', re.I)
+CONFIG_READ = re.compile(r'--get(-all|-regexp)?\b|--list\b|\s-l\b', re.I)
+SHELL_WRITE = re.compile(
+    r'(^|[;&|(]\s*|\s)(rm|mv|cp|chmod|chown|ln|truncate|unlink|touch|rsync|tee|dd|install)\s'
+    r'|\bsed\b[^;&|\n]*\s-i|\bperl\b[^;&|\n]*\s-[a-z]*i|>\s*["\']?[^\s;&|]*(settings[^\s;&|]*\.json|' + GATE_NAME + r'|autoria-commits\.md)'
+    r'|\bpython3?\b[^\n]*(open\([^)]*["\'][wa]|write_text)'
+)
+SHELL_MARKERS = (GATE_NAME, 'autoria-commits.md', '.claude/settings')
+
+
+def deny(reason):
+    print(json.dumps({
+        'hookSpecificOutput': {
+            'hookEventName': 'PreToolUse',
+            'permissionDecision': 'deny',
+            'permissionDecisionReason': 'Authorship rule (~/.claude/rules/autoria-commits.md): ' + reason,
+        }
+    }))
+    sys.exit(0)
+
+
+def is_settings_file(path):
+    return os.path.basename(path) in ('settings.json', 'settings.local.json') and os.path.basename(os.path.dirname(path)) == '.claude'
+
+
+def resulting_content(tool, tool_input, path):
+    if tool == 'Write':
+        return tool_input.get('content', '')
+    try:
+        with open(path, encoding='utf-8') as handle:
+            content = handle.read()
+    except OSError:
+        content = ''
+    edits = tool_input.get('edits') if tool == 'MultiEdit' else [tool_input]
+    for edit in edits or []:
+        old, new = edit.get('old_string', ''), edit.get('new_string', '')
+        content = content.replace(old, new) if edit.get('replace_all') else content.replace(old, new, 1)
+    return content
+
+
+def check_settings(tool, tool_input, path):
+    try:
+        data = json.loads(resulting_content(tool, tool_input, path) or '{}')
+    except ValueError:
+        deny('the edit would leave %s as invalid JSON' % path)
+
+    attribution = data.get('attribution')
+    if attribution is True or (isinstance(attribution, dict) and (attribution.get('commit') or attribution.get('pr'))):
+        deny('%s would turn commit or PR attribution back on' % path)
+    if data.get('includeCoAuthoredBy') is True:
+        deny('%s would turn the co-author trailer back on' % path)
+
+    if os.path.realpath(path) == os.path.realpath(USER_SETTINGS):
+        if not (isinstance(attribution, dict) and attribution.get('commit') == '' and attribution.get('pr') == ''):
+            deny('~/.claude/settings.json must keep attribution.commit and attribution.pr empty')
+        commands = [
+            hook.get('command', '')
+            for entry in (data.get('hooks') or {}).get('PreToolUse', [])
+            if 'Bash' in entry.get('matcher', '') and 'Edit' in entry.get('matcher', '')
+            for hook in entry.get('hooks', [])
+        ]
+        if not any(GATE_NAME in command for command in commands):
+            deny('~/.claude/settings.json must keep the %s hook on Bash, Edit and Write' % GATE_NAME)
+
+
+def check_file_tool(tool, tool_input):
+    path = tool_input.get('file_path') or tool_input.get('notebook_path') or ''
+    if not path:
+        return
+    real = os.path.realpath(path)
+    if real in (GATE, os.path.realpath(RULE)):
+        deny('the authorship gate and its rule are changed only by the developer, by hand')
+    if is_settings_file(real):
+        check_settings(tool, tool_input, real)
+
+
+def check_bash(command, cwd):
+    if any(marker in command for marker in SHELL_MARKERS) and SHELL_WRITE.search(command):
+        deny('Claude settings, the authorship gate and its rule are changed with Edit/Write (validated), not from the shell')
+
+    if not re.search(r'\b(git|gh)\b', command):
+        return
+
+    for pattern, what in BYPASS:
+        if pattern.search(command):
+            deny('the command ' + what)
+
+    identity = IDENTITY_SET.search(command)
+    if identity and not CONFIG_READ.search(identity.group(1) or ''):
+        deny('the command changes the git identity; only the developer does that')
+
+    if PUBLISHING.search(command):
+        if FORBIDDEN.search(command):
+            deny('the commit, PR, issue or release text carries co-author or AI attribution')
+        for _, path in FILE_OPTIONS.findall(command):
+            full = path if os.path.isabs(path) else os.path.join(cwd, path)
+            try:
+                with open(full, encoding='utf-8', errors='replace') as handle:
+                    if FORBIDDEN.search(handle.read()):
+                        deny('%s carries co-author or AI attribution' % path)
+            except OSError:
+                pass
+
+
+def main():
+    try:
+        payload = json.load(sys.stdin)
+    except ValueError:
+        sys.exit(0)
+
+    tool = payload.get('tool_name', '')
+    tool_input = payload.get('tool_input') or {}
+
+    if tool in ('Edit', 'Write', 'MultiEdit', 'NotebookEdit'):
+        check_file_tool(tool, tool_input)
+    elif tool == 'Bash':
+        check_bash(tool_input.get('command', ''), payload.get('cwd') or os.getcwd())
+
+    sys.exit(0)
+
+
+if __name__ == '__main__':
+    main()

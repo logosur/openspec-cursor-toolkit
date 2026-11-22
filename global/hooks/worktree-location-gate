@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""PreToolUse(Bash) gate for the global worktree rule (~/.claude/rules/worktrees-ubicacion.md).
+
+Every worktree goes where `~/.claude/scripts/worktree-location where` says:
+<repo>/.claude/worktrees/ for a project with DDEV (its container only mounts the project folder),
+<root>/<project>/ for the rest (<root> from the toolkit config piece `worktree-location`). Worktrees made by the app,
+--worktree, EnterWorktree and subagents already land there through the WorktreeCreate hook. This
+gate covers an agent typing `git worktree add` or `git worktree move`: it reads the destination of
+the command, resolves it against `git -C`, a leading `cd` or the session cwd, and denies it when
+it falls outside that folder. Commands that call worktree-location pass.
+
+Project scripts that call git themselves are not seen here.
+"""
+
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+
+SCRIPT = os.path.expanduser('~/.claude/scripts/worktree-location')
+WORKTREE_WRITE = re.compile(r'\bgit\b[^;&|\n]*?\bworktree\s+(add|move)\b[^;&|\n]*')
+CD_BEFORE = re.compile(r'(?:^|[;&|(]\s*)cd\s+("[^"]+"|\'[^\']+\'|[^\s;&|]+)')
+VALUE_OPTIONS = {'-b', '-B', '--reason'}
+
+
+def deny(reason):
+    print(json.dumps({
+        'hookSpecificOutput': {
+            'hookEventName': 'PreToolUse',
+            'permissionDecision': 'deny',
+            'permissionDecisionReason': 'Worktree rule (~/.claude/rules/worktrees-ubicacion.md): ' + reason,
+        }
+    }))
+    sys.exit(0)
+
+
+def parse(segment):
+    """(git -C dir or None, subcommand, destination or None) of one `git ... worktree add|move`."""
+    try:
+        tokens = shlex.split(segment)
+    except ValueError:
+        tokens = segment.split()
+    repo_dir, i = None, 1
+    while i < len(tokens) and tokens[i] != 'worktree':
+        if tokens[i] == '-C' and i + 1 < len(tokens):
+            repo_dir = tokens[i + 1]
+            i += 2
+        elif tokens[i] == '-c':
+            i += 2
+        else:
+            i += 1
+    sub, positional, skip = tokens[i + 1] if i + 1 < len(tokens) else '', [], False
+    for token in tokens[i + 2:]:
+        if skip:
+            skip = False
+        elif token in VALUE_OPTIONS:
+            skip = True
+        elif not token.startswith('-'):
+            positional.append(token)
+    index = 0 if sub == 'add' else 1
+    return repo_dir, sub, positional[index] if len(positional) > index else None
+
+
+def expected_folder(repo):
+    result = subprocess.run(['python3', SCRIPT, 'where', '--repo', repo], capture_output=True, text=True, timeout=8)
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def main():
+    try:
+        payload = json.load(sys.stdin)
+    except ValueError:
+        sys.exit(0)
+    if payload.get('tool_name') != 'Bash':
+        sys.exit(0)
+
+    command = (payload.get('tool_input') or {}).get('command', '')
+    if 'worktree-location' in command:
+        sys.exit(0)
+    cwd = payload.get('cwd') or os.getcwd()
+    usage = ('create it with `~/.claude/scripts/worktree-location add [--repo DIR] [--base REF] BRANCH` '
+             '(or `--detach`), which picks the folder and prints it.')
+
+    for match in WORKTREE_WRITE.finditer(command):
+        base = cwd
+        for cd in CD_BEFORE.finditer(command[:match.start()]):
+            base = os.path.join(base, os.path.expanduser(cd.group(1).strip('"\'')))
+        repo_dir, sub, destination = parse(match.group(0))
+        if repo_dir:
+            base = os.path.join(base, os.path.expanduser(repo_dir))
+        if not destination:
+            continue
+        try:
+            folder = expected_folder(base)
+        except (OSError, subprocess.SubprocessError):
+            folder = None
+        if not folder:
+            deny('could not tell which repository this `git worktree %s` is for; %s' % (sub, usage))
+        target = os.path.realpath(os.path.join(base, os.path.expanduser(destination)))
+        if not target.startswith(os.path.realpath(folder) + os.sep):
+            deny('the worktrees of this repository go under %s/worktree-<branch>-<YYYYMMDD>, not %s; %s'
+                 % (folder, target, usage))
+    sys.exit(0)
+
+
+if __name__ == '__main__':
+    main()

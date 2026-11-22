@@ -1,0 +1,28 @@
+name: supervision
+summary: >-
+  Supervision of the sessions of a project on one machine: a per-project queue for the decisions only
+  the developer can take, the hook that presents each one in the session it belongs to, and the gate
+  that keeps a session from messaging sessions of other projects.
+depends: [core]
+requires:
+  python: "3.10"
+  os: linux
+  binaries: [python3, git]
+notes:
+  - Opt-in, never a default. It is built for unattended work in the Claude desktop app.
+  - No message exception is on until the supervision config piece lists it (message_exceptions).
+  - account-switch and project-pause are not part of the toolkit; without them their exceptions and pauses do nothing.
+# Named by these pieces, absent from the toolkit; every caller works without them.
+project_provided:
+  - scripts/account-switch
+  - scripts/project-pause
+  - scripts/supervisor-lock
+files:
+  - {src: global/scripts/ask-queue, dest: scripts/ask-queue, mode: "0755"}
+  - {src: global/hooks/ask-queue-prompt, dest: hooks/ask-queue-prompt, mode: "0755"}
+  - {src: global/hooks/cross-project-message-gate, dest: hooks/cross-project-message-gate, mode: "0755"}
+  - {src: global/rules/mensajes-entre-sesiones-solo-mismo-proyecto.md, dest: rules/mensajes-entre-sesiones-solo-mismo-proyecto.md}
+  - {src: global/rules/dialogos-de-preguntas-legibles.md, dest: rules/dialogos-de-preguntas-legibles.md}
+hooks:
+  - global/settings/hooks.supervision.json
+config: [supervision]

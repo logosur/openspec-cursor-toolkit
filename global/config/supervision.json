@@ -1,0 +1,13 @@
+{
+  "account_switch_marker": "[cambio de cuenta]",
+  "project_resume_marker": "[reanudar proyecto]",
+  "skill_reload_marker": "[recarga de skill]",
+  "supervisor_revive_marker": "[reanimar supervisora]",
+  "account_switch_ttl_s": 21600,
+  "account_switch_claim_window_s": 1800,
+  "supervisor_revive_valid_s": 1800,
+  "presence_min": 20,
+  "app_sessions_dir": "~/.config/Claude/claude-code-sessions",
+  "message_exceptions": [],
+  "config_session_dirs": []
+}

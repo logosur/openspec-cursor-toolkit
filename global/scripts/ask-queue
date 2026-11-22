@@ -1,0 +1,438 @@
+#!/usr/bin/env python3
+"""ask-queue: per-project queue of decisions that only the developer can take.
+
+A session that hits a hard limit (money, credentials, a fact only the developer knows, an approval a rule reserves to them, an
+unauthorized deploy, deleting others' work, a model-family change) does not stop to ask: it registers the question
+here, with the default it will assume, and keeps working on everything that does not depend on it. The next time the
+developer writes in that project, the UserPromptSubmit hook `ask-queue-prompt` lists the open items, but only in the
+session that queued them or in the project's questions session («Preguntas de la supervisión de <project>»), never in
+another session of the project.
+
+Each item records its origin: `session` (the CLI session id, from --session or CLAUDE_CODE_SESSION_ID) and
+`host_session` (the app's local_… id, from CLAUDE_CODE_HOST_SESSION_ID); a subagent inherits both from its session.
+`answer` records who answered (`answered_by`).
+
+  ask-queue add --project DIR --question Q --default D --why W --blocks B [--session ID] [--key K]
+                [--radical] [--cost TEXT]         prints the id
+                                                  (an open/asked item with the same key, or the same normalized
+                                                  question text, is updated and its id printed instead; a duplicate
+                                                  that is not radical becomes radical when --radical is passed)
+                                                  --radical: a 3-agent panel voted unanimously that a wrong choice
+                                                  throws away a large part of future work (asked right away through
+                                                  the supervisor's mailbox); --cost: that cost, quantified
+  ask-queue list [--project DIR] [--open] [--unasked] [--radical] [--json]   --open = open + asked; --unasked =
+                                                  open, or asked more than ASK_QUEUE_REASK_H hours ago (default 12);
+                                                  --radical = only radical items
+  ask-queue asked ID... [--to SESSION]            marks open items as asked (a dialog is about to be shown)
+  ask-queue pending ID...                         prints "<id> <status>" (open|asked|answered|closed|missing) per id
+  ask-queue answer ID --text T                    marks the item answered (from open or asked)
+  ask-queue close ID [--note N]                   marks the item closed (no longer relevant / done)
+
+The project key is the MAIN checkout root (git common dir), so a worktree shares its checkout's queue; a directory
+outside git uses its realpath. If a supervision lock (SUPERVISOR_LOCK_HOME or ~/.claude/supervisor, locks/*.json) names
+a checkout that contains the directory, that checkout is the project (a repo nested in a supervised workspace shares the
+workspace's queue). Storage: <ASK_QUEUE_DIR or ~/.claude/state/ask-queue>/<basename>-<sha1[:8]>.jsonl,
+one json object per line, an item appended on add and rewritten (under flock) on answer/close.
+"""
+import argparse
+import fcntl
+import glob
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import uuid
+from datetime import datetime, timezone
+
+
+def queue_dir():
+    return os.path.expanduser(os.environ.get('ASK_QUEUE_DIR', '~/.claude/state/ask-queue'))
+
+
+def lock_home():
+    return os.path.expanduser(os.environ.get('SUPERVISOR_LOCK_HOME', '~/.claude/supervisor'))
+
+
+def live_lock_files():
+    """Supervision locks that exist and are not released (`release` deletes the file). Staleness is NOT checked: a lock
+    names which workspace is the project even while its supervisor is quiet (a supervision can be
+    open with an old heartbeat), and queueing under the workspace is harmless. Reads the json files only:
+    importing supervisor-lock from here would be fragile."""
+    locks = []
+    for path in sorted(glob.glob(os.path.join(glob.escape(lock_home()), 'locks', '*.json'))):
+        try:
+            with open(path) as fh:
+                lock = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(lock, dict) or not isinstance(lock.get('checkout'), str) or not lock['checkout']:
+            continue
+        if lock.get('released') or lock.get('state') == 'released':
+            continue
+        locks.append(lock)
+    return locks
+
+
+def supervised_checkout(real, common):
+    """Checkout of the supervision lock that contains `real`, else None.
+
+    Same matching as supervisor-lock's lock_containing: a git lock matches when the git common dir is its own; a
+    workspace lock (no common_dir) matches when `real` is inside its checkout or the git common dir of `real` is. A git
+    match beats a workspace one, and a deeper workspace beats a shallower one. A nested repo inside a supervised
+    workspace therefore queues under the workspace, where the supervisor's final round looks."""
+    best, rank = None, None
+    for lock in live_lock_files():
+        root = os.path.realpath(lock['checkout'])
+        if lock.get('common_dir'):
+            if not common or os.path.realpath(lock['common_dir']) != common:
+                continue
+            found = (1, len(root))
+        else:
+            if not (real == root or real.startswith(root + '/')
+                    or (common and (common == root or common.startswith(root + '/')))):
+                continue
+            found = (0, len(root))
+        if rank is None or found > rank:
+            best, rank = root, found
+    return best
+
+
+def project_root(directory):
+    """Checkout of the supervision lock that contains `directory`, else the main checkout root of `directory`
+    (worktrees map to it), else its realpath."""
+    real = os.path.realpath(os.path.expanduser(directory or os.getcwd()))
+    root, common = real, None
+    try:
+        out = subprocess.run(['git', '-C', real, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+                             capture_output=True, text=True, timeout=10)
+        found = out.stdout.strip()
+        if out.returncode == 0 and found:
+            common = os.path.realpath(found)
+            root = os.path.dirname(common) if os.path.basename(common) == '.git' else common
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return supervised_checkout(real, common) or root
+
+
+def queue_path(root):
+    name = os.path.basename(root.rstrip('/')) or 'root'
+    return os.path.join(queue_dir(), f'{name}-{hashlib.sha1(root.encode()).hexdigest()[:8]}.jsonl')
+
+
+def read_items(path):
+    items = []
+    try:
+        with open(path) as fh:
+            for line in fh:
+                try:
+                    item = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(item, dict) and item.get('id'):
+                    items.append(item)
+    except OSError:
+        pass
+    return items
+
+
+class Locked:
+    """flock on <file>.lock around a read-modify-write of a queue file."""
+
+    def __init__(self, path):
+        self.path = path
+
+    def __enter__(self):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        self.fh = open(self.path + '.lock', 'w')
+        fcntl.flock(self.fh, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.fh, fcntl.LOCK_UN)
+        self.fh.close()
+
+
+def write_items(path, items):
+    tmp = f'{path}.tmp{os.getpid()}'
+    with open(tmp, 'w') as fh:
+        for item in items:
+            fh.write(json.dumps(item, ensure_ascii=False) + '\n')
+    os.replace(tmp, path)
+
+
+def now_iso():
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec='seconds')
+
+
+UNANSWERED = ('open', 'asked')
+
+
+def reask_hours():
+    try:
+        value = float(os.environ.get('ASK_QUEUE_REASK_H', ''))
+        if value >= 0:
+            return value
+    except ValueError:
+        pass
+    return 12.0
+
+
+def norm_text(text):
+    """Casefolded text with punctuation dropped and whitespace collapsed (the dedup key of a question)."""
+    return re.sub(r'[\W_]+', ' ', str(text or '').casefold()).strip()
+
+
+def age_hours(stamp):
+    try:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(stamp)).total_seconds() / 3600
+    except (TypeError, ValueError):
+        return 10 ** 6
+
+
+def is_unasked(item):
+    """True for an item nobody is asking about: open, or asked longer ago than the re-ask threshold."""
+    if item.get('status') == 'open':
+        return True
+    return item.get('status') == 'asked' and age_hours(item.get('asked_ts')) > reask_hours()
+
+
+def origin_from_env(explicit=None):
+    """(session, host_session) of the session running this command. `explicit` (--session) wins: a local_… value is
+    taken as the app id, anything else as the CLI id. CLAUDE_SESSION_ID is the old name (never set by Claude Code),
+    kept as a fallback. A missing value is ''."""
+    cli = os.environ.get('CLAUDE_CODE_SESSION_ID') or os.environ.get('CLAUDE_SESSION_ID') or ''
+    host = os.environ.get('CLAUDE_CODE_HOST_SESSION_ID') or ''
+    if explicit:
+        if explicit.startswith('local_'):
+            return (cli if host == explicit else ''), explicit
+        return explicit, (host if cli == explicit else '')
+    return cli, host
+
+
+def origin_ids(item):
+    """The ids (CLI and app) of the session that queued `item`; empty when nobody recorded it."""
+    return {v for v in (item.get('session'), item.get('host_session')) if isinstance(v, str) and v}
+
+
+def cmd_add(args):
+    root = project_root(args.project)
+    path = queue_path(root)
+    fields = {'question': args.question, 'default': args.default, 'why': args.why, 'blocks': args.blocks}
+    if args.cost:
+        fields['cost'] = args.cost
+    with Locked(path):
+        items = read_items(path)
+        text = norm_text(args.question)
+        for existing in items:
+            if existing.get('status') not in UNANSWERED:
+                continue
+            if args.key:
+                same = existing.get('key') == args.key
+            else:
+                same = norm_text(existing.get('question')) == text
+            if same:
+                changes = {k: v for k, v in fields.items() if existing.get(k) != v}
+                if not origin_ids(existing):  # an item queued before origins were recorded takes this session's
+                    session, host = origin_from_env(args.session)
+                    changes.update({k: v for k, v in (('session', session), ('host_session', host)) if v})
+                if args.radical and not existing.get('radical'):
+                    changes['radical'] = True  # only ever upgraded, never downgraded by a later plain add
+                if changes:
+                    existing.update(changes)
+                    write_items(path, items)
+                print(existing['id'])
+                return 0
+        session, host = origin_from_env(args.session)
+        item = {'id': f'q{time.strftime("%Y%m%d%H%M%S")}-{uuid.uuid4().hex[:6]}', 'ts': now_iso(), 'project': root,
+                'session': session, 'host_session': host, **fields, 'status': 'open', 'answer': None}
+        if args.key:
+            item['key'] = args.key
+        if args.radical:
+            item['radical'] = True
+        with open(path, 'a') as fh:
+            fh.write(json.dumps(item, ensure_ascii=False) + '\n')
+    print(item['id'])
+    return 0
+
+
+def all_queue_files():
+    # glob skips dot-files, and a project folder like ~/.claude gives a queue file named '.claude-<hash>.jsonl',
+    # so match both patterns. '.jsonl.lock' and '.jsonl.tmp<pid>' files do not end in '.jsonl'.
+    base = glob.escape(queue_dir())
+    found = set(glob.glob(os.path.join(base, '*.jsonl')))
+    found.update(glob.glob(os.path.join(base, '.*.jsonl')))
+    return sorted(found)
+
+
+def cmd_list(args):
+    paths = [queue_path(project_root(args.project))] if args.project else all_queue_files()
+    items = [i for p in paths for i in read_items(p)]
+    if args.radical:
+        items = [i for i in items if i.get('radical')]
+    if args.unasked:
+        items = [i for i in items if is_unasked(i)]
+    elif args.open:
+        items = [i for i in items if i.get('status') in UNANSWERED]
+    items.sort(key=lambda i: i.get('ts', ''))
+    if args.json:
+        print(json.dumps(items, ensure_ascii=False, indent=2))
+        return 0
+    if not items:
+        print('(no items)')
+    for i in items:
+        asked = f' (to {i["asked_to"]})' if i.get('status') == 'asked' and i.get('asked_to') else ''
+        mark = '[RADICAL] ' if i.get('radical') else ''
+        print(f'{i["id"]}  {i.get("status")}{asked}  {os.path.basename(i.get("project", ""))}  {mark}{i.get("question")}')
+        print(f'    default: {i.get("default")}  |  why: {i.get("why")}  |  blocks: {i.get("blocks")}')
+        if i.get('cost'):
+            print(f'    cost: {i["cost"]}')
+        if i.get('answer'):
+            print(f'    answer: {i["answer"]}')
+    return 0
+
+
+def modify_item(item_id, change):
+    """Run `change(item)` on the item with this id, in whichever queue file holds it, under that file's lock.
+
+    `change` mutates the item and returns True to have the file rewritten. Returns a copy of the item as it is after,
+    or None when no file holds the id.
+    """
+    for path in all_queue_files():
+        if not any(i.get('id') == item_id for i in read_items(path)):
+            continue
+        with Locked(path):
+            items = read_items(path)
+            for item in items:
+                if item.get('id') == item_id:
+                    if change(item):
+                        write_items(path, items)
+                    return dict(item)
+    return None
+
+
+def find_items(ids):
+    found = {}
+    for path in all_queue_files():
+        for item in read_items(path):
+            if item['id'] in ids:
+                found[item['id']] = item
+    return found
+
+
+def cmd_asked(args):
+    code = 0
+    for item_id in args.ids:
+        def change(item):
+            if item.get('status') not in UNANSWERED:
+                return False
+            item.update(status='asked', asked_ts=now_iso(), asked_to=args.to or item.get('asked_to') or '',
+                        asked_n=int(item.get('asked_n') or 0) + 1)
+            return True
+
+        item = modify_item(item_id, change)
+        if item is None:
+            print(f'ask-queue: no item {item_id}', file=sys.stderr)
+            code = 2
+        elif item['status'] == 'asked':
+            print(f'{item_id} asked')
+        else:
+            print(f'{item_id} already {item["status"]}: left unchanged')
+    return code
+
+
+def cmd_pending(args):
+    found = find_items(set(args.ids))
+    for item_id in args.ids:
+        item = found.get(item_id)
+        if item is None:
+            print(f'{item_id}\tmissing')
+        elif item.get('status') == 'answered':
+            answer = re.sub(r'\s+', ' ', str(item.get('answer') or '')).strip()
+            print(f'{item_id}\tanswered\t{item.get("answered_ts") or ""}\t{answer}')
+        else:
+            print(f'{item_id}\t{item.get("status")}')
+    return 0
+
+
+def finish(item_id, status, **changes):
+    """Move an open/asked item to `status`; an answered/closed one is left as it is. Exit code for the CLI."""
+    moved = []
+
+    def change(item):
+        if item.get('status') not in UNANSWERED:
+            return False
+        item.update(status=status, **changes)
+        moved.append(item_id)
+        return True
+
+    item = modify_item(item_id, change)
+    if item is None:
+        print(f'ask-queue: no item {item_id}', file=sys.stderr)
+        return 2
+    if moved:
+        print(f'{item_id} {status}')
+    else:
+        print(f'{item_id} already {item["status"]}: left unchanged', file=sys.stderr)
+    return 0
+
+
+def cmd_answer(args):
+    by = os.environ.get('CLAUDE_CODE_HOST_SESSION_ID') or os.environ.get('CLAUDE_CODE_SESSION_ID') or ''
+    return finish(args.id, 'answered', answer=args.text, answered_ts=now_iso(), answered_by=by)
+
+
+def cmd_close(args):
+    changes = {'closed_ts': now_iso()}
+    if args.note:
+        changes['note'] = args.note
+    return finish(args.id, 'closed', **changes)
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog='ask-queue', description='Decisions only the developer can take.')
+    sub = parser.add_subparsers(dest='cmd', required=True)
+    p = sub.add_parser('add')
+    p.add_argument('--project', required=True)
+    for name in ('question', 'default', 'why', 'blocks'):
+        p.add_argument('--' + name, required=True)
+    p.add_argument('--session', help='origin session (CLI id or local_… id); default: this session, from the env')
+    p.add_argument('--key', help='stable key of the decision; the same key never creates a second open item')
+    p.add_argument('--radical', action='store_true',
+                   help='a unanimous 3-agent panel judged that a wrong choice throws away a large part of future work')
+    p.add_argument('--cost', help='quantified cost of choosing wrong, e.g. "2 specs, ~6 h de trabajo"')
+    p.set_defaults(func=cmd_add)
+    p = sub.add_parser('list')
+    p.add_argument('--project')
+    p.add_argument('--open', action='store_true', help='unanswered items: open and asked')
+    p.add_argument('--unasked', action='store_true', help='open, or asked more than ASK_QUEUE_REASK_H hours ago')
+    p.add_argument('--radical', action='store_true', help='only radical items')
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_list)
+    p = sub.add_parser('asked')
+    p.add_argument('ids', nargs='+', metavar='ID')
+    p.add_argument('--to', help='session that is asking the developer')
+    p.set_defaults(func=cmd_asked)
+    p = sub.add_parser('pending')
+    p.add_argument('ids', nargs='+', metavar='ID')
+    p.set_defaults(func=cmd_pending)
+    p = sub.add_parser('answer')
+    p.add_argument('id')
+    p.add_argument('--text', required=True)
+    p.set_defaults(func=cmd_answer)
+    p = sub.add_parser('close')
+    p.add_argument('id')
+    p.add_argument('--note')
+    p.set_defaults(func=cmd_close)
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

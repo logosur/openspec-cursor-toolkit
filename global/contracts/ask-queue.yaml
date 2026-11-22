@@ -1,0 +1,19 @@
+piece: ask-queue
+dest: scripts/ask-queue
+kind: cli
+probes:
+  - name: help lists the subcommands
+    args: [--help]
+    exit: [0]
+    contains: pending
+  - name: an empty queue lists nothing
+    args: [list, --open]
+    exit: [0]
+    contains: (no items)
+  - name: add refuses an incomplete decision
+    args: [add, --project, ., --question, q]
+    exit: [2]
+  - name: an unknown id is reported
+    args: [pending, q-none]
+    exit: [0]
+    contains: missing

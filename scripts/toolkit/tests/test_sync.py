@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from scripts.toolkit import contracts, drift, equivalence, modules, overlay
@@ -53,6 +54,16 @@ class Contracts(Sandbox):
         (self.target / 'toolkit/config/worktree-location.json').write_text('{broken')
         code, out = self.verify()
         self.assertEqual(code, 0, out)
+
+    def test_corrupt_config_probe_corrupts_the_piece_the_contract_names(self):
+        self.assertEqual(self.run_cli('install')[0], 0)
+        probe = {'name': 'sees it', 'corrupt_config': True, 'contains': 'shared.json'}
+        piece = self.write('hooks/lists-config', '#!/usr/bin/env python3\nimport os\n'
+                           'print(os.listdir(os.environ["CLAUDE_TOOLKIT_CONFIG_DIR"]))\n')
+        piece.chmod(0o755)
+        contract = {'piece': 'lists-config', 'dest': 'hooks/lists-config', 'config': 'shared', 'probes': [probe]}
+        with unittest.mock.patch.object(contracts, 'load_all', return_value=[contract]):
+            self.assertEqual(contracts.run_probes(self.target), (1, []))
 
 
 class Drift(Sandbox):

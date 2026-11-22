@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+"""UserPromptSubmit hook: when the developer writes in a project that has unasked items in its ask-queue
+(~/.claude/scripts/ask-queue), tell the session to present them in ONE readable AskUserQuestion.
+
+Input: the hook payload on stdin (uses `cwd`, `prompt`, `session_id`, `origin`). Output: additionalContext json, or
+nothing. Fails open: any error prints nothing and exits 0.
+
+Who gets what (while a supervisor works, nobody is interrupted; the supervisor itself presents ALL
+the questions at once, through its question mailbox, after the pre-production deploy):
+- Only human prompts. A peer message, a task notification, a continuation summary, an empty prompt or a payload
+  whose origin is not human never injects anything.
+- With a live supervisor lock for the project NO session gets anything: the owner is `skip-owner`, the question
+  mailbox `skip-mailbox`, every other session `skip-supervised` (whether or not the lock records a mailbox).
+- Without a live lock, only the items nobody has asked yet (open, or asked longer ago than ASK_QUEUE_REASK_H hours),
+  and only where they belong (a session never asks the questions that another session queued):
+  - the project's questions session («Preguntas de la supervisión de <project>», not archived) gets all of them
+    (`inject-questions:<n>`);
+  - any other session gets only the items it queued itself, or a subagent of it did: the item's `session` or
+    `host_session` is this session's CLI id or its app local_… id (`inject-own:<n>`);
+  - the rest is never shown there (`skip-foreign:<n>`, n = unasked items of the project). An item with no origin, or
+    whose origin was archived, waits for the questions session (the supervisor's final batch).
+  When the session cannot be identified (no supervisor-lock module, unreadable records) it only matches its own CLI
+  id: an error means fewer questions, never all of them.
+- A session is not told the same questions twice: the hook remembers, per session, which open ids it
+  injected and when (<ASK_QUEUE_DIR>/prompt-hook-seen/<session>.json: ids and their sha1). While every unasked item is
+  one of those ids and the injection is less than ASK_QUEUE_SEEN_H hours old (default 6), it prints nothing and logs
+  `skip-seen:<n>`. A new question, or the same ones after the window, are injected again. A shrunken set (one was
+  answered) is not repeated either: only a NEW id counts.
+- The injected text tells the session to mark the items `asked` before opening the dialog, to put their ids in
+  `metadata.source` and to `answer` each one right after the developer replies.
+
+One tab-separated line per invocation goes to <ASK_QUEUE_DIR>/prompt-hook.log: timestamp, session id (8 chars),
+decision. Never the prompt text.
+Env: ASK_QUEUE_DIR (state dir), ASK_QUEUE_BIN (script path), SUPERVISOR_LOCK_BIN (supervisor-lock path),
+ASK_QUEUE_SEEN_H (hours without re-injecting the same questions into a session, default 6).
+"""
+import glob
+import importlib.machinery
+import hashlib
+import importlib.util
+import json
+import os
+import re
+import sys
+import time
+from datetime import datetime
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'scripts', 'lib'))
+try:
+    from toolkit_config import load_checked as _load_config
+except ImportError:  # no helper, or one older than load_checked: the code's defaults, which allow no exception
+    def _load_config(piece, defaults):
+        return dict(defaults)
+CONFIG = _load_config('supervision', {'account_switch_marker': '[cambio de cuenta]'})
+
+BIN = os.path.expanduser(os.environ.get('ASK_QUEUE_BIN', '~/.claude/scripts/ask-queue'))
+LOCK_BIN = os.path.expanduser(os.environ.get('SUPERVISOR_LOCK_BIN', '~/.claude/scripts/supervisor-lock'))
+RULE = '~/.claude/rules/dialogos-de-preguntas-legibles.md'
+FALLBACK_PREFIXES = ('This session is being continued from a previous conversation', 'Background (from the session',
+                     '<task-notification', '<agent-message', '[Subagent hand-back]', '<local-command',
+                     'Another Claude session sent a message', CONFIG['account_switch_marker'], '<side-sessions-event',
+                     '<ci-monitor-event', '<cross-session-message', '[SYSTEM NOTIFICATION')
+
+
+def load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, path)
+    spec = importlib.util.spec_from_loader(name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def load_queue():
+    return load('ask_queue', BIN)
+
+
+def load_lock():
+    """The supervisor-lock module, or None when it cannot be loaded."""
+    try:
+        return load('supervisor_lock', LOCK_BIN)
+    except BaseException:
+        return None
+
+
+def not_human(payload, lock_module):
+    """Why this prompt is not the developer's ('empty', 'origin', 'prefix'), or '' when it is."""
+    prompt = payload.get('prompt')
+    if not isinstance(prompt, str) or not prompt.strip():
+        return 'empty'
+    origin = payload.get('origin')
+    kind = origin.get('kind') if isinstance(origin, dict) else origin
+    if isinstance(kind, str) and kind and kind not in ('human', 'humanTurn'):
+        return 'origin'
+    prefixes = getattr(lock_module, 'NOT_HUMAN_PREFIXES', None) or FALLBACK_PREFIXES
+    if prompt.lstrip().startswith(tuple(prefixes)):
+        return 'prefix'
+    return ''
+
+
+def instructions(root, ids, session):
+    joined = ' '.join(ids)
+    csv = ','.join(ids)
+    return (f'Antes del AskUserQuestion, ejecuta `~/.claude/scripts/ask-queue asked {joined} --to {session}` para que '
+            f'ninguna otra sesión las vuelva a preguntar. Pon `ask-queue:{csv}` en `metadata.source` del diálogo. '
+            f'Justo después de su respuesta, ejecuta `~/.claude/scripts/ask-queue answer <id> --text "<respuesta>"` '
+            f'por cada una (así no se le repiten), y aplica lo que decida. Si responde que no le importa, regístralo '
+            f'como respuesta con el valor por defecto. Si su mensaje es otra cosa urgente, atiéndelo primero y '
+            f'deja las preguntas para después (siguen sin preguntar).')
+
+
+def build_context(root, items, session, kind='own'):
+    ids = [i['id'] for i in items]
+    name = os.path.basename(root)
+    if kind == 'questions':
+        lines = [f'Eres la sesión de preguntas de «{name}»: hay {len(items)} decisión(es) pendiente(s) para el '
+                 f'desarrollador en su cola (`~/.claude/scripts/ask-queue list --project "{root}" --unasked`). Las '
+                 'registraron sesiones que no podían esperarle y siguieron trabajando con el valor por defecto indicado:']
+    else:
+        lines = [f'Hay {len(items)} decisión(es) pendiente(s) para el desarrollador que registró ESTA sesión (o un '
+                 f'subagente suyo) en la cola de «{name}», y siguió trabajando con el valor por defecto indicado. Solo '
+                 'estas son de esta sesión: las demás preguntas de la cola no se le presentan aquí (las atiende la '
+                 'sesión que las registró o la sesión de preguntas del proyecto):']
+    for item in items:
+        lines.append(f'- [{item["id"]}] {item.get("question")} | Por defecto: {item.get("default")} | '
+                     f'Por qué le toca al desarrollador: {item.get("why")} | Bloquea: {item.get("blocks")}')
+    lines.append(f'Antes de seguir con su petición, preséntaselas en UN solo AskUserQuestion legible, siguiendo '
+                 f'`{RULE}` (cada pregunta se entiende sola, con párrafos cortos y sin códigos internos sin explicar). '
+                 + instructions(root, ids, session))
+    return '\n'.join(lines)
+
+
+def seen_hours():
+    try:
+        value = float(os.environ.get('ASK_QUEUE_SEEN_H', ''))
+        if value >= 0:
+            return value
+    except ValueError:
+        pass
+    return 6.0
+
+
+def ids_hash(ids):
+    return hashlib.sha1('\n'.join(sorted(ids)).encode()).hexdigest()
+
+
+def seen_path(queue, session):
+    name = re.sub(r'[^A-Za-z0-9._-]', '_', session)[:100]
+    return os.path.join(queue.queue_dir(), 'prompt-hook-seen', name + '.json')
+
+
+def already_told(queue, session, ids):
+    """True when this session got these questions (or a superset of them) less than seen_hours() ago."""
+    if not session:
+        return False
+    try:
+        with open(seen_path(queue, session)) as fh:
+            record = json.load(fh)
+        age = time.time() - float(record['ts'])
+        if age < 0 or age >= seen_hours() * 3600:
+            return False
+        return set(ids) <= set(record['ids'])
+    except BaseException:
+        return False
+
+
+def remember(queue, session, ids):
+    """Record that `ids` were injected into `session` now; also drops records older than 7 days. Never raises."""
+    if not session:
+        return
+    try:
+        path = seen_path(queue, session)
+        directory = os.path.dirname(path)
+        os.makedirs(directory, exist_ok=True)
+        tmp = f'{path}.tmp{os.getpid()}'
+        with open(tmp, 'w') as fh:
+            json.dump({'ts': time.time(), 'ids': sorted(ids), 'hash': ids_hash(ids)}, fh)
+        os.replace(tmp, path)
+        cutoff = time.time() - 7 * 86400
+        for entry in os.scandir(directory):
+            if entry.name.endswith('.json') and entry.stat().st_mtime < cutoff:
+                os.remove(entry.path)
+    except BaseException:
+        pass
+
+
+def write_log(queue, session, decision):
+    try:
+        directory = queue.queue_dir()
+        os.makedirs(directory, exist_ok=True)
+        stamp = datetime.now().astimezone().isoformat(timespec='seconds')
+        with open(os.path.join(directory, 'prompt-hook.log'), 'a') as fh:
+            fh.write(f'{stamp}\t{(session or "-")[:8]}\t{decision}\n')
+    except BaseException:
+        pass
+
+
+def item_origin(item):
+    """The ids (CLI and app) of the session that queued `item` (empty when nobody recorded it)."""
+    return {v for v in (item.get('session'), item.get('host_session')) if isinstance(v, str) and v}
+
+
+def identify(session, lock_module):
+    """(ids, titles, archived) of the CLI session `session`: its CLI id plus its app local_… id, its titles, and
+    whether the app archived it. The app id comes from the CLI session records, the app records and, when this hook
+    runs inside that same session, CLAUDE_CODE_HOST_SESSION_ID. Never raises: on any error only what was found so far
+    counts (at least the CLI id), so an error can only hide questions, never show another session's."""
+    ids, titles, archived = set(), [], False
+    if not session:
+        return ids, titles, archived
+    ids.add(session)
+    host = os.environ.get('CLAUDE_CODE_HOST_SESSION_ID')
+    if host and os.environ.get('CLAUDE_CODE_SESSION_ID') == session:
+        ids.add(host)
+    if lock_module is None:
+        return ids, titles, archived
+    try:
+        for rec in lock_module.read_json_files(os.path.join(lock_module.cli_dir(), '*.json')):
+            if rec.get('sessionId') == session:
+                if isinstance(rec.get('hostSessionId'), str) and rec['hostSessionId']:
+                    ids.add(rec['hostSessionId'])
+                titles.append(rec.get('name'))
+        app_base = os.path.dirname(lock_module.app_glob())
+        locals_ = [i for i in ids if i.startswith('local_')]
+        if locals_:
+            paths = [p for i in locals_ for p in glob.glob(os.path.join(app_base, glob.escape(i) + '.json'))]
+        else:
+            paths = glob.glob(lock_module.app_glob())
+        for path in paths:
+            try:
+                with open(path) as fh:
+                    text = fh.read()
+                if session not in text and os.path.basename(path)[:-5] not in ids:
+                    continue
+                rec = json.loads(text)
+            except (OSError, ValueError):
+                continue
+            if not isinstance(rec, dict):
+                continue
+            if rec.get('cliSessionId') == session or rec.get('sessionId') in ids:
+                if isinstance(rec.get('sessionId'), str) and rec['sessionId']:
+                    ids.add(rec['sessionId'])
+                titles += [rec.get('title'), rec.get('name')]
+                archived = archived or bool(rec.get('isArchived'))
+    except BaseException:
+        pass
+    return ids, titles, archived
+
+
+def is_questions_session(titles, archived, root, lock_module):
+    """True for the questions session of the project at `root`: not archived, and a title with a questions-session
+    marker («Preguntas de la supervisión», «Buzón de preguntas») that names this project. Judged here, not through
+    session_role, because with another project's lock alive session_role scopes the title against that lock."""
+    if archived or lock_module is None:
+        return False
+    try:
+        markers = [lock_module.fold_text(m) for m in lock_module.ASK_GATE_MAILBOX_TITLES]
+        name = os.path.basename(root.rstrip('/'))
+        return any(isinstance(t, str) and any(m in lock_module.fold_text(t) for m in markers)
+                   and lock_module.title_names_project(t, name) for t in titles)
+    except BaseException:
+        return False
+
+
+def decide(payload, queue, lock_module):
+    """(decision, additionalContext or '') for a UserPromptSubmit payload."""
+    why = not_human(payload, lock_module)
+    if why:
+        return f'skip-not-human:{why}', ''
+    cwd = payload.get('cwd') or os.getcwd()
+    session = payload.get('session_id') or ''
+    role, lock = 'free', None
+    if lock_module is not None:
+        try:
+            role, lock = lock_module.session_role(session, cwd)
+        except BaseException:
+            role, lock = 'free', None
+    if role == 'owner':
+        return 'skip-owner', ''
+    if role == 'mailbox' and lock is not None:
+        return 'skip-mailbox', ''
+    if role == 'supervised':
+        return 'skip-supervised', ''
+    root = queue.project_root(cwd)
+    items = [i for i in queue.read_items(queue.queue_path(root)) if queue.is_unasked(i)]
+    if not items:
+        return 'none', ''
+    items.sort(key=lambda i: i.get('ts', ''))
+    mine, titles, archived = identify(session, lock_module)
+    if is_questions_session(titles, archived, root, lock_module):
+        kind, chosen = 'questions', items
+    else:
+        kind, chosen = 'own', [i for i in items if item_origin(i) & mine]
+    if not chosen:
+        return f'skip-foreign:{len(items)}', ''
+    ids = [i['id'] for i in chosen]
+    if already_told(queue, session, ids):
+        return f'skip-seen:{len(chosen)}', ''
+    remember(queue, session, ids)
+    return f'inject-{kind}:{len(chosen)}', build_context(root, chosen, session or 'this-session', kind)
+
+
+def run_pause_hook(payload):
+    """`project-pause hook` output for this prompt ('' when the project is not paused, or on any error).
+
+    While the developer keeps a project paused, an automated prompt in it is blocked and their own prompt goes
+    through with a note. Owned by project-pause, which is optional: without it nothing is paused."""
+    import subprocess
+    path = os.path.expanduser(os.environ.get('PROJECT_PAUSE_BIN', '~/.claude/scripts/project-pause'))
+    try:
+        done = subprocess.run([sys.executable, path, 'hook'], input=json.dumps(payload), capture_output=True,
+                              text=True, timeout=4)
+    except Exception:
+        return ''
+    return done.stdout.strip() if done.returncode == 0 else ''
+
+
+def main():
+    queue = session = None
+    decision = ''
+    try:
+        payload = json.loads(sys.stdin.read() or '{}')
+        if not isinstance(payload, dict):
+            return
+        pause = run_pause_hook(payload)  # a paused project's sessions stay still (project-pause)
+        if pause:
+            print(pause)
+            return
+        session = payload.get('session_id')
+        queue = load_queue()
+        decision, context = decide(payload, queue, load_lock())
+        if context:
+            print(json.dumps({'hookSpecificOutput': {'hookEventName': 'UserPromptSubmit',
+                                                     'additionalContext': context}}, ensure_ascii=False))
+    except BaseException:
+        pass
+    finally:
+        if queue is not None and decision:
+            write_log(queue, session, decision)
+
+
+if __name__ == '__main__':
+    main()
+    sys.exit(0)

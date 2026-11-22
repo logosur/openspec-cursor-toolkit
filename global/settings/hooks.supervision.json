@@ -1,0 +1,25 @@
+{
+  "PreToolUse": [
+    {
+      "matcher": "SendMessage|mcp__ccd_session_mgmt__send_message",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/cross-project-message-gate",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "UserPromptSubmit": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/ask-queue-prompt",
+          "timeout": 10
+        }
+      ]
+    }
+  ]
+}

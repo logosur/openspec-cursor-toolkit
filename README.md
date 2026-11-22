@@ -50,9 +50,10 @@ What the installer guarantees:
 
 ## Modules
 
-`openspec`, `core` and `devtools` are installed by default. `sessions` is opt-in, because it makes
-started sessions run without permission prompts: choose it with
-`--modules openspec,core,devtools,sessions` or in the override's `modules`.
+`openspec`, `core` and `devtools` are installed by default. `sessions` and `supervision` are opt-in,
+because they change what sessions do unattended (`sessions` makes started sessions run without
+permission prompts): choose them with `--modules openspec,core,devtools,sessions,supervision` or in
+the override's `modules`.
 
 | Module | Contents |
 |---|---|
@@ -60,6 +61,7 @@ started sessions run without permission prompts: choose it with
 | `core` | `commit-authorship-gate`, `process-kill-gate`, `worktree-location-gate` + `worktree-location`, the config helper, the rules that explain them, the `panel-de-decision` skill and the global `CLAUDE.md` block |
 | `devtools` | `port-lease` (a fixed block of local ports per project) and `test-account` (private store of the test users sessions create), with their rules |
 | `sessions` | for the Claude desktop app: `start-session-bypass-gate` (sessions started to work now are born in bypassPermissions: one approval card for the caller instead of one per session) and `spawn-task-duplicate-gate` (denies a proposal card that repeats one already offered for the same project) |
+| `supervision` | `ask-queue` (decisions left for the developer) with the hook that shows each one in the session that queued it, and `cross-project-message-gate` (a session only messages sessions of its own project; every exception is off until configured) |
 
 Manifests are in `global/modules/<name>.yaml`; the files they install are in `global/` (and, for
 `openspec`, in `.claude/`). The rule texts of `core` and `devtools` are written in Spanish, like the

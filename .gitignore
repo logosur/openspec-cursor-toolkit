@@ -27,3 +27,7 @@ openspec-skills-toolkit.zip
 # The toolkit's own OpenSpec changes ARE versioned on purpose (its features are specified with OpenSpec).
 # Uncomment only in a fork that keeps OpenSpec changes exclusively in app repos.
 # openspec/changes/
+
+# Python bytecode
+__pycache__/
+*.pyc

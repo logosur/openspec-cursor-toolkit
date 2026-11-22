@@ -107,6 +107,7 @@ class DefaultModules(Sandbox):
             self.assertEqual(cli.main(['install', '--override', '', '--target', str(self.target)]), 0)
         self.assertFalse((self.target / 'hooks' / 'start-session-bypass-gate').exists())
         self.assertNotIn('start-session-bypass-gate', json.dumps(self.settings()))
+        self.assertFalse((self.target / 'hooks' / 'cross-project-message-gate').exists(), 'supervision is opt-in')
 
 
 class SettingsMerge(Sandbox):

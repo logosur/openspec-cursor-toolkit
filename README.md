@@ -50,9 +50,9 @@ What the installer guarantees:
 
 ## Modules
 
-`openspec`, `core` and `devtools` are installed by default. `sessions` and `supervision` are opt-in,
+`openspec`, `core` and `devtools` are installed by default. `sessions`, `supervision` and `heavy-jobs` are opt-in,
 because they change what sessions do unattended (`sessions` makes started sessions run without
-permission prompts): choose them with `--modules openspec,core,devtools,sessions,supervision` or in
+permission prompts): choose them with `--modules openspec,core,devtools,sessions,supervision,heavy-jobs` or in
 the override's `modules`.
 
 | Module | Contents |
@@ -62,6 +62,7 @@ the override's `modules`.
 | `devtools` | `port-lease` (a fixed block of local ports per project) and `test-account` (private store of the test users sessions create), with their rules |
 | `sessions` | for the Claude desktop app: `start-session-bypass-gate` (sessions started to work now are born in bypassPermissions: one approval card for the caller instead of one per session) and `spawn-task-duplicate-gate` (denies a proposal card that repeats one already offered for the same project) |
 | `supervision` | `ask-queue` (decisions left for the developer) with the hook that shows each one in the session that queued it, and `cross-project-message-gate` (a session only messages sessions of its own project; every exception is off until configured) |
+| `heavy-jobs` | `heavy-job` (one semaphore for the machine's suites, builds, installs, emulators and models; set `default_slots` for the machine) and `heavy-job-gate`, which denies a heavy command launched outside it |
 
 Manifests are in `global/modules/<name>.yaml`; the files they install are in `global/` (and, for
 `openspec`, in `.claude/`). The rule texts of `core` and `devtools` are written in Spanish, like the

@@ -1,0 +1,18 @@
+piece: heavy-job
+dest: scripts/heavy-job
+kind: cli
+probes:
+  - name: a suite is heavy
+    args: [classify, --, "make ci"]
+    exit: [0]
+  - name: a status query is light
+    args: [classify, --, "git status"]
+    exit: [1]
+  - name: a corrupt config keeps the classifier working
+    args: [classify, --, "npm ci"]
+    corrupt_config: true
+    exit: [0]
+  - name: help lists hold
+    args: [--help]
+    exit: [0]
+    contains: hold

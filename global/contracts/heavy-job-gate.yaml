@@ -1,0 +1,29 @@
+piece: heavy-job-gate
+dest: hooks/heavy-job-gate
+kind: hook
+event: PreToolUse
+config: heavy-job
+probes:
+  - name: a light command passes silently
+    stdin: {tool_name: Bash, tool_input: {command: "git status"}}
+    exit: [0]
+    stdout: empty
+  - name: a heavy command outside the semaphore is denied
+    stdin: {tool_name: Bash, tool_input: {command: "npm ci"}}
+    exit: [0]
+    stdout: json
+    contains: '"deny"'
+  - name: the same command through heavy-job passes
+    stdin: {tool_name: Bash, tool_input: {command: "~/.claude/scripts/heavy-job run --kind install -- npm ci"}}
+    exit: [0]
+    stdout: empty
+  - name: a corrupt config keeps the gate working
+    stdin: {tool_name: Bash, tool_input: {command: "npm ci"}}
+    corrupt_config: true
+    exit: [0]
+    stdout: json
+    contains: '"deny"'
+  - name: unparseable stdin fails open
+    stdin_raw: "{not json"
+    exit: [0]
+    stdout: empty

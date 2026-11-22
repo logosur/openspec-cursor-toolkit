@@ -1,0 +1,1646 @@
+#!/usr/bin/env python3
+"""heavy-job: a machine-wide semaphore for heavy development jobs.
+
+Why: several Claude sessions in several projects share one machine. A project can gate its own heavy jobs
+(make ci, e2e, emulators...), but nothing coordinates across projects, so emulators, e2e suites, `npm ci`,
+Gradle, Playwright and full test suites pile up until the machine swaps and the kernel kills processes. This
+tool gives all of them one shared pool of N slots.
+
+How: N slot files `slot-<i>.lock` in $HEAVY_JOB_DIR (default /run/user/<uid>/heavy-job), each held with
+fcntl.flock(LOCK_EX|LOCK_NB). The lock lives on the open file description, and the job inherits the fd
+(`pass_fds` for `run`, an inheritable fd across exec for `hold`), so the slot stays held as long as any
+process of the job's tree lives, even if the wrapper is killed with SIGKILL; the kernel releases it by itself
+when the last holder dies, so there are no stale locks. While a slot is held, `slot-<i>.json` describes the
+holder (pid, kind, label, cwd, project, argv, start time). A json whose slot lock is free is stale: it is
+reported and ignored.
+
+N is $HEAVY_JOB_SLOTS, else the first line of ~/.config/heavy-job/slots, else `default_slots` of the
+`heavy-job` config piece (4).
+
+Weight: a job may take several slots at once (`--weight N`, default 1; `--kind ml` defaults to 2, because a model
+in RAM weighs several test runs). The N slot locks are taken all or nothing, the job gets all their fds,
+HEAVY_JOB_SLOT is the comma-joined list and every slot's json carries `slots` and `weight`. A weight above the
+number of slots is clamped to it with a warning.
+
+Heavy jobs started WITHOUT the wrapper are found by `scan` (a walk over /proc of the current uid) and reduce
+the number of slots a waiter may take: effective free = N - held slots - unwrapped heavy jobs. The scan skips
+container processes (cgroup with `docker-` or `containerd`), processes whose environment has HEAVY_JOB_SLOT,
+processes whose command line mentions `heavy-job`, and the ancestors of the process that scans; of a tree of
+matching processes only the top-most counts (it is one job). Besides the classifier it also finds:
+  - orphaned test workers: a vitest/jest/playwright worker whose parent is no longer its runner (`pkill vitest`
+    leaves the fork-pool workers behind, parented to `systemd --user`, spinning for hours). Workers of the same
+    runner and directory are one job, flagged `orphan`, with RSS and CPU share; the messages say it can be
+    stopped with `kill <pid>`. Nothing is ever killed automatically;
+  - resident ML models: a process above 1.5 GiB RSS that maps torch, ctranslate2, onnxruntime or tensorflow
+    counts as ONE `ml` job of weight 1 (maps is read only for big processes, found by statm first).
+
+Queue (first come, first served): a job is admitted only if it is the oldest live waiter. Without it, a
+weight-2 job (`--kind ml`) starves: each time one slot frees, a later weight-1 job takes it. Design:
+  - Every `run`/`hold` without `--no-wait` takes a ticket in $HEAVY_JOB_DIR/queue/ the moment it arrives, named
+    `<time_ns, 20 digits>-<pid>.ticket` (json: pid, weight, kind, label, project, argv...). The waiter keeps an
+    flock on its ticket for as long as it lives. Same trick as the slots: the kernel drops the lock when the
+    process dies, even by SIGKILL, so a ticket whose lock is free is dead and is deleted by whoever sees it (no
+    pid reuse problem, nothing to clean by hand). The ticket is created under a hidden name, locked and only then
+    renamed into place, so nobody ever sees a live ticket without its lock.
+  - Waiters look at the live tickets in order. Only the oldest one probes the slots (and the scan, and the
+    admission rules above); the others wait for their turn, even if a slot is free and their weight would fit.
+    That head-of-line blocking is the point: a big job cannot be overtaken.
+  - The head takes its slots, stamps them (`claim_slots`) and only then drops its ticket, so the next head
+    already sees them held.
+  - `--no-wait` takes no ticket: it exits 75 if any live waiter exists (all of them arrived earlier), else it
+    behaves as before. `--max-wait S` (default: no limit) or Ctrl-C drop the ticket too.
+  - `status` lists the queue in order (`queue` in --json) and a job that arrives now is not admitted while it is
+    not empty. Running jobs and `hold` keep their slots exactly as before; waiters of the previous version have
+    no ticket and keep polling the slots as they did (they can still overtake until they end).
+
+Pools: compiling apps and running tests saturate the CPU; installing dependencies, type checks and linters
+do not, and must not wait behind them for an hour. So there are two pools, each with its own slots and its own queue:
+  - cpu: the N slots above, files `slot-<i>.lock` and `queue/` exactly as before, so waiters of the previous
+    version keep working. Tests, e2e, builds, gates, emulators, ML, and anything not proven light.
+  - light: $HEAVY_JOB_LIGHT_SLOTS, else ~/.config/heavy-job/light-slots, else 3 slots (0 turns the pool off), in the
+    subdirectory `light/` with the same file names; shown as `hueco <N+j> (resto)`. Its jobs get
+    HEAVY_JOB_LIGHT_SLOT (not HEAVY_JOB_SLOT, which projects read as "a heavy slot is held", so a suite started
+    inside a light job still queues for a cpu slot) and HEAVY_JOB_POOL.
+  The command decides the pool (`pool_for`), not the declared kind, because `--kind gate` labels both `make ci`
+  and `npx tsc -b`: a command with anything heavy other than an install goes to cpu whatever --kind says; one made
+  only of installs, known light tools (tsc, eslint, ruff, mypy, `npm run lint`, `make typecheck`...) and trivial
+  commands (cd, echo) goes to light; an opaque one (a script) goes to light only with a light --kind (install,
+  typecheck, lint, light). A light job's admission counts the holders of both pools (memory is one for the
+  machine); a cpu job's counts only the cpu pool, so a running `tsc` never turns on the memory rule or the settle
+  for the cpu queue (`admission_inputs`). The light pool has its own threshold ($HEAVY_JOB_LIGHT_MIN_AVAIL_GIB or ~/.config/heavy-job/light-min-available-gib,
+  default 1.5 GiB: a large `tsc` peaks well below it) and settle ($HEAVY_JOB_LIGHT_SETTLE, 20 s).
+
+Admission: once the slots are free, two more rules apply, but only while another heavy job is running (a slot
+held by someone else, or an unwrapped job); with nothing else running a low MemAvailable is not the job's
+fault, so it starts anyway, with a warning, instead of starving:
+  - memory: MemAvailable >= threshold x weight. The threshold is $HEAVY_JOB_MIN_AVAIL_GIB, else the first line
+    of ~/.config/heavy-job/min-available-gib, else 2.5 GiB; 0 disables the rule;
+  - settle: the previous holder must have taken its slots at least $HEAVY_JOB_SETTLE seconds ago (default 45),
+    because memory does not reflect a job that has just started (two jobs launched within 2 s would both see
+    the same free memory). The start is the mtime of the lock file, stamped when the slots are taken.
+The waiting message and the exit-75 message say which rule holds the job back.
+
+The classifier decides which command lines are heavy. It is pure and lives in lib/heavy_job_classifier.py,
+which the PreToolUse gate imports by itself:
+
+    classify_command('cd x && ./gradlew assembleDebug')   # ('build', '...') or None
+    classify_argv(['npm', 'ci'])                          # ('install', '...') or None
+
+  classify_command sees through `heavy-job run|hold -- CMD`: it judges the inner CMD.
+  classify_outside_semaphore(command) is the hook's entry point: same, but a real `heavy-job run|hold -- CMD`
+  is covered and not judged, while every other simple command of the line still is.
+
+Kinds: emulator, build, install, e2e, tests, gate, render (a video encode: `ffmpeg` writing video, `make video*`,
+`remotion render`; not a single frame nor audio only), ml (whisper, faster-whisper, whisperx, whisper-ctranslate2,
+torchrun, `accelerate launch`, `python -m whisper|whisperx|faster_whisper|torch.distributed.run`). Only the program that is really executed counts; text that
+is an argument or a quoted string of another program is never flagged.
+
+Usage:
+  heavy-job run  [--kind K] [--label L] [--weight N] [--max-wait S] [--no-wait] -- CMD...
+      Wait for N slots (and for the admission rules), run CMD as a child with HEAVY_JOB_SLOT=<i[,j...]> and
+      HEAVY_JOB_LABEL in its environment, forward SIGINT/SIGTERM/SIGHUP, exit with the child's code (128+n if
+      killed by signal n).
+  heavy-job hold [same options] -- CMD...
+      For long-lived daemons (the Android emulator): take a slot and exec CMD in place, so the slot is held
+      exactly as long as that process (and the children that inherit the fd) lives.
+  heavy-job status [--json]        slots (a multi-slot job once), unwrapped heavy jobs, MemAvailable, swap, load,
+                                   admission thresholds and whether a weight-1 job would start now (and why not)
+  heavy-job scan [--json]          heavy processes NOT under the semaphore
+  heavy-job classify [--json] [--stdin] [-- COMMAND_STRING]
+      Is this shell command line heavy? exit 0 heavy, 1 light.
+
+Exit codes: 0 ok, 2 usage error, 75 no slot or older waiters (--no-wait, or --max-wait S elapsed; by default it waits without limit), 126/127 the
+command could not be executed, 130 interrupted while waiting.
+
+Environment (besides the above): HEAVY_JOB_POLL seconds between checks while waiting (default 5);
+HEAVY_JOB_SCAN=0 disables the scan in the slot calculation (tests, escape hatch); HEAVY_JOB_MIN_AVAIL_GIB and
+HEAVY_JOB_SETTLE as above; HEAVY_JOB_MEMINFO overrides /proc/meminfo and HEAVY_JOB_ML_MIN_RSS_MIB the 1536 MiB
+threshold of the ML scan (both for tests).
+"""
+import argparse
+import fcntl
+import glob
+import json
+import os
+import re
+import shlex
+import signal
+import socket
+import subprocess
+import sys
+import time
+from datetime import datetime
+
+LIB_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'lib')
+if LIB_DIR not in sys.path:
+    sys.path.insert(0, LIB_DIR)
+import heavy_job_classifier as classifier
+from heavy_job_classifier import (
+    CPU_POOL, LIGHT_KINDS, LIGHT_POOL, _count_test_files, classify_argv, classify_command,
+    classify_outside_semaphore, light_kind_of, orphan_test_worker, pool_for,
+)
+
+try:
+    from toolkit_config import load_checked as _load_config
+except ImportError:
+    def _load_config(piece, defaults):
+        return dict(defaults)
+CONFIG = _load_config('heavy-job', {'default_slots': 4})
+SUPERVISION = _load_config('supervision', {'presence_min': 20})
+
+# 0 = wait as long as needed. A limit would make a queued job die and lose its place.
+DEFAULT_MAX_WAIT = 0
+# Cloud tests (optional, cloud-tests is not part of the toolkit): a suite that runs in the cloud is not run here
+# too. `cloud-tests local-guard`
+# says whether this same suite on this same code is already running (or already green) in the cloud; if so, the job is
+# not started (exit 76). `cloud-tests` stops a redundant local job that was already running or queued and leaves a note
+# in cloud-stopped/<wrapper pid>.txt, which the wrapper prints before exiting with 76.
+CLOUD_TESTS_BIN = os.environ.get('CLOUD_TESTS_BIN', os.path.expanduser('~/.claude/scripts/cloud-tests'))
+CLOUD_EXIT = 76
+CLOUD_STOPPED_DIR = 'cloud-stopped'
+EX_TEMPFAIL = 75
+ML_WEIGHT = 2
+DEFAULT_MIN_AVAIL_GIB = 2.5
+DEFAULT_SETTLE = 45.0
+# A process this big that maps one of these libraries is a resident model (a whisper job, a model daemon). It
+# counts as ONE unwrapped `ml` job of weight 1, so a daemon that stays loaded can never starve everything.
+ML_RSS_KIB = 1536 * 1024
+ML_LIB_MARKERS = (b'libtorch', b'/torch/lib', b'ctranslate2', b'onnxruntime', b'tensorflow')
+
+LIGHT_DIR = 'light'                     # subdirectory of the state dir: the light pool's own slots and queue
+LIGHT_ENV = 'HEAVY_JOB_LIGHT_SLOT'      # NOT HEAVY_JOB_SLOT: projects read that one as "a heavy slot is held"
+DEFAULT_LIGHT_SLOTS = 3
+# A large `tsc -p` takes around half a GiB on one core.
+DEFAULT_LIGHT_MIN_AVAIL_GIB = 1.5
+DEFAULT_LIGHT_SETTLE = 20.0
+
+
+# --------------------------------------------------------------------------------------------------------
+# Slots
+# --------------------------------------------------------------------------------------------------------
+
+def die(message, code=2):
+    print(message, file=sys.stderr)
+    sys.exit(code)
+
+
+def now_iso():
+    return datetime.now().astimezone().isoformat(timespec='seconds')
+
+
+def age_text(stamp):
+    try:
+        seconds = int((datetime.now().astimezone() - datetime.fromisoformat(stamp)).total_seconds())
+    except (TypeError, ValueError):
+        return '?'
+    if seconds < 60:
+        return f'{seconds} s'
+    if seconds < 3600:
+        return f'{seconds // 60} min'
+    return f'{seconds // 3600} h {seconds % 3600 // 60} min'
+
+
+def state_dir():
+    path = os.environ.get('HEAVY_JOB_DIR')
+    if not path:
+        run_user = f'/run/user/{os.getuid()}'
+        path = os.path.join(run_user, 'heavy-job') if os.path.isdir(run_user) else f'/tmp/heavy-job-{os.getuid()}'
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
+
+
+def slot_count():
+    value = os.environ.get('HEAVY_JOB_SLOTS', '').strip()
+    if value.isdigit() and int(value) >= 1:
+        return int(value)
+    try:
+        with open(os.path.expanduser('~/.config/heavy-job/slots')) as handle:
+            first = handle.readline().strip()
+        if first.isdigit() and int(first) >= 1:
+            return int(first)
+    except OSError:
+        pass
+    return max(1, int(CONFIG['default_slots']))
+
+
+def _config_number(env_name, file_name, default, minimum=0):
+    """$env_name, else the first line of ~/.config/heavy-job/<file_name>, else `default` (values below `minimum`
+    and garbage are skipped)."""
+    candidates = [os.environ.get(env_name, '')]
+    try:
+        with open(os.path.expanduser(f'~/.config/heavy-job/{file_name}')) as handle:
+            candidates.append(handle.readline())
+    except OSError:
+        pass
+    for value in candidates:
+        try:
+            parsed = float(value.strip())
+        except ValueError:
+            continue
+        if parsed >= minimum:
+            return parsed
+    return default
+
+
+def light_slot_count():
+    """Slots of the light pool: $HEAVY_JOB_LIGHT_SLOTS, else ~/.config/heavy-job/light-slots, else 3. 0 turns the
+    pool off (every job shares the cpu pool, with a single queue)."""
+    return int(_config_number('HEAVY_JOB_LIGHT_SLOTS', 'light-slots', DEFAULT_LIGHT_SLOTS))
+
+
+def light_min_avail_gib():
+    return _config_number('HEAVY_JOB_LIGHT_MIN_AVAIL_GIB', 'light-min-available-gib', DEFAULT_LIGHT_MIN_AVAIL_GIB)
+
+
+def light_settle_seconds():
+    return _config_number('HEAVY_JOB_LIGHT_SETTLE', 'light-settle', DEFAULT_LIGHT_SETTLE)
+
+
+POOL_TITLES = {CPU_POOL: 'compilar apps y tests', LIGHT_POOL: 'el resto (instalar dependencias, tipos, lint)'}
+POOL_OF = {CPU_POOL: 'de compilar apps y tests', LIGHT_POOL: 'del resto (instalar dependencias, tipos, lint)'}
+
+
+def pool_spec(pool):
+    """Everything a pool needs: its directory (the light pool lives in a subdirectory with the same file names, so
+    every slot and queue function works on it unchanged), size, the number its first slot is shown with, the
+    admission thresholds and the variable its jobs get."""
+    base = state_dir()
+    n_cpu = slot_count()
+    if pool == LIGHT_POOL:
+        directory = os.path.join(base, LIGHT_DIR)
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        return {'name': LIGHT_POOL, 'dir': directory, 'n': light_slot_count(), 'offset': n_cpu,
+                'threshold': light_min_avail_gib(), 'settle': light_settle_seconds(), 'env': LIGHT_ENV}
+    return {'name': CPU_POOL, 'dir': base, 'n': n_cpu, 'offset': 0, 'threshold': min_avail_gib(),
+            'settle': settle_seconds(), 'env': 'HEAVY_JOB_SLOT'}
+
+
+def unwrapped_pool(item):
+    return LIGHT_POOL if item.get('kind') in LIGHT_KINDS and light_slot_count() > 0 else CPU_POOL
+
+
+def held_slots(directory, n):
+    return [i for i in range(n) if slot_is_held(directory, i)]
+
+
+def lock_path(directory, i):
+    return os.path.join(directory, f'slot-{i}.lock')
+
+
+def info_path(directory, i):
+    return os.path.join(directory, f'slot-{i}.json')
+
+
+def read_info(directory, i):
+    try:
+        with open(info_path(directory, i)) as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def write_info(directory, i, info):
+    path = info_path(directory, i)
+    tmp = f'{path}.{os.getpid()}.tmp'
+    with open(tmp, 'w') as handle:
+        json.dump(info, handle)
+    os.replace(tmp, path)
+
+
+def remove_info(directory, i, pid):
+    """Remove the json only if it still describes this holder."""
+    info = read_info(directory, i)
+    if info and info.get('pid') != pid:
+        return
+    try:
+        os.unlink(info_path(directory, i))
+    except OSError:
+        pass
+
+
+def write_infos(directory, slots, info):
+    for i in slots:
+        write_info(directory, i, info)
+
+
+def remove_infos(directory, slots, pid):
+    for i in slots:
+        remove_info(directory, i, pid)
+
+
+def probe_slots(directory, n, weight=1):
+    """Try every slot. Returns (fds, slots, held): `weight` free slots already locked, all or nothing (both lists
+    are empty when fewer are free; partial locks are released at once), and the list of slots held by somebody
+    else. The other free slots are released again at once."""
+    fds = []
+    slots = []
+    held = []
+    for i in range(n):
+        handle = os.open(lock_path(directory, i), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(handle)
+            held.append(i)
+            continue
+        if len(fds) < weight:
+            fds.append(handle)
+            slots.append(i)
+        else:
+            os.close(handle)
+    if len(fds) < weight:
+        for handle in fds:
+            os.close(handle)
+        fds, slots = [], []
+    return fds, slots, held
+
+
+# Queue of waiters (see "Queue" in the module docstring).
+QUEUE_DIR = 'queue'
+TICKET_RE = re.compile(r'^(\d{20})-(\d+)\.ticket$')
+HIDDEN_TICKET_PREFIX = '.new-'
+
+
+def queue_path(directory):
+    return os.path.join(directory, QUEUE_DIR)
+
+
+def lock_is_free(path):
+    """True when nobody holds a flock on `path`; a missing file counts as free. Never keeps the lock."""
+    try:
+        handle = os.open(path, os.O_RDWR)
+    except OSError:
+        return True
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(handle)
+
+
+def read_queue(directory, prune=True):
+    """The live waiters, oldest first: [{'position', 'ts', 'pid', 'path', 'info'}]. A ticket whose lock is free
+    belongs to a dead waiter: it is skipped and, with `prune`, deleted (so is a dead hidden ticket)."""
+    qdir = queue_path(directory)
+    try:
+        names = os.listdir(qdir)
+    except OSError:
+        return []
+    live = []
+    for name in names:
+        path = os.path.join(qdir, name)
+        match = TICKET_RE.match(name)
+        if not match and not name.startswith(HIDDEN_TICKET_PREFIX):
+            continue
+        if lock_is_free(path):
+            if prune:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+            continue
+        if not match:
+            continue
+        try:
+            with open(path) as handle:
+                info = json.load(handle)
+        except (OSError, ValueError):
+            info = {}
+        live.append({'ts': int(match.group(1)), 'pid': int(match.group(2)), 'path': path,
+                     'info': info if isinstance(info, dict) else {}})
+    live.sort(key=lambda item: (item['ts'], item['pid']))
+    for position, item in enumerate(live, 1):
+        item['position'] = position
+    return live
+
+
+def enqueue(directory, info, ts=None):
+    """Take a place in the queue: returns {'fd', 'path', 'ts'}. The ticket is written and locked under a hidden
+    name and renamed into place afterwards, so a live ticket is never seen without its lock."""
+    qdir = queue_path(directory)
+    os.makedirs(qdir, mode=0o700, exist_ok=True)
+    pid = os.getpid()
+    hidden = os.path.join(qdir, f'{HIDDEN_TICKET_PREFIX}{pid}')
+    handle = os.open(hidden, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)  # not inheritable: no child keeps it
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    ts = ts or time.time_ns()
+    os.write(handle, json.dumps(dict(info, pid=pid, queued_ts=ts / 1e9)).encode())
+    final = os.path.join(qdir, f'{ts:020d}-{pid}.ticket')
+    os.rename(hidden, final)
+    return {'fd': handle, 'path': final, 'ts': ts, 'info': info}
+
+
+def leave_queue(ticket):
+    if not ticket:
+        return
+    try:
+        os.unlink(ticket['path'])
+    except OSError:
+        pass
+    os.close(ticket['fd'])
+
+
+_PAUSE = []
+
+
+def paused_cwd(cwd):
+    """True when `cwd` belongs to a project the developer paused (~/.claude/scripts/project-pause). Never raises."""
+    if not cwd:
+        return False
+    try:
+        if not _PAUSE:
+            import importlib.machinery
+            import importlib.util
+            bin_path = os.path.expanduser(os.environ.get('PROJECT_PAUSE_BIN', '~/.claude/scripts/project-pause'))
+            loader = importlib.machinery.SourceFileLoader('project_pause_for_heavy_job', bin_path)
+            spec = importlib.util.spec_from_loader(loader.name, loader)
+            module = importlib.util.module_from_spec(spec)
+            loader.exec_module(module)
+            _PAUSE.append(module)
+        return bool(_PAUSE[0].paused_marker(cwd))
+    except Exception:
+        return False
+
+
+def waiters_ahead(directory, ticket):
+    """The live waiters that go before `ticket` (all of them when there is none: a `--no-wait` job has just
+    arrived). A ticket that vanished is taken again with its old arrival time, so nobody loses a turn.
+
+    Order: first come, first served, except that a job of a project the developer paused waits behind every job of an
+    active project, whenever it arrived."""
+    queue = read_queue(directory)
+    if ticket is None:
+        return queue
+    if not any(item['path'] == ticket['path'] for item in queue):
+        os.close(ticket['fd'])
+        ticket.update(enqueue(directory, ticket['info'], ticket['ts']))
+        queue = read_queue(directory)
+    mine = (ticket['ts'], os.getpid())
+    others = [item for item in queue if item['path'] != ticket['path']]
+    my_paused = paused_cwd((ticket.get('info') or {}).get('cwd'))
+    ahead = []
+    for item in others:
+        their_paused = paused_cwd(item['info'].get('cwd'))
+        if their_paused == my_paused:
+            if (item['ts'], item['pid']) < mine:
+                ahead.append(item)
+        elif my_paused:
+            ahead.append(item)  # an active project's job goes first
+    return ahead
+
+
+# Priority, on the developer's order only: a job can go first in its queue with `heavy-job priority <pid> --order
+# '<their words>'` when it is already waiting, or `run|hold --priority-order '<their words>'` for a new one. Both
+# check that the developer wrote in the calling Claude session within PRIORITY_PRESENCE_MIN (read with
+# supervisor-lock; without it there is no proof, so no priority). The waiter itself takes the request and re-queues with an arrival stamp older than everybody
+# else's, so every waiter (also those running older code, which order the queue by the ticket names) sees it first. It
+# never stops a job that is already running. A paused project's job still goes behind the active ones.
+PRIORITY_DIR = 'priority'
+PRIORITY_PRESENCE_MIN = SUPERVISION['presence_min']   # minutes: how recent the developer's message must be
+PRIORITY_REQUEST_TTL_S = 600     # a request nobody took in this long is stale (its waiter died or was replaced)
+INTERVENTIONS_LOG = os.path.expanduser(os.environ.get('HEAVY_JOB_INTERVENTIONS_LOG') or '~/.claude/state/heavy-job-interventions.log')
+_SUPERVISOR_LOCK = []
+
+
+def supervisor_lock_module():
+    """supervisor-lock loaded as a module (its transcript readers tell whether the developer wrote in a session)."""
+    if not _SUPERVISOR_LOCK:
+        import importlib.machinery
+        import importlib.util
+        bin_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'supervisor-lock')
+        loader = importlib.machinery.SourceFileLoader('supervisor_lock_for_heavy_job', bin_path)
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        _SUPERVISOR_LOCK.append(module)
+    return _SUPERVISOR_LOCK[0]
+
+
+def developer_ordered_here():
+    """(True, seconds since the developer's message) when the developer wrote in the calling Claude session within
+    PRIORITY_PRESENCE_MIN, else (False, why in Spanish). Unknown counts as no."""
+    sid = os.environ.get('CLAUDE_CODE_SESSION_ID', '').strip()
+    if not sid:
+        return False, 'no lo pide una sesión de Claude (falta CLAUDE_CODE_SESSION_ID)'
+    try:
+        module = supervisor_lock_module()
+        path = module.session_files(sid, os.getcwd())[0]
+        if not path:
+            return False, 'no encuentro la conversación de esta sesión'
+        seen = module.last_human_input(path, time.time() - PRIORITY_PRESENCE_MIN * 60)
+    except TimeoutError:
+        return False, 'la conversación de esta sesión es demasiado larga para comprobarlo a tiempo'
+    except Exception as exc:
+        return False, f'no se pudo comprobar ({exc.__class__.__name__}: {exc})'
+    if seen is None:
+        return False, f'el desarrollador no ha escrito en esta sesión en los últimos {PRIORITY_PRESENCE_MIN} min'
+    return True, int(time.time() - seen)
+
+
+def priority_request_path(pid):
+    path = os.path.join(state_dir(), PRIORITY_DIR)
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return os.path.join(path, f'{pid}.json')
+
+
+def request_priority(pid, order):
+    path = priority_request_path(pid)
+    with open(path + '.tmp', 'w') as handle:
+        json.dump({'order': order, 'by': os.environ.get('CLAUDE_CODE_SESSION_ID', ''), 'at': now_iso(),
+                   'at_epoch': time.time()}, handle, ensure_ascii=False)
+    os.replace(path + '.tmp', path)
+    return path
+
+
+def take_priority_request(pid):
+    """The priority request for waiter `pid` (removed once read), or None. A stale request is dropped."""
+    path = priority_request_path(pid)
+    try:
+        with open(path) as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+    if not isinstance(data, dict) or time.time() - float(data.get('at_epoch') or 0) > PRIORITY_REQUEST_TTL_S:
+        return None
+    return data
+
+
+def log_intervention(text):
+    try:
+        os.makedirs(os.path.dirname(INTERVENTIONS_LOG), exist_ok=True)
+        with open(INTERVENTIONS_LOG, 'a') as handle:
+            handle.write(f'{time.strftime("%Y-%m-%d %H:%M:%S")} {text}\n')
+    except OSError:
+        pass
+
+
+def move_to_front(directory, ticket, request):
+    """Re-queue `ticket` with an arrival stamp older than every live waiter's, keeping its info plus the order."""
+    first = min([item['ts'] for item in read_queue(directory)] + [ticket['ts']])
+    info = dict(ticket['info'], priority={'order': request.get('order') or '', 'at': request.get('at') or now_iso(),
+                                          'by': request.get('by') or ''})
+    new = enqueue(directory, info, first - 1)
+    leave_queue(ticket)
+    ticket.clear()
+    ticket.update(new)
+    label = info.get('label') or ' '.join(info.get('argv') or [])[:60]
+    log_intervention(f'priority: pid {os.getpid()} «{label}» ({info.get("project") or "?"}) goes first in its queue, '
+                     f'by the developer\'s order «{request.get("order") or ""}» (session {request.get("by") or "?"})')
+
+
+def slot_is_held(directory, i):
+    handle = os.open(lock_path(directory, i), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False
+    except OSError:
+        return True
+    finally:
+        os.close(handle)
+
+
+def fd_holders(directory, i):
+    """Pids (of this uid) that have the slot lock file open."""
+    target = lock_path(directory, i)
+    pids = []
+    for name in os.listdir('/proc'):
+        if not name.isdigit():
+            continue
+        fd_dir = f'/proc/{name}/fd'
+        try:
+            for entry in os.listdir(fd_dir):
+                if os.readlink(f'{fd_dir}/{entry}') == target:
+                    pids.append(int(name))
+                    break
+        except OSError:
+            continue
+    return pids
+
+
+# --------------------------------------------------------------------------------------------------------
+# Scan of unwrapped heavy processes
+# --------------------------------------------------------------------------------------------------------
+
+def _read_bytes(path):
+    try:
+        with open(path, 'rb') as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+def _parent_pid(pid):
+    data = _read_bytes(f'/proc/{pid}/stat')
+    if not data:
+        return None
+    try:
+        return int(data[data.rindex(b')') + 2:].split()[1])
+    except (ValueError, IndexError):
+        return None
+
+
+def _argv_of(pid):
+    """Command line of a process as an argv list, or None when it cannot be read (gone, other user, kernel)."""
+    raw = _read_bytes(f'/proc/{pid}/cmdline')
+    if not raw:
+        return None
+    argv = [part.decode('utf-8', 'replace') for part in raw.split(b'\0') if part]
+    if len(argv) == 1 and re.search(r'\s', argv[0]):  # title rewritten by node ("npm exec foo")
+        try:
+            argv = shlex.split(argv[0])
+        except ValueError:
+            argv = argv[0].split()
+    return argv or None
+
+
+def _rss_kib(pid):
+    statm = _read_bytes(f'/proc/{pid}/statm')
+    if statm:
+        try:
+            return int(statm.split()[1]) * os.sysconf('SC_PAGE_SIZE') // 1024
+        except (ValueError, IndexError):
+            pass
+    return None
+
+
+def proc_usage(pid):
+    """(rss_kib, cpu_pct) of a process: resident memory and CPU time / lifetime (what `ps` calls %cpu)."""
+    cpu = None
+    stat = _read_bytes(f'/proc/{pid}/stat')
+    uptime = _read_bytes('/proc/uptime')
+    if stat and uptime:
+        try:
+            fields = stat[stat.rindex(b')') + 2:].split()
+            ticks = os.sysconf('SC_CLK_TCK')
+            busy = (int(fields[11]) + int(fields[12])) / ticks
+            alive = float(uptime.split()[0]) - int(fields[19]) / ticks
+            cpu = round(100 * busy / alive, 1) if alive > 0 else None
+        except (ValueError, IndexError):
+            pass
+    return _rss_kib(pid), cpu
+
+
+def resident_ml_model(pid):
+    """('ml', reason) when the process is big and has an ML runtime mapped. The cheap statm read comes first;
+    /proc/<pid>/maps (long) is read only for processes above the RSS threshold. HEAVY_JOB_ML_MIN_RSS_MIB
+    overrides the threshold (tests)."""
+    try:
+        threshold = int(float(os.environ['HEAVY_JOB_ML_MIN_RSS_MIB']) * 1024)
+    except (KeyError, ValueError):
+        threshold = ML_RSS_KIB
+    rss = _rss_kib(pid)
+    if not rss or rss < threshold:
+        return None
+    maps = _read_bytes(f'/proc/{pid}/maps')
+    if maps and any(marker in maps for marker in ML_LIB_MARKERS):
+        return ('ml', f'modelo de ML en memoria ({gib(rss)} con torch/ctranslate2/onnxruntime/tensorflow cargado)')
+    return None
+
+
+def scan_unwrapped():
+    """Heavy processes of this uid that are not under the semaphore (top-most of each tree), as dicts.
+
+    A big process with an ML runtime mapped (`resident_ml_model`) counts as one `ml` job. Orphaned workers of a
+    test runner (`orphan_test_worker`) count too, grouped by runner and directory into
+    one job marked `orphan`, with the summed RSS and CPU share, because they keep burning CPU and RAM with
+    nobody to collect their result."""
+    uid = os.getuid()
+    matches = {}
+    ppids = {}
+    for name in os.listdir('/proc'):
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        try:
+            if os.stat(f'/proc/{pid}').st_uid != uid:
+                continue
+        except OSError:
+            continue
+        argv = _argv_of(pid)
+        if not argv:
+            continue
+        ppids[pid] = _parent_pid(pid)
+        if 'heavy-job' in ' '.join(argv):
+            continue
+        result = classify_argv(argv)
+        extra = {}
+        if not result:
+            result = orphan_test_worker(argv, _argv_of(ppids[pid]) if ppids[pid] else None)
+            if result:
+                extra['orphan'] = True
+            else:
+                result = resident_ml_model(pid)
+        if not result:
+            continue
+        cgroup = _read_bytes(f'/proc/{pid}/cgroup')
+        environ = _read_bytes(f'/proc/{pid}/environ')
+        if cgroup is None or environ is None:
+            continue
+        if b'docker-' in cgroup or b'containerd' in cgroup:
+            continue
+        env_items = environ.split(b'\0')
+        if any(item.startswith(b'HEAVY_JOB_SLOT=') for item in env_items):
+            continue
+        # A light slot covers only light work: a suite started inside a light job is still an unwrapped heavy job.
+        if result[0] in LIGHT_KINDS and any(item.startswith(LIGHT_ENV.encode() + b'=') for item in env_items):
+            continue
+        matches[pid] = dict({'pid': pid, 'ppid': ppids[pid], 'kind': result[0], 'reason': result[1], 'argv': argv},
+                            **extra)
+    ancestors = set()
+    cursor = os.getpid()
+    while cursor and cursor not in ancestors:
+        ancestors.add(cursor)
+        cursor = ppids.get(cursor) or _parent_pid(cursor)
+    found = []
+    orphans = {}
+    for pid, item in sorted(matches.items()):
+        if pid in ancestors or item['ppid'] in matches:
+            continue
+        try:
+            item['cwd'] = os.readlink(f'/proc/{pid}/cwd')
+        except OSError:
+            item['cwd'] = None
+        rss, cpu = proc_usage(pid)
+        if not item.get('orphan'):
+            found.append(item)
+            continue
+        group = orphans.get((item['reason'], item['cwd']))
+        if group is None:
+            item.update(pids=[], rss_kib=0, cpu_pct=0.0)
+            group = orphans[(item['reason'], item['cwd'])] = item
+            found.append(item)
+        group['pids'].append(pid)
+        group['rss_kib'] += rss or 0
+        group['cpu_pct'] = round(group['cpu_pct'] + (cpu or 0), 1)
+    return found
+
+
+def mark_covered(unwrapped):
+    """An emulator left outside the semaphore in the directory of a job that holds a cpu slot is that job's emulator:
+    it is shown, marked `covered_by` with the slot, and does not take a second slot. One emulator per holder.
+
+    Counted twice, an emulator restarted by hand next to the job that uses it would make a free slot look taken
+    and hold the queue behind it."""
+    emulators = [u for u in unwrapped if u.get('kind') == 'emulator' and u.get('cwd') and not u.get('orphan')]
+    if not emulators:
+        return unwrapped
+    spec = pool_spec(CPU_POOL)
+    home = os.path.realpath(os.path.expanduser('~'))
+    for slot in held_slots(spec['dir'], spec['n']):
+        info = read_info(spec['dir'], slot) or {}
+        if not info.get('cwd') or (info.get('pid') and not os.path.exists(f'/proc/{info["pid"]}')):
+            continue
+        holder_dir = os.path.realpath(info['cwd'])
+        if holder_dir in (home, '/'):
+            continue  # a job started from $HOME covers nothing: everything is under it
+        for item in emulators:
+            item_dir = os.path.realpath(item['cwd'])
+            if 'covered_by' not in item and (item_dir == holder_dir or item_dir.startswith(holder_dir + os.sep)):
+                item['covered_by'] = slot
+                item['covered_label'] = info.get('label') or ''
+                break
+    return unwrapped
+
+
+def counted_unwrapped(unwrapped):
+    """The unwrapped jobs that take a slot of their own (not an emulator a slot holder already covers)."""
+    return [u for u in unwrapped if 'covered_by' not in u]
+
+
+def scan_enabled():
+    return os.environ.get('HEAVY_JOB_SCAN', '1') != '0'
+
+
+# --------------------------------------------------------------------------------------------------------
+# Status and messages
+# --------------------------------------------------------------------------------------------------------
+
+def read_meminfo():
+    values = {}
+    try:
+        with open(os.environ.get('HEAVY_JOB_MEMINFO') or '/proc/meminfo') as handle:
+            for line in handle:
+                key, _, rest = line.partition(':')
+                values[key] = int(rest.split()[0])
+    except (OSError, ValueError, IndexError):
+        pass
+    return values
+
+
+def min_avail_gib():
+    """MemAvailable (GiB) a job of weight 1 needs: $HEAVY_JOB_MIN_AVAIL_GIB, else the first line of
+    ~/.config/heavy-job/min-available-gib, else 2.5. 0 disables the memory rule."""
+    candidates = [os.environ.get('HEAVY_JOB_MIN_AVAIL_GIB', '')]
+    try:
+        with open(os.path.expanduser('~/.config/heavy-job/min-available-gib')) as handle:
+            candidates.append(handle.readline())
+    except OSError:
+        pass
+    for value in candidates:
+        try:
+            parsed = float(value.strip())
+        except ValueError:
+            continue
+        if parsed >= 0:
+            return parsed
+    return DEFAULT_MIN_AVAIL_GIB
+
+
+def settle_seconds():
+    """Seconds another holder's memory needs to show up in MemAvailable: $HEAVY_JOB_SETTLE, default 45."""
+    try:
+        return max(0.0, float(os.environ['HEAVY_JOB_SETTLE']))
+    except (KeyError, ValueError):
+        return DEFAULT_SETTLE
+
+
+def slot_holders(directory, held):
+    """The jobs holding `held` slots, each once, as {'pid', 'started_ts'}. The start is the mtime of the lock file
+    (stamped by `claim_slots` when the slots were taken); the pid comes from the json when it is the same
+    holder's, else it is unknown."""
+    holders = []
+    covered = set()
+    for i in held:
+        if i in covered:
+            continue
+        info = read_info(directory, i)
+        try:
+            taken = os.stat(lock_path(directory, i)).st_mtime
+        except OSError:
+            taken = None
+        pid = None
+        if info:
+            covered.update(info.get('slots') or [i])
+            if taken is None or info.get('started_ts', 0) >= taken - 0.5:
+                pid = info.get('pid')
+                taken = taken or info.get('started_ts')
+        holders.append({'pid': pid, 'started_ts': taken})
+    return holders
+
+
+def admission_block(weight, holders, others, mem_available_kib, threshold_gib, settle_s, now):
+    """Why a job of `weight` that found enough free slots must still wait, or None to admit it.
+
+    `holders` are the slot holders (`slot_holders`), `others` the number of other heavy jobs running (slot
+    holders plus unwrapped ones). With none, nothing explains a low MemAvailable, so the job is admitted: waiting
+    for memory that non-heavy processes hold would starve it forever. Otherwise (1) settle: a holder that took
+    its slots less than `settle_s` ago has not allocated its memory yet, so MemAvailable cannot reflect it, and
+    (2) memory: MemAvailable must reach threshold x weight. Returns {'reason': 'settle'|'memory', 'text': ...,
+    'wait': seconds or None}."""
+    if not others:
+        return None
+    newest = None
+    for info in holders:
+        ts = info.get('started_ts')
+        left = settle_s - (now - ts) if ts is not None else 0
+        if left > 0 and (newest is None or left > newest[0]):
+            newest = (left, info, now - ts)
+    if newest:
+        left, info, age = newest
+        return {'reason': 'settle', 'wait': left,
+                'text': f'el trabajo {"pid " + str(info["pid"]) if info.get("pid") else "anterior"} arrancó hace '
+                        f'{age:.0f} s y su memoria aún no se refleja '
+                        f'en la disponible; espero {left:.0f} s más (pausa de {settle_s:g} s)'}
+    if threshold_gib > 0 and mem_available_kib is not None:
+        needed_kib = threshold_gib * weight * 1048576
+        if mem_available_kib < needed_kib:
+            return {'reason': 'memory', 'wait': None,
+                    'text': f'memoria disponible {gib(mem_available_kib)}, hacen falta {gib(needed_kib)} '
+                            f'({threshold_gib:g} GiB x peso {weight}) mientras otro trabajo pesado está en marcha'}
+    return None
+
+
+def pool_state(spec):
+    """Slots (held or not, with their holder), stale jsons and live queue of one pool."""
+    directory = spec['dir']
+    slots = []
+    stale = []
+    for i in range(spec['n']):
+        held = slot_is_held(directory, i)
+        info = read_info(directory, i)
+        entry = {'slot': i, 'shown': spec['offset'] + i, 'pool': spec['name'], 'held': held,
+                 'holder': info if held else None}
+        if held:
+            entry['fd_holders'] = fd_holders(directory, i)
+        elif info is not None:
+            stale.append({'slot': i, 'shown': spec['offset'] + i, 'info': info})
+        slots.append(entry)
+    return {'spec': spec, 'slots': slots, 'stale': stale, 'queue': read_queue(directory, prune=False)}
+
+
+def admission_inputs(pool, by_pool, unwrapped, mine):
+    """(holders, number of other heavy jobs) that the admission of a `pool` job looks at. `by_pool` maps each pool
+    to (holders, held slots); `mine` are the unwrapped jobs of `pool`.
+
+    A light job counts both pools: it runs beside the heavy ones and their memory is the same. A cpu job counts only
+    the cpu pool and unwrapped heavy jobs: a running `tsc` or `npm ci` must never turn on the memory rule or the 45 s
+    settle for the cpu queue, or a trickle of light jobs would stall a weight-2 head that needs 5 GiB."""
+    if pool == LIGHT_POOL:
+        holders = [h for entry in by_pool.values() for h in entry[0]]
+        return holders, sum(entry[1] for entry in by_pool.values()) + len(unwrapped)
+    holders, held = by_pool.get(pool, ([], 0))
+    return holders, held + len(mine)
+
+
+def collect_status():
+    specs = [pool_spec(CPU_POOL)]
+    if light_slot_count() > 0:
+        specs.append(pool_spec(LIGHT_POOL))
+    states = [pool_state(spec) for spec in specs]
+    shown = mark_covered(scan_unwrapped()) if scan_enabled() else []
+    unwrapped = counted_unwrapped(shown)
+    mem = read_meminfo()
+    now = time.time()
+    by_pool = {}
+    for state in states:
+        held = [e['slot'] for e in state['slots'] if e['held']]
+        by_pool[state['spec']['name']] = (slot_holders(state['spec']['dir'], held), len(held))
+    pools = {}
+    for state in states:
+        spec = state['spec']
+        slots = state['slots']
+        held_count = sum(1 for s in slots if s['held'])
+        mine = [u for u in unwrapped if unwrapped_pool(u) == spec['name']]
+        free_effective = max(0, spec['n'] - held_count - len(mine))
+        queue = state['queue']
+        if queue:
+            block = {'reason': 'queue', 'text': f'{queue_text(len(queue))}: un trabajo nuevo se pone a la cola'}
+        elif free_effective < 1:
+            block = {'reason': 'slots', 'text': 'no queda ningún hueco libre'}
+        else:
+            holders, others = admission_inputs(spec['name'], by_pool, unwrapped, mine)
+            block = admission_block(1, holders, others, mem.get('MemAvailable'), spec['threshold'], spec['settle'],
+                                    now)
+        pools[spec['name']] = {
+            'dir': spec['dir'],
+            'slot_count': spec['n'],
+            'first_slot': spec['offset'],
+            'slots': slots,
+            'stale': state['stale'],
+            'jobs': [e['holder'] for e in slots if e['held'] and e['holder'] and not secondary_slot(e)],
+            'queue': queue_in_turn_order(queue),
+            'free_effective': free_effective,
+            'min_avail_gib': spec['threshold'],
+            'settle_s': spec['settle'],
+            'admission': {'weight': 1, 'admitted': block is None, 'reason': block['reason'] if block else None,
+                          'text': block['text'] if block else None},
+        }
+    swap_used = mem['SwapTotal'] - mem['SwapFree'] if 'SwapTotal' in mem and 'SwapFree' in mem else None
+    cpu = pools[CPU_POOL]
+    # The top-level keys describe the cpu pool, as before the light pool existed; `light` describes the other one.
+    return dict({key: cpu[key] for key in ('dir', 'slot_count', 'slots', 'stale', 'jobs', 'queue', 'free_effective',
+                                           'min_avail_gib', 'settle_s', 'admission')},
+                hostname=socket.gethostname(),
+                unwrapped=[dict(u, pool=unwrapped_pool(u)) for u in shown],
+                light=pools.get(LIGHT_POOL),
+                mem_available_kib=mem.get('MemAvailable'),
+                swap_total_kib=mem.get('SwapTotal'),
+                swap_used_kib=swap_used,
+                load=list(os.getloadavg()))
+
+
+def gib(kib):
+    return 'n/d' if kib is None else f'{kib / 1048576:.1f} GiB'
+
+
+def holder_text(entry):
+    info = entry.get('holder')
+    if not info:
+        pids = ', '.join(map(str, entry.get('fd_holders') or [])) or '?'
+        return f'holder desconocido (pids con el fd: {pids})'
+    parts = [f'pid {info.get("pid")}', f'[{info.get("kind", "?")}]']
+    if info.get('weight', 1) > 1:
+        shown = info.get('shown_slots') or info.get('slots') or []
+        parts.append(f'peso {info["weight"]} (huecos {",".join(map(str, shown))})')
+    if info.get('label'):
+        parts.append(f'"{info["label"]}"')
+    if info.get('project'):
+        parts.append(f'proyecto {info["project"]}')
+    parts.append(f'desde hace {age_text(info.get("started"))}')
+    text = ' '.join(parts)
+    if info.get('argv'):
+        text += ': ' + ' '.join(info['argv'])[:120]
+    pid = info.get('pid')
+    if pid and not os.path.exists(f'/proc/{pid}'):
+        text += f' (el pid {pid} ya no existe: lo retiene un proceso descendiente)'
+    return text
+
+
+def unwrapped_text(item):
+    if item.get('orphan'):
+        pids = item.get('pids') or [item['pid']]
+        return (f'pid {" ".join(map(str, pids))} [{item["kind"]}] HUÉRFANO, sin envolver ({len(pids)} proceso(s), '
+                f'{gib(item.get("rss_kib"))}, {item.get("cpu_pct") or 0:.0f} % de CPU media): {item["reason"]}. '
+                f'Nadie recoge su resultado; se puede parar con `kill {" ".join(map(str, pids))}`. '
+                f'{item["argv"][-1][-110:]}')
+    text = f'pid {item["pid"]} [{item["kind"]}] sin envolver: {" ".join(item["argv"])[:120]}'
+    if 'covered_by' in item:
+        text += (f' — es el emulador del trabajo del hueco {item["covered_by"]} ("{item.get("covered_label", "")}", '
+                 f'misma carpeta): no ocupa otro hueco')
+    return text
+
+
+def secondary_slot(entry):
+    """True for the 2nd, 3rd... slot of a multi-slot job: the job is described once, on its first slot."""
+    info = entry.get('holder') or {}
+    slots = info.get('slots') or []
+    return bool(slots) and entry['slot'] != min(slots)
+
+
+def pool_entries(status):
+    """Every slot entry of both pools, cpu first."""
+    return list(status['slots']) + list((status.get('light') or {}).get('slots') or [])
+
+
+def slot_label(entry):
+    """`hueco 3 (resto)` for the light pool, `hueco 0` for the cpu pool (the text supervisor-lock and the stall
+    check look for, together with OCUPADO and the project, is unchanged)."""
+    shown = entry.get('shown', entry['slot'])
+    return f'hueco {shown} (resto)' if entry.get('pool') == LIGHT_POOL else f'hueco {shown}'
+
+
+def occupancy_lines(status):
+    lines = [f'  {slot_label(e)}: {holder_text(e)}' for e in pool_entries(status)
+             if e['held'] and not secondary_slot(e)]
+    lines += [f'  {unwrapped_text(item)}' for item in status['unwrapped']]
+    return lines
+
+
+def queue_text(count):
+    return f'hay {count} trabajo{"s" if count != 1 else ""} esperando por orden de llegada'
+
+
+def queue_entry(item):
+    info = item['info']
+    return {'position': item['position'], 'pid': item['pid'], 'kind': info.get('kind'), 'label': info.get('label') or '',
+            'project': info.get('project'), 'weight': info.get('weight', 1), 'mode': info.get('mode'),
+            'queued': info.get('queued'), 'argv': info.get('argv') or [], 'paused': paused_cwd(info.get('cwd')),
+            'priority': info.get('priority') if isinstance(info.get('priority'), dict) else None}
+
+
+def queue_in_turn_order(queue):
+    """Status entries in the order the waiters really take their turn (waiters_ahead): a paused project's jobs go
+    after every active one, each group by arrival; `position` is renumbered to match."""
+    entries = sorted((queue_entry(item) for item in queue), key=lambda entry: entry['paused'])  # stable: keeps arrival
+    for position, entry in enumerate(entries, 1):
+        entry['position'] = position
+    return entries
+
+
+def queue_line(entry, numbered=True):
+    parts = [f'{entry["position"]}.'] if numbered else []
+    parts += [f'pid {entry["pid"]}', f'[{entry.get("kind") or "?"}]']
+    if entry.get('weight', 1) > 1:
+        parts.append(f'peso {entry["weight"]}')
+    if entry.get('label'):
+        parts.append(f'"{entry["label"]}"')
+    if entry.get('project'):
+        parts.append(f'proyecto {entry["project"]}')
+    parts.append(f'esperando desde hace {age_text(entry.get("queued"))}')
+    if entry.get('paused'):
+        parts.append('(proyecto en pausa: va detrás de los activos)')
+    if entry.get('priority'):
+        parts.append(f'(PRIORIDAD por orden del desarrollador: «{entry["priority"].get("order") or ""}»)')
+    text = ' '.join(parts)
+    if entry.get('argv'):
+        text += ': ' + ' '.join(entry['argv'])[:120]
+    return text
+
+
+def print_pool(pool, title):
+    for entry in pool['slots']:
+        if entry['held'] and secondary_slot(entry):
+            info = entry['holder']
+            shown = info.get('shown_slots') or info['slots']
+            print(f'  {slot_label(entry)}: OCUPADO por el mismo trabajo (pid {info.get("pid")}, peso '
+                  f'{info.get("weight")}, huecos {",".join(map(str, shown))})')
+            continue
+        print(f'  {slot_label(entry)}: ' + (f'OCUPADO por {holder_text(entry)}' if entry['held'] else 'libre'))
+    for item in pool['stale']:
+        print(f'  (json obsoleto ignorado en el hueco {item.get("shown", item["slot"])}: pid {item["info"].get("pid")})')
+    if pool['queue']:
+        print(f'Cola de espera{title} (por orden de llegada, con los de proyectos en pausa detrás; solo el primero '
+              'puede arrancar):')
+        for entry in pool['queue']:
+            print(f'  {queue_line(entry)}')
+    else:
+        print(f'Cola de espera{title}: vacía')
+
+
+def print_status(status):
+    light = status.get('light')
+    print(f'Huecos: {status["slot_count"]} ({status["dir"]}), libres de verdad: {status["free_effective"]}'
+          + (f' — para {POOL_TITLES[CPU_POOL]}' if light else ''))
+    print_pool(status, '')
+    if light:
+        print(f'Huecos del resto: {light["slot_count"]}, libres de verdad: {light["free_effective"]} — para '
+              f'{POOL_TITLES[LIGHT_POOL]}; no esperan a la cola de compilar y tests')
+        print_pool(light, ' del resto')
+    if status['unwrapped']:
+        print('Trabajos pesados sin envolver:')
+        for item in status['unwrapped']:
+            print(f'  {unwrapped_text(item)}')
+    else:
+        print('Trabajos pesados sin envolver: ninguno' + ('' if scan_enabled() else ' (escaneo desactivado)'))
+    print(f'Memoria disponible: {gib(status["mem_available_kib"])}; swap usado: {gib(status["swap_used_kib"])} '
+          f'de {gib(status["swap_total_kib"])}')
+    print('Carga (1/5/15 min): ' + ' '.join(f'{v:.2f}' for v in status['load']))
+    memory_rule = (f'{status["min_avail_gib"]:g} GiB disponibles por peso' if status['min_avail_gib'] > 0
+                   else 'desactivado')
+    print(f'Admisión: umbral de memoria {memory_rule}; pausa de arranque {status["settle_s"]:g} s.')
+    admission = status['admission']
+    print('  Un trabajo de peso 1 ahora: ' + ('se admitiría.' if admission['admitted']
+                                              else f'NO se admitiría: {admission["text"]}.'))
+    light = status.get('light')
+    if light:
+        light_rule = (f'{light["min_avail_gib"]:g} GiB disponibles por peso' if light['min_avail_gib'] > 0
+                      else 'desactivado')
+        print(f'Admisión del resto: umbral de memoria {light_rule}; pausa de arranque {light["settle_s"]:g} s.')
+        admission = light['admission']
+        print('  Un trabajo del resto de peso 1 ahora: ' + ('se admitiría.' if admission['admitted']
+                                                            else f'NO se admitiría: {admission["text"]}.'))
+
+
+# --------------------------------------------------------------------------------------------------------
+# Acquire / run / hold
+# --------------------------------------------------------------------------------------------------------
+
+def resolve_kind(args):
+    """The kind of the job: --kind, else what the classifier says about the command, else typecheck/lint for a
+    command made only of light tools, else `job`."""
+    if args.kind:
+        return args.kind
+    result = classify_argv(args.cmd)
+    if result:
+        return result[0]
+    return light_kind_of(args.cmd) or 'job'
+
+
+def resolve_pool(args):
+    """(pool spec, reason). See `pool_for`; with the light pool turned off everything goes to the cpu pool."""
+    if light_slot_count() < 1:
+        return pool_spec(CPU_POOL), 'no hay huecos del resto configurados'
+    pool, why = pool_for(args.cmd, args.kind)
+    return pool_spec(pool), why
+
+
+def resolve_weight(args, kind):
+    """Slots the job takes: --weight, else 2 for `ml` (a model in RAM weighs several times a test run), else 1."""
+    return args.weight or (ML_WEIGHT if kind == 'ml' else 1)
+
+
+def acquire(weight, max_wait, no_wait, who=None, spec=None):
+    """Block until the job is the oldest waiter, `weight` slots are free and the admission rules allow it. Returns
+    (fds, slots, directory, weight) with the slots already stamped; exits 75 when there is no room, or (`no_wait`)
+    when anybody waits already. A weight above the number of slots is clamped to it, with a warning.
+
+    `who` describes the job for its queue ticket (kind, label, project, argv, mode). Only the oldest live waiter
+    looks at the slots; the others wait for their turn (see "Queue" in the module docstring). Admission
+    (`admission_block`) is checked once the slots are locked: memory and the settle time of the other holders only
+    matter while another heavy job runs, so an idle machine never makes a job wait.
+
+    `spec` is the pool (`pool_spec`, default the cpu pool): its own slots and queue. Admission looks at both pools,
+    because memory is one for the whole machine."""
+    spec = spec or pool_spec(CPU_POOL)
+    directory = spec['dir']
+    n = spec['n']
+    if weight > n:
+        print(f'heavy-job: el peso {weight} es mayor que los {n} huecos {POOL_OF[spec["name"]]} de este '
+              f'equipo; lo dejo en {n}.', file=sys.stderr)
+        weight = n
+    ticket = None if no_wait else enqueue(directory, dict(who or {}, weight=weight, queued=now_iso(),
+                                                          pool=spec['name']))
+    try:
+        return wait_for_turn(directory, n, weight, max_wait, no_wait, ticket, spec)
+    finally:
+        leave_queue(ticket)  # after the slots are stamped, so the next waiter finds them held
+
+
+def wait_for_turn(directory, n, weight, max_wait, no_wait, ticket, spec=None):
+    spec = spec or pool_spec(CPU_POOL)
+    poll = float(os.environ.get('HEAVY_JOB_POLL', '5'))
+    threshold = spec['threshold']
+    settle = spec['settle']
+    need = f', necesito {weight}' if weight > 1 else ''
+    which = f' {POOL_OF[spec["name"]]}' if light_slot_count() > 0 else ''
+    started = time.monotonic()
+    announced = None
+    while True:
+        request = take_priority_request(os.getpid()) if ticket is not None else None
+        if request is not None:
+            move_to_front(directory, ticket, request)
+            print(f'heavy-job: por orden del desarrollador («{request.get("order") or ""}»), este trabajo pasa el '
+                  'primero de la cola; lo que ya está en marcha sigue hasta terminar.', file=sys.stderr)
+            announced = None
+        ahead = waiters_ahead(directory, ticket)
+        block = {'reason': 'slots', 'wait': None, 'text': f'sin hueco libre ({n} huecos{which}{need})'}
+        fds, slots, held, unwrapped = [], [], [], []
+        if ahead:
+            block = {'reason': 'queue', 'wait': None,
+                     'text': f'{queue_text(len(ahead))} antes que este trabajo (primero: {queue_line(queue_entry(ahead[0]), numbered=False)})'}
+        else:
+            fds, slots, held = probe_slots(directory, n, weight)
+        if fds and scan_enabled():
+            # The /proc walk is slow: do not hold the slots meanwhile, or other waiters would see them taken
+            # by a holder without json. Probe again afterwards, which is quick.
+            for handle in fds:
+                os.close(handle)
+            unwrapped = counted_unwrapped(mark_covered(scan_unwrapped()))
+            fds, slots, held = probe_slots(directory, n, weight)
+        if fds:
+            mine = [u for u in unwrapped if unwrapped_pool(u) == spec['name']]
+            if n - len(held) - len(mine) < weight:
+                block['text'] = f'sin hueco libre ({n} huecos{which}{need}; los trabajos sin envolver también ocupan)'
+            else:
+                by_pool = {spec['name']: (slot_holders(directory, held), len(held))}
+                if spec['name'] == LIGHT_POOL:          # only a light job looks at the other pool (admission_inputs)
+                    other = pool_spec(CPU_POOL)
+                    other_held = held_slots(other['dir'], other['n'])
+                    by_pool[CPU_POOL] = (slot_holders(other['dir'], other_held), len(other_held))
+                holders, others = admission_inputs(spec['name'], by_pool, unwrapped, mine)
+                mem = read_meminfo().get('MemAvailable')
+                block = admission_block(weight, holders, others, mem, threshold, settle, time.time())
+                if block is None:
+                    if not others and threshold > 0 and mem is not None \
+                            and mem < threshold * weight * 1048576:
+                        print(f'heavy-job: aviso: memoria disponible {gib(mem)}, por debajo de los '
+                              f'{gib(threshold * weight * 1048576)} recomendados; arranco igualmente porque no '
+                              'hay otro trabajo pesado en marcha.', file=sys.stderr)
+                    if announced:
+                        shown = [spec['offset'] + i for i in slots]
+                        print(f'heavy-job: {slots_text(shown)} {"libres" if len(slots) > 1 else "libre"} tras '
+                              f'{int(time.monotonic() - started)} s, adelante.', file=sys.stderr)
+                    claim_slots(fds, slots, directory)
+                    return fds, slots, directory, weight
+            for handle in fds:
+                os.close(handle)
+        elapsed = time.monotonic() - started
+        limited = bool(max_wait) and max_wait > 0     # 0 or None: wait as long as needed
+        out_of_time = no_wait or (limited and elapsed >= max_wait)
+        if out_of_time or announced != block['reason']:
+            lines = occupancy_lines(collect_status()) or ['  (nada identificable)']
+            if out_of_time:
+                if block['reason'] == 'queue':
+                    why = block['text'] if no_wait else f'han pasado {int(elapsed)} s y {block["text"]}'
+                    why = f'no se puede arrancar ahora, {why}' if no_wait else why
+                elif block['reason'] == 'slots':
+                    why = 'no hay hueco libre' if no_wait else f'han pasado {int(elapsed)} s sin hueco libre'
+                    why += f' ({n} huecos{which}{need})'
+                else:
+                    tail = f'hay hueco pero {block["text"]}'
+                    why = f'no se puede arrancar ahora, {tail}' if no_wait else f'han pasado {int(elapsed)} s y {tail}'
+                print(f'heavy-job: {why}. Ocupan:', file=sys.stderr)
+                print('\n'.join(lines), file=sys.stderr)
+                sys.exit(EX_TEMPFAIL)
+            if block['reason'] == 'queue':
+                lead = f'{block["text"]}, espero mi turno'
+            else:
+                lead = block['text'] if block['reason'] == 'slots' else f'hay hueco, pero {block["text"]}'
+                lead += ', espero'
+            print(f'heavy-job: {lead}. Ocupan:', file=sys.stderr)
+            print('\n'.join(lines), file=sys.stderr)
+            announced = block['reason']
+        wait = min(poll, max_wait - elapsed) if limited else poll
+        if block['wait']:
+            wait = min(wait, block['wait'])
+        time.sleep(max(0.05, wait))
+
+
+def slots_text(slots):
+    return ('huecos ' if len(slots) > 1 else 'hueco ') + ','.join(map(str, slots))
+
+
+def project_of(cwd):
+    try:
+        out = subprocess.run(['git', '-C', cwd, 'rev-parse', '--show-toplevel'], capture_output=True, text=True,
+                             timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return os.path.basename(out.stdout.strip()) if out.returncode == 0 and out.stdout.strip() else None
+
+
+def build_info(slots, weight, kind, pid, args, mode, spec=None):
+    cwd = os.getcwd()
+    spec = spec or {'name': CPU_POOL, 'offset': 0}
+    return {
+        'slot': slots[0],
+        'slots': list(slots),
+        'pool': spec['name'],
+        'shown_slots': [spec['offset'] + i for i in slots],
+        'weight': weight,
+        'pid': pid,
+        'mode': mode,
+        'kind': kind,
+        'label': args.label or '',
+        'cwd': cwd,
+        'project': project_of(cwd),
+        'argv': list(args.cmd),
+        'started': now_iso(),
+        'started_ts': time.time(),
+    }
+
+
+def waiter_info(args, kind, mode):
+    """What the queue ticket says about a waiting job (`status` shows it)."""
+    cwd = os.getcwd()
+    return {'mode': mode, 'kind': kind, 'label': args.label or '', 'cwd': cwd, 'project': project_of(cwd),
+            'argv': list(args.cmd), 'priority_aware': 1}
+
+
+def ask_priority_for_self(args):
+    """`run|hold --priority-order`: refuse without the developer's recent message here, else file the request for this waiter."""
+    order = (getattr(args, 'priority_order', None) or '').strip()
+    if not order:
+        return
+    ok, why = developer_ordered_here()
+    if not ok:
+        die(f'heavy-job: --priority-order solo vale por orden del desarrollador dada en esta misma sesión: {why}. Lanza el '
+            'trabajo sin --priority-order (por orden de llegada).', 3)
+    request_priority(os.getpid(), order)
+
+
+def claim_slots(fds, slots, directory):
+    """Stamp the lock files (their mtime) the moment the slots are taken: the settle rule of the other waiters
+    reads it, so it holds even before the job's json exists, and the json keeps meaning "the job is running"."""
+    for handle in fds:
+        os.ftruncate(handle, 0)
+        os.pwrite(handle, f'{os.getpid()} {time.time():.3f}\n'.encode(), 0)
+    for i in slots:  # the json of a dead holder
+        try:
+            os.unlink(info_path(directory, i))
+        except OSError:
+            pass
+
+
+def start_pool(args, kind):
+    """The job's pool, saying so when the command overrides a heavy --kind (`--kind gate -- npx tsc -b`)."""
+    spec, why = resolve_pool(args)
+    if spec['name'] == LIGHT_POOL and args.kind and args.kind not in LIGHT_KINDS:
+        print(f'heavy-job: va a los huecos {POOL_OF[LIGHT_POOL]} aunque diga --kind {args.kind}: {why}.',
+              file=sys.stderr)
+    return spec
+
+
+def slot_env(spec, slots, label):
+    """HEAVY_JOB_SLOT for a cpu slot; HEAVY_JOB_LIGHT_SLOT for a light one, so a suite started inside it still
+    queues for a cpu slot. HEAVY_JOB_POOL names the pool."""
+    return {spec['env']: ','.join(str(spec['offset'] + i) for i in slots), 'HEAVY_JOB_LABEL': label or '',
+            'HEAVY_JOB_POOL': spec['name']}
+
+
+def cloud_guard(args, spec):
+    """Refuse a cpu job whose suite already runs (or already passed) in the cloud for this same code. cloud-tests
+    decides; when it is missing, slow or broken the job runs as before."""
+    if spec['name'] != CPU_POOL or not os.access(CLOUD_TESTS_BIN, os.X_OK):
+        return
+    try:
+        out = subprocess.run([CLOUD_TESTS_BIN, 'local-guard', '--cwd', os.getcwd(), '--', *args.cmd],
+                             capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return
+    if out.returncode == 3 and out.stdout.strip():
+        die(f'heavy-job: no lo lanzo: {out.stdout.strip()}', CLOUD_EXIT)
+
+
+def cloud_stop_note(pid):
+    """The note cloud-tests left when it stopped this wrapper's job as redundant with a cloud run, or None."""
+    path = os.path.join(state_dir(), CLOUD_STOPPED_DIR, f'{pid}.txt')
+    try:
+        with open(path) as handle:
+            note = handle.read().strip()
+        os.unlink(path)
+        return note or None
+    except OSError:
+        return None
+
+
+def stopped_while_waiting(signum, _frame):
+    """SIGTERM/SIGINT while queued: say why if cloud-tests stopped it, then leave (the ticket goes with the process)."""
+    note = cloud_stop_note(os.getpid())
+    if note:
+        die(f'heavy-job: parado en la cola: {note}', CLOUD_EXIT)
+    sys.exit(128 + signum)
+
+
+def cmd_run(args):
+    cloud_stop_note(os.getpid())  # a note left for a dead process that had this pid is not about this job
+    kind = resolve_kind(args)
+    spec = start_pool(args, kind)
+    cloud_guard(args, spec)
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, stopped_while_waiting)
+    ask_priority_for_self(args)
+    fds, slots, directory, weight = acquire(resolve_weight(args, kind), args.max_wait, args.no_wait,
+                                            waiter_info(args, kind, 'run'), spec)
+    env = dict(os.environ, **slot_env(spec, slots, args.label))
+    child = {'proc': None}
+    pending = []
+
+    def forward(signum, _frame):
+        if child['proc'] is not None:
+            try:
+                child['proc'].send_signal(signum)
+            except OSError:
+                pass
+        else:
+            pending.append(signum)
+
+    def release():
+        for handle in fds:
+            os.close(handle)
+
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, forward)
+    try:
+        proc = subprocess.Popen(args.cmd, env=env, pass_fds=tuple(fds))
+    except FileNotFoundError:
+        release()
+        die(f'heavy-job: no encuentro el comando {args.cmd[0]!r}', 127)
+    except PermissionError:
+        release()
+        die(f'heavy-job: no se puede ejecutar {args.cmd[0]!r}', 126)
+    child['proc'] = proc
+    info = build_info(slots, weight, kind, proc.pid, args, 'run', spec)
+    info['wrapper_pid'] = os.getpid()
+    write_infos(directory, slots, info)
+    for signum in pending:
+        proc.send_signal(signum)
+    code = proc.wait()
+    remove_infos(directory, slots, proc.pid)  # before releasing the slots, so the next holder's json is never ours
+    release()
+    note = cloud_stop_note(os.getpid())
+    if note:
+        print(f'heavy-job: parado: {note}', file=sys.stderr)
+        return CLOUD_EXIT
+    return 128 - code if code < 0 else code
+
+
+def cmd_hold(args):
+    cloud_stop_note(os.getpid())
+    kind = resolve_kind(args)
+    spec = start_pool(args, kind)
+    cloud_guard(args, spec)
+    for signum in (signal.SIGINT, signal.SIGTERM):  # exec resets them for the command
+        signal.signal(signum, stopped_while_waiting)
+    ask_priority_for_self(args)
+    fds, slots, directory, weight = acquire(resolve_weight(args, kind), args.max_wait, args.no_wait,
+                                            waiter_info(args, kind, 'hold'), spec)
+    for handle in fds:
+        os.set_inheritable(handle, True)
+    os.environ.update(slot_env(spec, slots, args.label))
+    write_infos(directory, slots, build_info(slots, weight, kind, os.getpid(), args, 'hold', spec))
+    try:
+        os.execvp(args.cmd[0], args.cmd)
+    except FileNotFoundError:
+        remove_infos(directory, slots, os.getpid())
+        die(f'heavy-job: no encuentro el comando {args.cmd[0]!r}', 127)
+    except PermissionError:
+        remove_infos(directory, slots, os.getpid())
+        die(f'heavy-job: no se puede ejecutar {args.cmd[0]!r}', 126)
+
+
+def cmd_status(args):
+    status = collect_status()
+    if args.json:
+        print(json.dumps(status, indent=2))
+    else:
+        print_status(status)
+    return 0
+
+
+def cmd_scan(args):
+    items = mark_covered(scan_unwrapped())
+    if args.json:
+        print(json.dumps(items, indent=2))
+    elif items:
+        print('Trabajos pesados sin envolver:')
+        for item in items:
+            print(f'  {unwrapped_text(item)}')
+    else:
+        print('Ningún trabajo pesado sin envolver.')
+    return 0
+
+
+def cmd_classify(args):
+    if not args.stdin and not args.cmd:
+        die('heavy-job classify: falta el comando (tras --) o --stdin', 2)
+    command = sys.stdin.read() if args.stdin else ' '.join(args.cmd)
+    result = classify_command(command)
+    pool, why = pool_for(['bash', '-c', command]) if light_slot_count() > 0 else (CPU_POOL, '')
+    if args.json:
+        print(json.dumps({'heavy': bool(result), 'kind': result[0] if result else None,
+                          'reason': result[1] if result else None, 'pool': pool, 'pool_reason': why}))
+    elif result:
+        print(f'pesado: {result[0]} — {result[1]}. Si se envuelve, va a los huecos {POOL_OF[pool]}.')
+    else:
+        extra = (f' Si se envuelve igualmente, va a los huecos {POOL_OF[pool]} ({why}).'
+                 if pool == LIGHT_POOL else '')
+        print('ligero: no hace falta heavy-job.' + extra)
+    return 0 if result else 1
+
+
+def cmd_priority(args):
+    """Put a waiting job first in its queue, on the developer's order given in the calling session."""
+    order = (args.order or '').strip()
+    if not order:
+        die('priority: --order con sus palabras es obligatorio', 2)
+    ok, why = developer_ordered_here()
+    if not ok:
+        print(f'heavy-job priority: la prioridad solo se da por orden del desarrollador dada en esta misma sesión, y '
+              f'{why}. No se hace nada.', file=sys.stderr)
+        return 3
+    found = None
+    for pool in (CPU_POOL, LIGHT_POOL):
+        spec = pool_spec(pool)
+        for item in read_queue(spec['dir']):
+            if item['pid'] == args.pid:
+                found = (spec, item)
+    if not found:
+        print(f'heavy-job priority: el pid {args.pid} no está esperando en ninguna cola (mira `heavy-job status`: '
+              'es el pid de cada línea de «Cola de espera»; lo que ya está en marcha no se toca).', file=sys.stderr)
+        return 4
+    spec, item = found
+    label = item['info'].get('label') or ' '.join(item['info'].get('argv') or [])[:60]
+    if not item['info'].get('priority_aware'):
+        print(f'heavy-job priority: «{label}» se lanzó con una versión de heavy-job anterior a la prioridad y no la '
+              'atiende. Para que pase primero, la sesión que lo lanzó lo para (Ctrl-C o kill de ese pid) y lo relanza '
+              'igual, añadiendo --priority-order con sus palabras. Justo antes de pararlo, mira `heavy-job status`: si '
+              'ya ocupa un hueco, ha arrancado, y pararlo mata el trabajo.', file=sys.stderr)
+        return 5
+    path = request_priority(args.pid, order)
+    deadline = time.monotonic() + max(15.0, 3 * float(os.environ.get('HEAVY_JOB_POLL', '5')))
+    while time.monotonic() < deadline and os.path.exists(path):
+        time.sleep(0.25)
+    if os.path.exists(path):
+        print(f'heavy-job priority: pedida para «{label}», pero su espera todavía no la ha recogido; lo hará en su '
+              'siguiente vuelta.', file=sys.stderr)
+        return 0
+    entries = queue_in_turn_order(read_queue(spec['dir']))
+    position = next((e['position'] for e in entries if e['pid'] == args.pid), None)
+    where = f'es el n.º {position} de la cola' if position else 'ya ha salido de la cola (ha arrancado)'
+    print(f'heavy-job priority: hecho, «{label}» {where}. Lo que ya está en marcha sigue hasta terminar.')
+    return 0
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog='heavy-job', description='Semáforo global para trabajos pesados.')
+    sub = parser.add_subparsers(dest='command', required=True)
+    for name, text in (('run', 'esperar un hueco y ejecutar el comando como hijo'),
+                       ('hold', 'esperar un hueco y hacer exec del comando manteniendo el hueco')):
+        p = sub.add_parser(name, help=text)
+        p.add_argument('--kind')
+        p.add_argument('--label')
+        p.add_argument('--max-wait', type=float, default=DEFAULT_MAX_WAIT, metavar='SECONDS',
+                       help='give up (exit 75) after this long in the queue; 0 or absent: wait without limit')
+        p.add_argument('--no-wait', action='store_true')
+        p.add_argument('--weight', type=int, metavar='N', help='slots the job takes (default 1, or 2 for --kind ml)')
+        p.add_argument('--priority-order', metavar='SUS PALABRAS',
+                       help="go first in the queue, only on the developer's order given in this same session")
+    p = sub.add_parser('priority', help='poner primero en su cola un trabajo que espera, por orden del desarrollador')
+    p.add_argument('pid', type=int, help='el pid de la línea de la cola en `heavy-job status`')
+    p.add_argument('--order', required=True, metavar='SUS PALABRAS', help='la orden del desarrollador, literal')
+    for name in ('status', 'scan'):
+        sub.add_parser(name).add_argument('--json', action='store_true')
+    p = sub.add_parser('classify')
+    p.add_argument('--json', action='store_true')
+    p.add_argument('--stdin', action='store_true')
+    return parser
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    after = []
+    if '--' in argv:
+        i = argv.index('--')
+        argv, after = argv[:i], argv[i + 1:]
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    args.cmd = after
+    if args.command in ('run', 'hold') and not args.cmd:
+        parser.error(f'{args.command}: falta el comando tras --')
+    if args.command in ('run', 'hold') and args.weight is not None and args.weight < 1:
+        parser.error(f'{args.command}: --weight debe ser un entero >= 1')
+    if args.command in ('status', 'scan') and args.cmd:
+        parser.error(f'{args.command}: no admite comando')
+    if args.command == 'priority' and args.cmd:
+        parser.error('priority: no admite comando')
+    handlers = {'run': cmd_run, 'hold': cmd_hold, 'status': cmd_status, 'scan': cmd_scan, 'classify': cmd_classify,
+                'priority': cmd_priority}
+    try:
+        return handlers[args.command](args)
+    except KeyboardInterrupt:
+        print('heavy-job: interrumpido', file=sys.stderr)
+        return 130
+    except BrokenPipeError:
+        return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -1,0 +1,16 @@
+piece: test-account
+dest: scripts/test-account
+kind: cli
+probes:
+  - name: self-test passes from the installed copy
+    args: [self-test]
+    exit: [0]
+    stdout: any
+    contains: " 0 failures"
+    timeout: 120
+  - name: a corrupt config does not crash
+    args: [list, --all]
+    corrupt_config: true
+    env: {TEST_ACCOUNTS_DIR: probe-store}
+    exit: [0]
+    stdout: any

@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from . import modules, overlay, plan as plan_mod
+from .modules import DEFAULT_MODULES
 from .paths import REPO_ROOT, resolve_override, resolve_target
 
 LOCK = 'override.lock.json'
@@ -76,7 +77,7 @@ def classify(target: Path, mods, ov) -> list[tuple[str, str]]:
 def cmd_drift(args) -> int:
     target = resolve_target(args.target)
     ov = overlay.load(resolve_override(args.override))
-    mods = modules.load_many(args.modules.split(',') if args.modules else (ov.modules or ['openspec', 'core']))
+    mods = modules.load_many(args.modules.split(',') if args.modules else (ov.modules or DEFAULT_MODULES))
     rows = classify(target, mods, ov)
     counts: dict[str, int] = {}
     for dest, state in rows:
@@ -99,7 +100,7 @@ def cmd_pull(args) -> int:
     target = resolve_target(args.target)
     ov_root = resolve_override(args.override)
     ov = overlay.load(ov_root)
-    mods = modules.load_many(args.modules.split(',') if args.modules else (ov.modules or ['openspec', 'core']))
+    mods = modules.load_many(args.modules.split(',') if args.modules else (ov.modules or DEFAULT_MODULES))
     live = target / args.dest
     if not live.is_file():
         print(f'ERROR {live} does not exist')

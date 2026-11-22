@@ -1,7 +1,8 @@
 name: core
 summary: >-
   General mechanics for unattended agent work on one machine: authorship gate, process-kill gate,
-  worktree placement, the per-piece config helper and the rules that explain each of them.
+  worktree placement, the per-piece config helper, the rules that explain each of them and the
+  decision panel that replaces questions in unattended work.
 requires:
   python: "3.10"
   os: linux
@@ -19,6 +20,7 @@ files:
   - {src: global/rules/autoria-commits.md, dest: rules/autoria-commits.md}
   - {src: global/rules/matar-procesos-solo-propios.md, dest: rules/matar-procesos-solo-propios.md}
   - {src: global/rules/worktrees-ubicacion.md, dest: rules/worktrees-ubicacion.md}
+  - {src: global/skills/panel-de-decision/SKILL.md, dest: skills/panel-de-decision/SKILL.md}
 hooks:
   - global/settings/hooks.core.json
 config: [worktree-location]

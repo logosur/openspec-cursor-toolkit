@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+"""port-lease: fixed, machine-wide local dev ports, one lease per project.
+
+Why: every Compose/dev-server project used to publish the usual ports (3000, 3001, 3306, 6379, 8080...).
+Two projects, or a project and a worktree of itself, then fight for them, and the gate of a project
+failed because ddev-router owns 3000 and 8080. Each project now owns a block of ports nobody else
+can get, and always uses the same ones.
+
+How: a registry in ~/.local/state/port-leases/registry.json, edited under flock. A lease is a block of
+BLOCK_SIZE consecutive ports taken from RANGE (below the kernel's ephemeral range, so the OS never hands
+one out). Services are named; the n-th service gets base+n, and a service keeps its port for the life of
+the lease. Key = project name (basename of the main checkout). A git worktree is its own lease,
+`<project>~<worktree dir>`, with the same service names, so a worktree stack never touches the main one.
+
+Lifecycle: `claim` takes (or extends) a lease. `release` frees it: archiving or deleting a project.
+`prune` frees leases whose directory is gone (also done on every claim). A project that comes back
+asks `claim` again, may get other ports, and must be adjusted to them (see `verify`).
+
+Project convention: a committed `dev-ports.env` with `PORT_<SERVICE>=<n>` lines, and compose files that
+publish `${PORT_<SERVICE>:-<n>}` with the same number as default. `exec` exports the lease, so the
+same files also work for a worktree. `verify` checks files against the lease.
+
+  port-lease claim [--dir D] SERVICE...   take or extend the lease of D (default: cwd); prints PORT_* lines
+  port-lease show  [--dir D] [--json]     the lease of D as env lines (or json)
+  port-lease exec  [--dir D] -- CMD...    run CMD with the lease exported (a worktree lease is claimed on demand)
+  port-lease verify [--dir D]             dev-ports.env and compose defaults must match the lease; exit 1 if not
+  port-lease list                         every lease
+  port-lease release [KEY | --dir D]      free a lease
+  port-lease prune                        free leases whose directory no longer exists
+"""
+import argparse
+import fcntl
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+
+STATE = os.path.expanduser(os.environ.get('PORT_LEASE_STATE', '~/.local/state/port-leases'))
+RANGE_START = int(os.environ.get('PORT_LEASE_START', '20000'))
+RANGE_END = int(os.environ.get('PORT_LEASE_END', '29999'))
+BLOCK_SIZE = 16
+REGISTRY = os.path.join(STATE, 'registry.json')
+
+
+def die(message, code=2):
+    print(f'port-lease: {message}', file=sys.stderr)
+    sys.exit(code)
+
+
+def git(args, cwd):
+    out = subprocess.run(['git', '-C', cwd, *args], capture_output=True, text=True)
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def resolve(directory):
+    """(key, main_key, dir) for a directory: the project name and whether it is a worktree."""
+    directory = os.path.realpath(directory)
+    top = git(['rev-parse', '--show-toplevel'], directory)
+    if not top:
+        return os.path.basename(directory), os.path.basename(directory), directory
+    top = os.path.realpath(top)
+    common = git(['rev-parse', '--path-format=absolute', '--git-common-dir'], top)
+    main = os.path.dirname(os.path.realpath(common)) if common else top
+    project = os.path.basename(main)
+    if top == main:
+        return project, project, top
+    return f'{project}~{os.path.basename(top)}', project, top
+
+
+class Registry:
+    def __enter__(self):
+        os.makedirs(STATE, exist_ok=True)
+        self.lock = open(os.path.join(STATE, 'lock'), 'w')
+        fcntl.flock(self.lock, fcntl.LOCK_EX)
+        try:
+            with open(REGISTRY) as fh:
+                self.data = json.load(fh)
+        except (FileNotFoundError, ValueError):
+            self.data = {'leases': {}}
+        return self
+
+    def save(self):
+        tmp = REGISTRY + '.tmp'
+        with open(tmp, 'w') as fh:
+            json.dump(self.data, fh, indent=2, sort_keys=True)
+            fh.write('\n')
+        os.replace(tmp, REGISTRY)
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.lock, fcntl.LOCK_UN)
+        self.lock.close()
+
+    @property
+    def leases(self):
+        return self.data['leases']
+
+    def prune(self):
+        gone = [k for k, v in self.leases.items() if not os.path.isdir(v['dir'])]
+        for key in gone:
+            print(f'port-lease: freed {key} (directory {self.leases[key]["dir"]} is gone)', file=sys.stderr)
+            del self.leases[key]
+        if gone:
+            self.save()
+
+
+def port_is_free(port):
+    for host in ('0.0.0.0', '127.0.0.1'):
+        with socket.socket() as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind((host, port))
+            except OSError:
+                return False
+    return True
+
+
+def free_block(reg):
+    taken = {v['base'] for v in reg.leases.values()}
+    for base in range(RANGE_START, RANGE_END - BLOCK_SIZE + 2, BLOCK_SIZE):
+        if base in taken:
+            continue
+        if all(port_is_free(p) for p in range(base, base + BLOCK_SIZE)):
+            return base
+    die('no free port block left in the range; release a lease')
+
+
+def env_name(service):
+    return 'PORT_' + re.sub(r'[^A-Za-z0-9]+', '_', service).strip('_').upper()
+
+
+def env_lines(key, lease, main_key):
+    lines = [f'PORT_LEASE_KEY={key}']
+    if key != main_key:
+        lines.append('COMPOSE_PROJECT_NAME=' + re.sub(r'[^a-z0-9_-]', '-', key.lower()))
+    lines += [f'{env_name(s)}={p}' for s, p in sorted(lease['services'].items(), key=lambda kv: kv[1])]
+    return lines
+
+
+def claim_lease(reg, directory, services):
+    key, main_key, top = resolve(directory)
+    offsets = {}
+    if key != main_key and not services:
+        main = reg.leases.get(main_key)
+        if not main:
+            die(f'{main_key} has no lease; claim it in the main checkout first')
+        services = list(main['services'])
+        offsets = {s: p - main['base'] for s, p in main['services'].items()}
+    lease = reg.leases.get(key)
+    if lease and lease['dir'] != top and os.path.isdir(lease['dir']):
+        die(f'{key} is leased to {lease["dir"]}; one directory owns a name', 3)
+    if not lease:
+        lease = {'dir': top, 'base': free_block(reg), 'services': {}, 'claimed': time.strftime('%Y-%m-%d')}
+        reg.leases[key] = lease
+    lease['dir'] = top
+    for service in services:
+        if service in lease['services']:
+            continue
+        if len(lease['services']) >= BLOCK_SIZE:
+            die(f'{key}: the block of {BLOCK_SIZE} ports is full')
+        lease['services'][service] = lease['base'] + offsets.get(service, len(lease['services']))
+    reg.save()
+    return key, main_key, lease
+
+
+def cmd_claim(args):
+    with Registry() as reg:
+        reg.prune()
+        key, main_key, lease = claim_lease(reg, args.dir, args.services)
+    print('\n'.join(env_lines(key, lease, main_key)))
+
+
+def cmd_show(args):
+    key, main_key, top = resolve(args.dir)
+    with Registry() as reg:
+        lease = reg.leases.get(key)
+    if not lease:
+        die(f'{key} has no lease; run: port-lease claim SERVICE...', 1)
+    print(json.dumps({key: lease}, indent=2) if args.json else '\n'.join(env_lines(key, lease, main_key)))
+
+
+def cmd_exec(args):
+    if not args.command:
+        die('exec needs a command after --')
+    with Registry() as reg:
+        reg.prune()
+        key, main_key, top = resolve(args.dir)
+        lease = reg.leases.get(key)
+        if not lease and key != main_key:
+            key, main_key, lease = claim_lease(reg, args.dir, [])
+        if not lease:
+            die(f'{key} has no lease; run: port-lease claim SERVICE...', 1)
+    env = dict(os.environ)
+    for line in env_lines(key, lease, main_key):
+        name, value = line.split('=', 1)
+        env[name] = value
+    os.execvpe(args.command[0], args.command, env)
+
+
+def read_env_file(path):
+    values = {}
+    try:
+        for line in open(path):
+            m = re.match(r'\s*(PORT_[A-Z0-9_]+)\s*=\s*(\d+)\s*$', line)
+            if m:
+                values[m.group(1)] = int(m.group(2))
+    except FileNotFoundError:
+        return None
+    return values
+
+
+def cmd_verify(args):
+    key, main_key, top = resolve(args.dir)
+    with Registry() as reg:
+        lease = reg.leases.get(key)
+    if not lease:
+        die(f'{key} has no lease; run: port-lease claim SERVICE...', 1)
+    want = {env_name(s): p for s, p in lease['services'].items()}
+    problems = []
+    manifest = read_env_file(os.path.join(top, 'dev-ports.env'))
+    if manifest is None:
+        problems.append('dev-ports.env is missing')
+    elif key == main_key:
+        for name, port in want.items():
+            if manifest.get(name) != port:
+                problems.append(f'dev-ports.env: {name} is {manifest.get(name)}, lease says {port}')
+        for name in manifest:
+            if name not in want:
+                problems.append(f'dev-ports.env: {name} is not in the lease')
+    default_re = re.compile(r'\$\{(PORT_[A-Z0-9_]+):-(\d+)\}')
+    literal_re = re.compile(r'^\s*-\s*"?(?:[\d.]+:)?(\d+):\d+(?:/\w+)?"?\s*$')
+    for name in sorted(os.listdir(top)):
+        if not re.match(r'(docker-)?compose.*\.ya?ml$', name) or 'prod' in name:
+            continue
+        in_ports = False
+        for number, line in enumerate(open(os.path.join(top, name)), 1):
+            if line.strip().startswith('#'):
+                continue
+            for var, default in default_re.findall(line):
+                if key == main_key and want.get(var) != int(default):
+                    problems.append(f'{name}:{number}: {var} default {default}, lease says {want.get(var)}')
+            stripped = line.strip()
+            if stripped.startswith('ports:'):
+                in_ports = True
+            elif in_ports and not stripped.startswith('-') and stripped:
+                in_ports = False
+            if in_ports and key == main_key:
+                m = literal_re.match(line)
+                if m:
+                    problems.append(f'{name}:{number}: published port {m.group(1)} is a literal, not ${{PORT_*:-n}}')
+    for problem in problems:
+        print(f'port-lease verify: {problem}', file=sys.stderr)
+    if problems:
+        sys.exit(1)
+    print(f'port-lease verify: {key} ok ({len(want)} ports from {lease["base"]})')
+
+
+def cmd_list(args):
+    with Registry() as reg:
+        reg.prune()
+        rows = sorted(reg.leases.items(), key=lambda kv: kv[1]['base'])
+    for key, lease in rows:
+        services = ' '.join(f'{s}={p}' for s, p in sorted(lease['services'].items(), key=lambda kv: kv[1]))
+        print(f'{lease["base"]}-{lease["base"] + BLOCK_SIZE - 1}  {key}  {lease["dir"]}\n    {services}')
+    if not rows:
+        print('no leases')
+
+
+def cmd_release(args):
+    key = args.key or resolve(args.dir)[0]
+    with Registry() as reg:
+        lease = reg.leases.pop(key, None)
+        if not lease:
+            die(f'no lease named {key}', 1)
+        reg.save()
+    print(f'port-lease: released {key} ({lease["base"]}-{lease["base"] + BLOCK_SIZE - 1}). '
+          f'Files of {lease["dir"]} still name those ports; a project that comes back must claim again and be adjusted.')
+
+
+def cmd_prune(args):
+    with Registry() as reg:
+        reg.prune()
+    print('port-lease: pruned')
+
+
+def main():
+    parser = argparse.ArgumentParser(prog='port-lease', description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
+    sub = parser.add_subparsers(dest='cmd', required=True)
+    for name, fn in (('claim', cmd_claim), ('show', cmd_show), ('exec', cmd_exec), ('verify', cmd_verify),
+                     ('list', cmd_list), ('release', cmd_release), ('prune', cmd_prune)):
+        p = sub.add_parser(name)
+        p.set_defaults(fn=fn)
+        if name not in ('list', 'prune'):
+            p.add_argument('--dir', default=os.getcwd())
+        if name == 'claim':
+            p.add_argument('services', nargs='*')
+        if name == 'show':
+            p.add_argument('--json', action='store_true')
+        if name == 'exec':
+            p.add_argument('command', nargs=argparse.REMAINDER)
+        if name == 'release':
+            p.add_argument('key', nargs='?')
+    argv = sys.argv[1:]
+    if argv and argv[0] == 'exec' and '--' in argv:
+        i = argv.index('--')
+        argv = argv[:i] + ['--'] + argv[i + 1:]
+    args = parser.parse_args(argv)
+    if args.cmd == 'exec' and args.command and args.command[0] == '--':
+        args.command = args.command[1:]
+    args.fn(args)
+
+
+if __name__ == '__main__':
+    main()

@@ -17,6 +17,8 @@ class ManifestError(Exception):
     pass
 
 
+DEFAULT_MODULES = ['openspec', 'core', 'devtools']
+
 @dataclass
 class FileEntry:
     src: Path          # absolute source file

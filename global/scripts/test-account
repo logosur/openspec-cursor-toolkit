@@ -1,0 +1,556 @@
+#!/usr/bin/env python3
+"""test-account: local store of the test users that sessions create in the developer's own apps.
+
+Sessions and agents create test users in the developer's own apps (store reviewer accounts included)
+without asking, and keep their credentials here so unattended work never stops on them.
+
+Storage
+  ~/.config/test-accounts/<project>.json, mode 0600, directory 0700 (override: TEST_ACCOUNTS_DIR).
+  <project> is the basename of the main checkout (a worktree resolves to its main repository).
+  Never inside a repository or a notes folder listed in the toolkit config piece `test-account`
+  (key `forbidden_dirs`). ~/.config/test-accounts/config.json holds {"mailbox": "<address your mail
+  connector reads>"} for +alias addresses.
+
+Secrets never reach a transcript
+  No subcommand an agent uses prints a password. Agents pass it on with `exec` (environment variables,
+  output redacted) or `env-file` (a git-ignored 0600 file for e2e suites). `show` prints it only to a
+  real terminal (the developer's); `copy` puts it on the clipboard and prints nothing secret.
+
+Usage
+  test-account add --role ROLE [--project DIR] [--host HOST] [--email ADDR | --alias] [--note TEXT]
+      Creates the entry with a generated password (idempotent: an existing role is kept as is).
+      --alias builds <mailbox-local>+<project>-<role>@<mailbox-domain> (mail reaches the connector's inbox).
+      Without --email or --alias, --alias is used. Prints metadata only.
+  test-account list [--project DIR | --all]          metadata only (role, host, email, state, dates)
+  test-account exec --role ROLE [--project DIR] -- CMD...
+      Runs CMD with TEST_ACCOUNT_EMAIL, TEST_ACCOUNT_PASSWORD, TEST_ACCOUNT_HOST, TEST_ACCOUNT_ROLE set.
+      Its output is redacted (the password becomes ********). A heavy CMD still goes through heavy-job:
+      heavy-job run --kind e2e --label '...' -- test-account exec --role e2e -- e2e/run.sh
+  test-account env-file --role ROLE --out PATH [--project DIR] [--prefix TEST_ACCOUNT_]
+      Writes PREFIX_EMAIL / PREFIX_PASSWORD / PREFIX_HOST to PATH (0600). Refuses a path that git does
+      not ignore, or one inside a forbidden notes folder.
+  test-account state --role ROLE --set created|verified|deleted [--project DIR] [--note TEXT]
+  test-account rotate --role ROLE [--project DIR]    new password; the session then updates it in the app
+  test-account rm --role ROLE [--project DIR]        forget it (after deleting the user in the app)
+  test-account show --role ROLE [--project DIR]      for the developer, in a terminal: email and password
+  test-account copy --role ROLE [--project DIR] [--field password|email]   to the clipboard
+  test-account config [--mailbox ADDR]
+  test-account self-test
+"""
+import argparse
+import contextlib
+import datetime as dt
+import fcntl
+import json
+import os
+import re
+import secrets
+import shutil
+import string
+import subprocess
+import sys
+import tempfile
+
+STORE = os.environ.get('TEST_ACCOUNTS_DIR', os.path.expanduser('~/.config/test-accounts'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), 'lib'))
+try:
+    from toolkit_config import load as _load_config
+except ImportError:  # copied without the toolkit lib: defaults only
+    def _load_config(piece, defaults=None):
+        return dict(defaults or {})
+_CONFIG = _load_config('test-account', {'forbidden_dirs': []})
+FORBIDDEN = [os.path.realpath(os.path.expanduser(d)) for d in _CONFIG.get('forbidden_dirs') or []]
+if os.environ.get('TEST_ACCOUNTS_FORBIDDEN_DIR'):  # tests
+    FORBIDDEN = [os.path.realpath(os.environ['TEST_ACCOUNTS_FORBIDDEN_DIR'])]
+ROLE_RE = re.compile(r'^[a-z0-9][a-z0-9-]{0,39}$')
+STATES = ('pending', 'created', 'verified', 'deleted')
+MASK = '********'
+
+
+def die(msg, code=2):
+    print(f'test-account: {msg}', file=sys.stderr)
+    sys.exit(code)
+
+
+def now():
+    return dt.datetime.now().astimezone().isoformat(timespec='seconds')
+
+
+def git(args, cwd):
+    try:
+        r = subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r
+
+
+def project_of(path):
+    """(key, main checkout path) for DIR; a worktree resolves to its main repository."""
+    path = os.path.realpath(os.path.expanduser(path or os.getcwd()))
+    if not os.path.isdir(path):
+        die(f'not a directory: {path}')
+    r = git(['rev-parse', '--path-format=absolute', '--git-common-dir'], path)
+    if r is not None and r.returncode == 0 and r.stdout.strip():
+        common = r.stdout.strip()
+        main = os.path.dirname(common) if os.path.basename(common) == '.git' else common
+    else:
+        main = path
+    key = re.sub(r'[^a-z0-9-]+', '-', os.path.basename(main.rstrip('/')).lower()).strip('-') or 'project'
+    return key, main
+
+
+def ensure_store():
+    os.makedirs(STORE, mode=0o700, exist_ok=True)
+    os.chmod(STORE, 0o700)
+
+
+@contextlib.contextmanager
+def locked():
+    ensure_store()
+    fd = os.open(os.path.join(STORE, '.lock'), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def write_private(path, text):
+    d = os.path.dirname(path) or '.'
+    fd, tmp = tempfile.mkstemp(dir=d, prefix='.tmp-')
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'w') as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    os.chmod(path, 0o600)
+
+
+def load(key, main=None):
+    p = os.path.join(STORE, f'{key}.json')
+    if os.path.exists(p):
+        with open(p) as f:
+            data = json.load(f)
+    else:
+        data = {'project': key, 'path': main, 'accounts': {}}
+    if main and not data.get('path'):
+        data['path'] = main
+    return data
+
+
+def save(data):
+    write_private(os.path.join(STORE, f"{data['project']}.json"), json.dumps(data, indent=2, ensure_ascii=False) + '\n')
+
+
+def config():
+    p = os.path.join(STORE, 'config.json')
+    if os.path.exists(p):
+        with open(p) as f:
+            return json.load(f)
+    return {}
+
+
+def gen_password(n=24):
+    # Unreserved URL characters only, so the URL-encoded form equals the password and redaction catches it.
+    alphabet = string.ascii_letters + string.digits
+    while True:
+        core = [secrets.choice(alphabet) for _ in range(n - 2)]
+        core.insert(secrets.randbelow(len(core) + 1), secrets.choice('-_.'))
+        core.insert(secrets.randbelow(len(core) + 1), secrets.choice(string.digits))
+        pw = ''.join(core)
+        if (any(c.islower() for c in pw) and any(c.isupper() for c in pw)
+                and any(c.isdigit() for c in pw)):
+            return pw
+
+
+def alias_for(key, role):
+    mailbox = config().get('mailbox', '')
+    if '@' not in mailbox:
+        die('no mailbox configured for +alias addresses: test-account config --mailbox <address your mail '
+            'connector reads>, or pass --email')
+    local, domain = mailbox.split('@', 1)
+    local = local.split('+', 1)[0]
+    return f'{local}+{key}-{role}@{domain}'
+
+
+def meta_line(role, a):
+    bits = [f'role={role}', f"email={a.get('email', '')}", f"host={a.get('host') or '-'}",
+            f"state={a.get('state', 'pending')}", f"created={a.get('created', '')}"]
+    if a.get('updated'):
+        bits.append(f"updated={a['updated']}")
+    if a.get('note'):
+        bits.append(f"note={a['note']}")
+    return '  '.join(bits)
+
+
+def need_role(role):
+    if not ROLE_RE.match(role or ''):
+        die(f'invalid role {role!r}: lowercase letters, digits and dashes (e.g. play-reviewer, e2e)')
+
+
+def get_account(args):
+    need_role(args.role)
+    key, main = project_of(args.project)
+    data = load(key, main)
+    a = data['accounts'].get(args.role)
+    if not a:
+        die(f'no test account {args.role!r} for project {key} (test-account add --role {args.role})', 3)
+    return key, data, a
+
+
+def cmd_add(args):
+    need_role(args.role)
+    key, main = project_of(args.project)
+    with locked():
+        data = load(key, main)
+        a = data['accounts'].get(args.role)
+        if a:
+            print(f'exists  project={key}  ' + meta_line(args.role, a))
+            return 0
+        email = args.email or alias_for(key, args.role)
+        if '@' not in email or any(c.isspace() for c in email):
+            die(f'invalid email {email!r}')
+        a = {'email': email, 'password': gen_password(), 'host': args.host or '', 'state': 'pending',
+             'created': now(), 'note': args.note or ''}
+        data['accounts'][args.role] = a
+        save(data)
+    print(f'added  project={key}  ' + meta_line(args.role, a))
+    print('next: create the user in the app with `test-account exec --role '
+          f'{args.role} -- <app command using $TEST_ACCOUNT_EMAIL / $TEST_ACCOUNT_PASSWORD>`, '
+          f'then `test-account state --role {args.role} --set verified`')
+    return 0
+
+
+def cmd_list(args):
+    ensure_store()
+    if args.all:
+        files = sorted(f for f in os.listdir(STORE) if f.endswith('.json') and f != 'config.json')
+        datas = []
+        for f in files:
+            with open(os.path.join(STORE, f)) as fh:
+                datas.append(json.load(fh))
+    else:
+        key, main = project_of(args.project)
+        datas = [load(key, main)]
+    shown = 0
+    for data in datas:
+        for role, a in sorted(data.get('accounts', {}).items()):
+            print(f"project={data['project']}  " + meta_line(role, a))
+            shown += 1
+    if not shown:
+        print('no test accounts')
+    return 0
+
+
+def redacting_copy(stream, out, secrets_out):
+    for raw in iter(stream.readline, b''):
+        line = raw.decode('utf-8', 'replace')
+        for s in secrets_out:
+            if s:
+                line = line.replace(s, MASK)
+        out.write(line)
+        out.flush()
+
+
+def cmd_exec(args):
+    cmd = args.cmd
+    if cmd and cmd[0] == '--':
+        cmd = cmd[1:]
+    if not cmd:
+        die('exec needs a command after --')
+    key, data, a = get_account(args)
+    env = dict(os.environ)
+    env.update({'TEST_ACCOUNT_EMAIL': a['email'], 'TEST_ACCOUNT_PASSWORD': a['password'],
+                'TEST_ACCOUNT_HOST': a.get('host', ''), 'TEST_ACCOUNT_ROLE': args.role,
+                'TEST_ACCOUNT_PROJECT': key})
+    secrets_out = [a['password']]
+    if a.get('previous_password'):
+        env['TEST_ACCOUNT_PREVIOUS_PASSWORD'] = a['previous_password']
+        secrets_out.append(a['previous_password'])
+    try:
+        p = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except OSError as e:
+        die(f'cannot run {cmd[0]}: {e}', 127)
+    try:
+        redacting_copy(p.stdout, sys.stdout, secrets_out)
+    finally:
+        rc = p.wait()
+    return rc
+
+
+def inside(path, root):
+    path, root = os.path.realpath(path), os.path.realpath(root)
+    return path == root or path.startswith(root.rstrip('/') + '/')
+
+
+def cmd_env_file(args):
+    out = os.path.abspath(os.path.expanduser(args.out))
+    if any(inside(out, d) for d in FORBIDDEN):
+        die('refused: a notes vault never holds credentials (note there only where they are)')
+    key, data, a = get_account(args)
+    d = os.path.dirname(out)
+    if not os.path.isdir(d):
+        die(f'directory does not exist: {d}')
+    top = git(['rev-parse', '--show-toplevel'], d)
+    if top is not None and top.returncode == 0:
+        ign = git(['check-ignore', '-q', out], d)
+        if ign is None or ign.returncode != 0:
+            die(f'refused: {out} is not ignored by git; add it to .gitignore first')
+    prefix = args.prefix
+    if not re.match(r'^[A-Z][A-Z0-9_]*$', prefix):
+        die(f'invalid prefix {prefix!r}')
+    text = (f"# test account {key}/{args.role} (test-account env-file, {now()})\n"
+            f"{prefix}EMAIL={a['email']}\n{prefix}PASSWORD={a['password']}\n{prefix}HOST={a.get('host', '')}\n")
+    write_private(out, text)
+    print(f'written  {out}  (0600; {prefix}EMAIL, {prefix}PASSWORD, {prefix}HOST)')
+    return 0
+
+
+def cmd_state(args):
+    if args.set not in STATES:
+        die(f'state must be one of {", ".join(STATES)}')
+    key, main = project_of(args.project)
+    need_role(args.role)
+    with locked():
+        data = load(key, main)
+        a = data['accounts'].get(args.role)
+        if not a:
+            die(f'no test account {args.role!r} for project {key}', 3)
+        a['state'] = args.set
+        a['updated'] = now()
+        if args.note:
+            a['note'] = args.note
+        save(data)
+    print(f'project={key}  ' + meta_line(args.role, a))
+    return 0
+
+
+def cmd_rotate(args):
+    key, main = project_of(args.project)
+    need_role(args.role)
+    with locked():
+        data = load(key, main)
+        a = data['accounts'].get(args.role)
+        if not a:
+            die(f'no test account {args.role!r} for project {key}', 3)
+        a['previous_password'] = a['password']
+        a['password'] = gen_password()
+        a['updated'] = now()
+        save(data)
+    print(f'rotated  project={key}  role={args.role}  (update it in the app with exec; the old one is kept as '
+          'TEST_ACCOUNT_PREVIOUS_PASSWORD until then)')
+    return 0
+
+
+def cmd_rm(args):
+    key, main = project_of(args.project)
+    need_role(args.role)
+    with locked():
+        data = load(key, main)
+        if args.role not in data['accounts']:
+            die(f'no test account {args.role!r} for project {key}', 3)
+        del data['accounts'][args.role]
+        save(data)
+    print(f'removed  project={key}  role={args.role}')
+    return 0
+
+
+def cmd_show(args):
+    if not (sys.stdin.isatty() and sys.stdout.isatty()) and os.environ.get('TEST_ACCOUNT_ALLOW_SHOW') != 'selftest':
+        die('show prints a password: only in the developer\'s own terminal. Agents use exec or env-file.', 4)
+    key, data, a = get_account(args)
+    print(f"project:  {key}\nrole:     {args.role}\nhost:     {a.get('host') or '-'}\n"
+          f"email:    {a['email']}\npassword: {a['password']}")
+    return 0
+
+
+def cmd_copy(args):
+    key, data, a = get_account(args)
+    value = a['password'] if args.field == 'password' else a['email']
+    for tool in (['wl-copy'], ['xclip', '-selection', 'clipboard'], ['xsel', '--clipboard', '--input']):
+        if shutil.which(tool[0]):
+            try:
+                subprocess.run(tool, input=value.encode(), check=True, timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                continue
+            print(f'copied {args.field} of {key}/{args.role} to the clipboard')
+            return 0
+    die('no clipboard tool (wl-copy, xclip, xsel)', 5)
+
+
+def cmd_config(args):
+    with locked():
+        cfg = config()
+        if args.mailbox:
+            if '@' not in args.mailbox:
+                die('invalid mailbox')
+            cfg['mailbox'] = args.mailbox
+            write_private(os.path.join(STORE, 'config.json'), json.dumps(cfg, indent=2) + '\n')
+    print(json.dumps(cfg))
+    return 0
+
+
+def self_test():
+    failures = 0
+    passed = 0
+
+    def check(name, cond, detail=''):
+        nonlocal failures, passed
+        if cond:
+            passed += 1
+        else:
+            failures += 1
+            print(f'FAIL {name} {detail}')
+
+    me = os.path.abspath(__file__)
+    with tempfile.TemporaryDirectory() as tmp:
+        store = os.path.join(tmp, 'store')
+        repo = os.path.join(tmp, 'My_App')
+        os.makedirs(repo)
+        subprocess.run(['git', 'init', '-q', repo], check=True)
+        with open(os.path.join(repo, '.gitignore'), 'w') as f:
+            f.write('.env.e2e\n')
+        vault = os.path.join(tmp, 'notes-vault')
+        os.makedirs(vault)
+        env = dict(os.environ, TEST_ACCOUNTS_DIR=store, TEST_ACCOUNTS_FORBIDDEN_DIR=vault)
+        env.pop('TEST_ACCOUNT_ALLOW_SHOW', None)
+
+        def run(*a, cwd=repo, extra=None, inp=None):
+            e = dict(env, **(extra or {}))
+            return subprocess.run([sys.executable, me, *a], cwd=cwd, env=e, capture_output=True, text=True,
+                                  input=inp, timeout=60)
+
+        r = run('add', '--role', 'e2e')
+        check('add without mailbox fails clearly', r.returncode != 0 and 'mailbox' in r.stderr, r.stderr)
+        r = run('config', '--mailbox', 'someone@example.org')
+        check('config mailbox', r.returncode == 0)
+        check('store dir 0700', oct(os.stat(store).st_mode & 0o777) == '0o700')
+        r = run('add', '--role', 'e2e', '--host', 'app.test')
+        check('add ok', r.returncode == 0, r.stderr)
+        check('alias email', 'email=someone+my-app-e2e@example.org' in r.stdout, r.stdout)
+        pf = os.path.join(store, 'my-app.json')
+        check('project file exists', os.path.exists(pf))
+        check('project file 0600', oct(os.stat(pf).st_mode & 0o777) == '0o600')
+        with open(pf) as f:
+            pw = json.load(f)['accounts']['e2e']['password']
+        check('password generated', len(pw) == 24 and re.match(r'^[A-Za-z0-9._-]+$', pw) is not None)
+        check('add does not print password', pw not in r.stdout + r.stderr)
+        r2 = run('add', '--role', 'e2e')
+        with open(pf) as f:
+            pw2 = json.load(f)['accounts']['e2e']['password']
+        check('add idempotent', r2.returncode == 0 and 'exists' in r2.stdout and pw2 == pw)
+        r = run('add', '--role', 'play-reviewer', '--email', 'reviewer@my-app.example', '--host', 'my-app.example')
+        check('add explicit email', r.returncode == 0 and 'email=reviewer@my-app.example' in r.stdout)
+        r = run('add', '--role', 'Bad Role')
+        check('invalid role refused', r.returncode != 0)
+        r = run('list')
+        check('list shows both', 'role=e2e' in r.stdout and 'role=play-reviewer' in r.stdout)
+        check('list hides password', pw not in r.stdout)
+        r = run('list', '--all', cwd=tmp)
+        check('list --all', 'project=my-app' in r.stdout and pw not in r.stdout)
+        # a worktree resolves to the main checkout
+        subprocess.run(['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q',
+                        '--allow-empty', '-m', 'init'], check=True, env=dict(os.environ, GIT_CONFIG_NOSYSTEM='1'))
+        wt = os.path.join(tmp, 'wt')
+        subprocess.run(['git', '-C', repo, 'worktree', 'add', '-q', '--detach', wt], check=True)
+        r = run('list', cwd=wt)
+        check('worktree resolves to main project', 'role=e2e' in r.stdout, r.stdout + r.stderr)
+        r = run('exec', '--role', 'e2e', '--', 'sh', '-c',
+                'echo "u=$TEST_ACCOUNT_EMAIL"; echo "p=$TEST_ACCOUNT_PASSWORD"; '
+                'test "${#TEST_ACCOUNT_PASSWORD}" = 24 && echo LEN_OK; exit 7')
+        check('exec injects email', 'u=someone+my-app-e2e@example.org' in r.stdout, r.stdout)
+        check('exec redacts password', pw not in r.stdout and f'p={MASK}' in r.stdout, r.stdout)
+        check('exec passes the real value', 'LEN_OK' in r.stdout)
+        check('exec keeps exit code', r.returncode == 7, str(r.returncode))
+        r = run('exec', '--role', 'nope', '--', 'true')
+        check('exec unknown role', r.returncode == 3)
+        r = run('env-file', '--role', 'e2e', '--out', os.path.join(repo, 'not-ignored.env'))
+        check('env-file refuses non-ignored path', r.returncode != 0 and 'not ignored' in r.stderr, r.stderr)
+        out = os.path.join(repo, '.env.e2e')
+        r = run('env-file', '--role', 'e2e', '--out', out, '--prefix', 'E2E_')
+        check('env-file ok', r.returncode == 0, r.stderr)
+        check('env-file 0600', os.path.exists(out) and oct(os.stat(out).st_mode & 0o777) == '0o600')
+        with open(out) as f:
+            body = f.read()
+        check('env-file content', f'E2E_PASSWORD={pw}' in body and 'E2E_EMAIL=someone+my-app-e2e' in body)
+        check('env-file does not print password', pw not in r.stdout + r.stderr)
+        r = run('env-file', '--role', 'e2e', '--out', os.path.join(vault, 'x.env'), cwd=tmp)
+        check('env-file refuses vault', r.returncode != 0 and 'vault' in r.stderr, r.stderr)
+        r = run('show', '--role', 'e2e', inp='')
+        check('show refuses without a terminal', r.returncode == 4 and pw not in r.stdout + r.stderr)
+        r = run('show', '--role', 'e2e', extra={'TEST_ACCOUNT_ALLOW_SHOW': 'selftest'})
+        check('show prints for the developer', pw in r.stdout)
+        r = run('state', '--role', 'e2e', '--set', 'verified', '--note', 'created with app:create-test-user')
+        check('state verified', r.returncode == 0 and 'state=verified' in r.stdout)
+        r = run('state', '--role', 'e2e', '--set', 'weird')
+        check('state invalid refused', r.returncode != 0)
+        r = run('rotate', '--role', 'e2e')
+        with open(pf) as f:
+            acc = json.load(f)['accounts']['e2e']
+        check('rotate changes password', r.returncode == 0 and acc['password'] != pw and acc['previous_password'] == pw)
+        check('rotate does not print', acc['password'] not in r.stdout and pw not in r.stdout)
+        r = run('exec', '--role', 'e2e', '--', 'sh', '-c',
+                'echo "n=$TEST_ACCOUNT_PASSWORD o=$TEST_ACCOUNT_PREVIOUS_PASSWORD"')
+        check('exec redacts old and new after rotate', f'n={MASK} o={MASK}' in r.stdout, r.stdout)
+        r = run('rm', '--role', 'play-reviewer')
+        check('rm', r.returncode == 0 and 'role=play-reviewer' not in run('list').stdout)
+    print(f'self-test: {passed} ok, {failures} failures')
+    return 1 if failures else 0
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] == 'self-test':
+        return self_test()
+    ap = argparse.ArgumentParser(prog='test-account', description=__doc__.split('\n')[0])
+    sub = ap.add_subparsers(dest='sub', required=True)
+
+    def with_role(p):
+        p.add_argument('--role', required=True)
+        p.add_argument('--project')
+        return p
+
+    p = with_role(sub.add_parser('add'))
+    p.add_argument('--host')
+    g = p.add_mutually_exclusive_group()
+    g.add_argument('--email')
+    g.add_argument('--alias', action='store_true')
+    p.add_argument('--note')
+    p.set_defaults(fn=cmd_add)
+    p = sub.add_parser('list')
+    p.add_argument('--project')
+    p.add_argument('--all', action='store_true')
+    p.set_defaults(fn=cmd_list)
+    p = with_role(sub.add_parser('exec'))
+    p.add_argument('cmd', nargs=argparse.REMAINDER)
+    p.set_defaults(fn=cmd_exec)
+    p = with_role(sub.add_parser('env-file'))
+    p.add_argument('--out', required=True)
+    p.add_argument('--prefix', default='TEST_ACCOUNT_')
+    p.set_defaults(fn=cmd_env_file)
+    p = with_role(sub.add_parser('state'))
+    p.add_argument('--set', required=True)
+    p.add_argument('--note')
+    p.set_defaults(fn=cmd_state)
+    p = with_role(sub.add_parser('rotate'))
+    p.set_defaults(fn=cmd_rotate)
+    p = with_role(sub.add_parser('rm'))
+    p.set_defaults(fn=cmd_rm)
+    p = with_role(sub.add_parser('show'))
+    p.set_defaults(fn=cmd_show)
+    p = with_role(sub.add_parser('copy'))
+    p.add_argument('--field', choices=('password', 'email'), default='password')
+    p.set_defaults(fn=cmd_copy)
+    p = sub.add_parser('config')
+    p.add_argument('--mailbox')
+    p.set_defaults(fn=cmd_config)
+    args = ap.parse_args()
+    return args.fn(args)
+
+
+if __name__ == '__main__':
+    sys.exit(main() or 0)

@@ -21,7 +21,7 @@ class Contracts(Sandbox):
         return code, out.getvalue()
 
     def test_every_contract_names_an_installed_piece(self):
-        dests = {f.dest for m in modules.load_many(['openspec', 'core']) for f in m.files}
+        dests = {f.dest for m in modules.load_many(modules.DEFAULT_MODULES) for f in m.files}
         for c in contracts.load_all():
             self.assertIn(c['dest'], dests, c['piece'])
             self.assertTrue(c['probes'], c['piece'])
@@ -58,7 +58,7 @@ class Contracts(Sandbox):
 class Drift(Sandbox):
     def rows(self, override: bool = False) -> dict[str, str]:
         ov = overlay.load(self.override if override else None)
-        return dict(drift.classify(self.target, modules.load_many(['openspec', 'core']), ov))
+        return dict(drift.classify(self.target, modules.load_many(modules.DEFAULT_MODULES), ov))
 
     def test_states(self):
         self.assertEqual(self.run_cli('install')[0], 0)
@@ -105,7 +105,7 @@ class Equivalence(Sandbox):
 
     def summary(self, live: Path, override: bool = False) -> dict:
         ov = overlay.load(self.override if override else None)
-        return equivalence.summarise(equivalence.compare(live, modules.load_many(['openspec', 'core']), ov))
+        return equivalence.summarise(equivalence.compare(live, modules.load_many(modules.DEFAULT_MODULES), ov))
 
     def test_fresh_install_is_equivalent(self):
         s = self.summary(self.live_copy())

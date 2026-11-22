@@ -24,7 +24,7 @@ def snapshot(root: Path) -> dict[str, bytes]:
 
 
 class Sandbox(unittest.TestCase):
-    modules = 'openspec,core'
+    modules = 'openspec,core,devtools'
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix='toolkit-test-'))

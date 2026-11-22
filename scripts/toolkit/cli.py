@@ -12,7 +12,7 @@ from .overlay import OverrideError
 from .paths import REPO_ROOT, resolve_override, resolve_target
 from .settings_merge import SettingsError
 
-DEFAULT_MODULES = ['openspec', 'core']
+from .modules import DEFAULT_MODULES  # noqa: E402
 
 
 def toolkit_version() -> str:

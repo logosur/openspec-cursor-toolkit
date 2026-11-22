@@ -26,6 +26,7 @@ from pathlib import Path
 
 from . import apply as apply_mod, modules, overlay, plan as plan_mod, settings_merge
 from .drift import scope_files
+from .modules import DEFAULT_MODULES
 from .paths import REPO_ROOT, resolve_override
 
 
@@ -167,7 +168,7 @@ def summarise(result: dict) -> dict:
 def cmd_equivalence(args) -> int:
     live = Path(args.live).expanduser().resolve()
     ov = overlay.load(resolve_override(args.override))
-    mods = modules.load_many(args.modules.split(',') if args.modules else (ov.modules or ['openspec', 'core']))
+    mods = modules.load_many(args.modules.split(',') if args.modules else (ov.modules or DEFAULT_MODULES))
     result = compare(live, mods, ov)
     summary = summarise(result)
     for rel, cls, why in result['rows'] + [(f'[hook] {h}', c, w) for h, c, w in result['hooks']]:

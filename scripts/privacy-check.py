@@ -8,8 +8,10 @@ Two layers of patterns:
 * a private denylist (real names of people, clients, projects, hosts...), read from the
   local override and never committed: $CLAUDE_TOOLKIT_OVERRIDE/privacy-denylist.txt,
   else ~/.config/claude-toolkit/privacy-denylist.txt. Every guillemet quote of five
-  words or more found in the override's text files is denied too, so a literal quote
-  kept in a private rule cannot leak into the public version of that rule.
+  words or more found in the override's text files (files/, append/, archive/) is
+  denied too, so a literal quote kept in a private rule cannot leak into the public
+  version of that rule. Quotes already present in the published baseline
+  (--quotes-baseline, default origin/main and origin/develop) are generic phrases and are ignored.
 
 Scopes: the working tree (tracked + untracked, not ignored) by default; --staged for
 the index; --message FILE for a commit message; --range A..B for the messages and
@@ -122,9 +124,9 @@ def load_private(denylist: Path | None, override: Path) -> tuple[list[tuple[int,
             else:
                 terms.append((n, re.compile(r'(?<![A-Za-z0-9])' + re.escape(line) + r'(?![A-Za-z0-9])', re.IGNORECASE)))
     quotes: set[str] = set()
-    files_dir = override / 'files'
-    if files_dir.is_dir():
-        for path in files_dir.rglob('*'):
+    for path in (p for sub in ('files', 'append', 'archive') if (override / sub).is_dir()
+                 for p in (override / sub).rglob('*')):
+        if True:
             if not path.is_file() or path.suffix not in TEXT_SUFFIXES:
                 continue
             try:
@@ -138,6 +140,20 @@ def load_private(denylist: Path | None, override: Path) -> tuple[list[tuple[int,
                 if len(q.split()) >= QUOTE_MIN_WORDS:
                     quotes.add(q)
     return terms, sorted(quotes)
+
+
+def published_text(root: Path, rev: str) -> str:
+    """Normalized text of every file at REV (the already-published baseline), or '' if REV is unknown."""
+    try:
+        names = git(root, 'ls-tree', '-r', '-z', '--name-only', rev).split('\0')
+    except subprocess.CalledProcessError:
+        return ''
+    chunks = []
+    for name in filter(None, names):
+        blob = subprocess.run(['git', '-C', str(root), 'show', f'{rev}:{name}'], capture_output=True).stdout
+        if len(blob) <= MAX_BYTES and is_text(blob):
+            chunks.append(normalize(blob.decode('utf-8', 'replace')))
+    return '\n'.join(chunks)
 
 
 def allowed(entries: list[dict], where: str, rule: str, text: str) -> bool:
@@ -266,6 +282,8 @@ def main(argv: list[str] | None = None) -> int:
     scope.add_argument('--range', metavar='A..B')
     ap.add_argument('--denylist', metavar='FILE')
     ap.add_argument('--override', metavar='DIR')
+    ap.add_argument('--quotes-baseline', default='origin/main,origin/develop', metavar='REV[,REV]',
+                    help='ignore private quotes already present in these published revisions ("" to disable)')
     ap.add_argument('--require-private', action='store_true',
                     help='exit 2 when no private denylist is available (local use before a commit)')
     args = ap.parse_args(argv)
@@ -277,6 +295,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f'privacy-check: no private denylist at {denylist}', file=sys.stderr)
         return 2
     terms, quotes = load_private(denylist, override)
+    if quotes and args.quotes_baseline:
+        baseline = '\n'.join(published_text(root, rev) for rev in args.quotes_baseline.split(',') if rev)
+        quotes = [q for q in quotes if q not in baseline]
     checker = Checker(load_patterns(root), load_allowlist(root), terms, quotes)
 
     if args.message:

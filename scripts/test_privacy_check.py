@@ -39,7 +39,7 @@ class Repo:
     def run(self, *extra: str) -> tuple[int, str]:
         out = io.StringIO()
         with redirect_stdout(out):
-            code = pc.main(['--root', str(self.root), '--override', str(self.override), *extra])
+            code = pc.main(['--root', str(self.root), '--override', str(self.override), '--quotes-baseline', '', *extra])
         return code, out.getvalue()
 
     def close(self):
@@ -188,6 +188,16 @@ class PrivateLayer(unittest.TestCase):
         code, out = self.repo.run()
         self.assertEqual(code, 1)
         self.assertIn('[private-quote]', out)
+
+    def test_quote_already_published_is_ignored(self):
+        git = ['git', '-C', str(self.repo.root), '-c', 'user.name=t', '-c', 'user.email=t@example.com']
+        self.repo.write('old.md', 'example phrase: «show me what we just applied here»\n')
+        subprocess.run([*git, 'add', '.'], check=True)
+        subprocess.run([*git, 'commit', '-qm', 'base'], check=True)
+        subprocess.run([*git, 'tag', 'published'], check=True)
+        self.repo.write('archive/x.md', '«show me what we just applied here»\n', base=self.repo.override)
+        self.assertEqual(self.repo.run()[0], 1)
+        self.assertEqual(self.repo.run('--quotes-baseline', 'published')[0], 0)
 
     def test_require_private_without_denylist_exits_2(self):
         self.assertEqual(self.repo.run('--require-private')[0], 2)

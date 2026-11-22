@@ -70,4 +70,4 @@ Not done in this change: none of 8.1–8.6 was started. The unit stays in the de
 
 - [x] 9.1 `README.md` (English): global toolkit, Claude Code default, install, override, privacy, sync, migration, Cursor as secondary, what is left out and why; verify the privacy guard and the validator's README coverage.
 - [x] 9.2 `CLAUDE.md` of the repo: new invariants (two sources, modules, override outside the repo, privacy guard before every commit, validator); verify privacy guard 0.
-- [ ] 9.3 Final run: all tests, validator, privacy guard on tree and on the branch range; commits on the change branch only (integration and push wait for the developer's security audit).
+- [x] 9.3 Final run: all tests, validator, privacy guard on tree and on the branch range; commits on the change branch only (integration and push wait for the developer's security audit).

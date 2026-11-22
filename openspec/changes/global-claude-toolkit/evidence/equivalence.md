@@ -46,3 +46,10 @@ Installed from the toolkit: 40 files; from the override: 232.
 - 43 files the toolkit also provides differ from the live copy without being older versions of it. The
   override keeps the live copy for each of them, so an install changes nothing; reconciling them is
   done later, file by file, with `drift` and `pull`.
+
+## Clean-clone check (task 9.3)
+
+A fresh `git clone` of the branch, with a throwaway HOME: the installer, validator and privacy test
+suites pass, the validator reports 0 errors, `./install.sh install --override ''` installs the four
+modules, `verify` runs 22 probes with 0 failures, and every installed hook has mode 0755 (the
+manifest sets it; the repository copy of the authorship gate is not executable).

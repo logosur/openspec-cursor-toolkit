@@ -33,6 +33,26 @@ def load(piece: str, defaults: dict | None = None) -> dict:
     return values
 
 
+def _same_shape(value, default) -> bool:
+    if isinstance(default, bool):
+        return isinstance(value, bool)
+    if isinstance(default, (int, float)):
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
+    if isinstance(default, str):
+        return isinstance(value, str) and (bool(value.strip()) or not default)
+    if isinstance(default, list):
+        return isinstance(value, list) and all(isinstance(v, str) and v.strip() for v in value)
+    return isinstance(value, type(default))
+
+
+def load_checked(piece: str, defaults: dict) -> dict:
+    """load() for pieces where a wrong value could widen a permission (an empty marker matches every
+    text): only known keys count, and a value of the wrong shape keeps the code's default."""
+    values = load(piece)
+    return {key: values[key] if key in values and _same_shape(values[key], default) else default
+            for key, default in defaults.items()}
+
+
 def main(argv: list[str]) -> int:
     if len(argv) >= 3 and argv[0] == 'get':
         default = argv[3] if len(argv) > 3 else ''

@@ -21,3 +21,7 @@ jobs:
         run: python -m unittest scripts/test_validate_toolkit.py
       - name: Validate catalog
         run: python scripts/validate-toolkit.py
+      - name: Privacy check tests
+        run: python -m unittest scripts/test_privacy_check.py
+      - name: Privacy check (generic patterns)
+        run: python scripts/privacy-check.py

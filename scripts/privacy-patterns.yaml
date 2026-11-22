@@ -1,0 +1,59 @@
+# Generic privacy patterns, read by scripts/privacy-check.py.
+#
+# This file is public, so it holds only GENERIC shapes of personal data. Names of real
+# people, clients, projects, hosts or quotes never go here: they live in the private
+# denylist of the local override (see README.md -> "Privacy check").
+#
+# Each pattern: id, regex (Python, case-insensitive unless case_sensitive: true), why,
+# and optional `allow` regexes: a match that also matches one of them is not a finding.
+
+patterns:
+  - id: ipv4-public
+    regex: '(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])'
+    why: A public IPv4 address usually names a real server.
+    allow:
+      - '^(?:0|10|127)\.'
+      - '^169\.254\.'
+      - '^172\.(?:1[6-9]|2\d|3[01])\.'
+      - '^192\.168\.'
+      - '^192\.0\.2\.'
+      - '^198\.51\.100\.'
+      - '^203\.0\.113\.'
+      - '^255\.'
+  - id: email
+    regex: '[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}'
+    why: An email address identifies a person or an account.
+    allow:
+      - '@(?:[\w-]+\.)*example\.(?:com|org|net)$'
+      - '@[\w.-]+\.(?:example|test|invalid|localhost)$'
+      - '^noreply@anthropic\.com$'
+      - '@users\.noreply\.github\.com$'
+  - id: uuid
+    regex: '\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b'
+    why: A UUID may be a real account, organization or session id.
+    synthetic_ok: true   # low-entropy ids (<= 4 distinct hex digits) are test fixtures
+  - id: home-path
+    regex: '/(?:home|Users)/(?!user\b|USER\b|runner\b|<|\$|\{|\*)[A-Za-z_][\w.-]*'
+    why: An absolute home path names a real user account; use ~ or $HOME.
+  - id: dated-order
+    regex: '\b(?:[Oo]rden(?:es)?|[Óó]rdenes)\s+(?:literal(?:es)?\s+)?del?\s+(?:desarrollador\s+)?(?:del?\s+)?20\d\d-\d\d-\d\d'
+    why: A dated order quotes a specific person's instructions; state the rule neutrally.
+  - id: dated-order-en
+    regex: "\\b(?:developer'?s|user'?s)\\s+orders?\\s+(?:of\\s+)?20\\d\\d-\\d\\d-\\d\\d"
+    why: A dated order quotes a specific person's instructions; state the rule neutrally.
+  - id: secret-anthropic
+    regex: 'sk-ant-[A-Za-z0-9_-]{10,}'
+    case_sensitive: true
+    why: Anthropic API key.
+  - id: secret-github
+    regex: '\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}'
+    case_sensitive: true
+    why: GitHub token.
+  - id: secret-aws
+    regex: '\bAKIA[0-9A-Z]{16}\b'
+    case_sensitive: true
+    why: AWS access key id.
+  - id: private-key
+    regex: '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+    case_sensitive: true
+    why: Private key material.

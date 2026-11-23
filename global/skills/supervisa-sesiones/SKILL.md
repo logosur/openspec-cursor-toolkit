@@ -36,6 +36,9 @@ sesión pueda hacer dentro del alcance.** Antes de quedarte quieta recorres, por
    seguir se aparca con lo que comprobaste:
    `$L backlog --session <id> --park <change> --as tercero|limite-duro|protegido|superado --why "…"`. Fuera del alcance
    o sin autorización es `protegido`: no lo empiezas. Si solo una parte espera, se hace el resto.
+   Una casilla de `tasks.md` la marca quien hace la tarea, en su misma rama, y llega con su merge. Lo pides en el
+   encargo y lo compruebas tras integrar: una casilla abierta de trabajo ya integrado se la mandas marcar a un
+   subagente (no editas tú). Lo que no se hizo se queda sin marcar y se aparca.
 4. **La meta escrita del proyecto** (CLAUDE.md, README, registro de decisiones). Ordena el trabajo del alcance. Un paso
    que lo amplía se propone en `ask-queue`, no se empieza.
 
@@ -72,6 +75,8 @@ $L acquire --session <id de get_session "self"> --title "<título>" --registry "
 - `0 ACQUIRED` sigue; `0 RESUMED` reanuda su registro; `3 HELD`: hay otra supervisora y esta sesión no supervisa;
   `4 STALE` y `2`: la tabla de `reference/arranque.md`. Después, `$L beat --session <id> --skill-seen`.
 - Latido en cada fase y ronda: `$L beat --session <id> --phase <F> --round <n>`.
+- Para ver tu propio cerrojo: `$L status --session <id>`. Dice `MINE` si es tuyo; `HELD` es siempre el de otra
+  supervisora, y sin `--session` cualquier cerrojo vivo sale como `HELD`.
 - **El cerrojo se conserva al acabar un ciclo**: quedas de guardia. `$L release` solo si el desarrollador termina la
   supervisión o la pasas a otra por orden suya; se niega (6) mientras quede abierta una sesión del proyecto.
 - Nunca se toma el cerrojo a mano, se para otra supervisora ni se borra su cerrojo.
@@ -130,8 +135,12 @@ esfuerzo al lanzar y los compruebas con `get_session`. A una sesión que ya exis
   (`--closer <su id>`) y las que pida el alcance. Solo `Started session` es una sesión abierta.
 - **La sesión de cierre** verifica lo terminado mientras tú sigues: tiene su vigilante (`$L wait-closer`). Sin ella
   viva, F4b es tuyo. Su encargo está en `reference/f4b-cierre-de-sesiones.md`.
-- Si una sesión no arranca, no se le pide un clic al desarrollador: subagentes (`Agent`) o una sesión ociosa del
-  proyecto, sin ampliar lo que pueden hacer.
+- **Si el turno no es del desarrollador** (te arrancó o te reanudó otra sesión, una rutina o un aviso), la app niega
+  `start_session`. No se reintenta ni se rodea, y no paras: el trabajo va a subagentes (`Agent`) o a una sesión ociosa
+  del proyecto, F4b es tuyo, las preguntas esperan en `ask-queue` y lo anotas en el registro («sin sesión de preguntas
+  ni de cierre: turno ajeno»). Las dos sesiones se abren en el primer turno que él escriba en esta sesión.
+- Si una sesión no arranca por otro motivo, tampoco se le pide un clic al desarrollador: subagentes o una sesión
+  ociosa del proyecto, sin ampliar lo que pueden hacer.
 - **No subes permisos.** Una sesión nueva hereda el modo que el desarrollador eligió para esta, o uno más bajo; las que
   existían siguen en el suyo. Arrancar sesiones sin diálogos de permiso es el módulo opcional `sessions`, que elige el
   desarrollador. Ningún modo levanta un límite duro.

@@ -324,6 +324,8 @@ def cmd_self_test(args):
     check('acquire: other session, fresh -> HELD, exit 3', r.returncode == 3 and r.stdout.startswith('HELD ') and 'heartbeat_age_s=' in r.stdout)
     r = run('status', '--dir', repo)
     check('status: HELD line has session and title', r.stdout.startswith('HELD ') and 'session=A' in r.stdout and 'title=first' in r.stdout)
+    check('status --session: the owner reads MINE for its own lock', run('status', '--dir', repo, '--session', 'A').stdout.startswith('MINE '))
+    check('status --session: another session still reads HELD', run('status', '--dir', repo, '--session', 'B').stdout.startswith('HELD '))
     # work mode: normal by default, publish-first only with the developer's order, shown on the status line
     check('mode: default is normal', run('mode', '--dir', repo, '--get').stdout.strip() == 'normal'
           and 'mode=' not in r.stdout)
@@ -553,14 +555,24 @@ def cmd_self_test(args):
     def cli(sid, **extra):
         put(sessions_dir, sid + '.json', dict({'pid': me, 'cwd': repo, 'hostSessionId': sid, 'name': sid, 'status': 'idle'}, **extra))
 
-    def waiting(*extra, timeout='6', settle=True):
+    def waiting(*extra, timeout='6', settle=True, hold=False):
+        """`hold=True`: the watcher takes its first snapshot and then polls nothing until `release(pr)`, so that a
+        test that makes several changes gets all of them in one poll however slow the machine is."""
         ready = os.path.join(tmp, f'ready-{time.monotonic_ns()}')
+        wait_env = dict(env, SUPERVISOR_WAIT_READY=ready)
+        if hold:
+            wait_env['SUPERVISOR_WAIT_HOLD'] = ready + '.hold'
+            open(ready + '.hold', 'w').close()
         pr = subprocess.Popen([sys.executable, runtime.ENTRY, 'wait', '--dir', repo, '--interval', '0.2', '--timeout', timeout, *extra],
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=dict(env, SUPERVISOR_WAIT_READY=ready))
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=wait_env)
+        pr.hold_file = ready + '.hold' if hold else None
         limit = time.monotonic() + 20
         while settle and not os.path.exists(ready) and pr.poll() is None and time.monotonic() < limit:
             time.sleep(0.02)  # a change made before its first snapshot would be part of the baseline
         return pr
+
+    def release(pr):
+        os.remove(pr.hold_file)
 
     def finish(pr):
         out, err = pr.communicate(timeout=20)
@@ -570,7 +582,7 @@ def cmd_self_test(args):
         fixture(sid)
     cli('local_gone')
     cli('local_status')
-    pr = waiting('--exclude', 'local_excl')
+    pr = waiting('--exclude', 'local_excl', timeout='20', hold=True)
     cli('local_gone', pid=dead.pid)
     os.remove(os.path.join(app_dir, 'local_vanish.json'))
     cli('local_status', status='busy')
@@ -579,6 +591,7 @@ def cmd_self_test(args):
     fixture('local_crash', queryCrashes=[{'at': 1}])
     fixture('local_new')
     fixture('local_excl')
+    release(pr)
     code, lines = finish(pr)
     check('wait: exit 0 on events', code == 0)
     check('wait: NEW', 'NEW local_new' in lines)
@@ -618,9 +631,12 @@ def cmd_self_test(args):
             os.remove(lock_file)
 
     def timed(*extra, timeout='8', settle=True, mutate=None):
-        pr = waiting(*extra, timeout=timeout, settle=settle)
+        held = bool(mutate) and bool(settle)
+        pr = waiting(*extra, timeout=timeout, settle=settle, hold=held)
         if mutate:
             mutate()
+        if held:
+            release(pr)
         return finish(pr)
 
     reset()
@@ -1334,6 +1350,23 @@ def cmd_self_test(args):
     check('hook: unknown session -> empty output', r.returncode == 0 and r.stdout == '')
     r = hook(stop(background_tasks=[armed_task]))
     check('hook: Stop with a running `wait --owner` task -> nothing', r.returncode == 0 and r.stdout == '')
+    via_variable = dict(armed_task, description='vigilante',
+                        command='L=~/.claude/scripts/supervisor-lock; $L wait --owner local_sup --guard --timeout 21600')
+    check('hook: the watcher armed as the skill writes it (`$L wait`) counts as armed',
+          hook(stop(background_tasks=[via_variable])).stdout == '')
+    closer_task = dict(armed_task, description='cierre',
+                       command='~/.claude/scripts/supervisor-lock wait-closer --session local_sup --timeout 600')
+    check('hook: `wait-closer` is not the supervisor\'s watcher -> blocked',
+          'sin vigilante' in hook(stop(background_tasks=[closer_task])).stdout)
+    wrapped = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', 'supervisor-lock', 'wait', '--owner', 'local_sup'])
+    try:
+        check('hook: a watcher armed through a wrapper (the task does not name the script, the process does) counts',
+              hook(stop(background_tasks=[dict(armed_task, description='w', command='tk L wait --owner local_sup')])).stdout == '')
+    finally:
+        wrapped.kill()
+        wrapped.wait()
+    check('hook: background tasks without a watcher and no watcher process -> blocked',
+          'sin vigilante' in hook(stop(background_tasks=[dict(armed_task, description='x', command='sleep 600')])).stdout)
 
     # 7a. finished sessions: `closable`, `hold`, the cache written by `wait --owner`, the Stop block.
     # 7a-7a3 run with archiving authorised in config (archive_preauthorised); the default policy is checked after 7a3.

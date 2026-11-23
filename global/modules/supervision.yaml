@@ -1,8 +1,9 @@
 name: supervision
 summary: >-
-  Supervision of the sessions of a project on one machine: a per-project queue for the decisions only
-  the developer can take, the hook that presents each one in the session it belongs to, and the gate
-  that keeps a session from messaging sessions of other projects.
+  Supervision of the sessions of a project on one machine: the session supervisor (supervisor-lock: one
+  live supervisor per project, its census, watcher, question gate and Stop hook), a per-project queue for
+  the decisions only the developer can take, the hook that presents each one in the session it belongs
+  to, and the gate that keeps a session from messaging sessions of other projects.
 depends: [core]
 requires:
   python: "3.10"
@@ -12,13 +13,25 @@ notes:
   - Opt-in, never a default. It is built for unattended work in the Claude desktop app.
   - No message exception is on until the supervision config piece lists it (message_exceptions).
   - account-switch and project-pause are not part of the toolkit; without them their exceptions and pauses do nothing.
-# Named by these pieces, absent from the toolkit; every caller works without them.
+  - >-
+    supervisor-lock works without its optional pieces (cloud-tests, session-nudge, handoff-guard, routines notify):
+    cloud actions say the provider is unavailable, and alerts, nudges and handoff checks do nothing.
+  - Deploys are never pre-authorised by default: only deploy_preauthorised in the supervision config says so.
+# Named by these pieces and not installed by this module or its dependencies: absent from the toolkit, or (heavy-job)
+# installed by another module. Every caller works without them.
 project_provided:
   - scripts/account-switch
   - scripts/project-pause
-  - scripts/supervisor-lock
+  - scripts/cloud-tests
+  - scripts/session-nudge
+  - scripts/handoff-guard
+  - scripts/routines
+  - scripts/heavy-job
 files:
   - {src: global/scripts/ask-queue, dest: scripts/ask-queue, mode: "0755"}
+  - {src: global/scripts/supervisor-lock, dest: scripts/supervisor-lock, mode: "0755"}
+  - {src: global/scripts/lib/supervisor/, dest: scripts/lib/supervisor/}
+  - {src: global/hooks/supervisor-stop-gate, dest: hooks/supervisor-stop-gate, mode: "0755"}
   - {src: global/hooks/ask-queue-prompt, dest: hooks/ask-queue-prompt, mode: "0755"}
   - {src: global/hooks/cross-project-message-gate, dest: hooks/cross-project-message-gate, mode: "0755"}
   - {src: global/rules/mensajes-entre-sesiones-solo-mismo-proyecto.md, dest: rules/mensajes-entre-sesiones-solo-mismo-proyecto.md}

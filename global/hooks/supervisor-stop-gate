@@ -1,0 +1,15 @@
+#!/bin/bash
+# Stop / SessionStart / PreToolUse (questions to the developer) hook, json on stdin. Reads stdin once and chains:
+#   1. `supervisor-lock hook` (supervisor and question gate): if it prints something, that decision wins;
+#   2. otherwise the optional `handoff-guard hook` (work handed back to the developer), when it is installed.
+# Each runs under `timeout 4`. Never fails the session: a missing or broken script prints nothing and exits 0.
+input=$(cat)
+out=""
+if [ -f "$HOME/.claude/scripts/supervisor-lock" ]; then
+  out=$(printf '%s' "$input" | timeout 4 python3 "$HOME/.claude/scripts/supervisor-lock" hook 2>/dev/null)
+fi
+if [ -z "$out" ] && [ -f "$HOME/.claude/scripts/handoff-guard" ]; then
+  out=$(printf '%s' "$input" | timeout 4 python3 "$HOME/.claude/scripts/handoff-guard" hook 2>/dev/null)
+fi
+[ -n "$out" ] && printf '%s' "$out"
+exit 0

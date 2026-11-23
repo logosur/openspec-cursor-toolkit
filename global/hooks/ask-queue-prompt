@@ -13,7 +13,7 @@ the questions at once, through its question mailbox, after the pre-production de
   mailbox `skip-mailbox`, every other session `skip-supervised` (whether or not the lock records a mailbox).
 - Without a live lock, only the items nobody has asked yet (open, or asked longer ago than ASK_QUEUE_REASK_H hours),
   and only where they belong (a session never asks the questions that another session queued):
-  - the project's questions session («Preguntas de la supervisión de <project>», not archived) gets all of them
+  - the project's questions session («Sesión de preguntas de <project>» or another configured title, not archived) gets all of them
     (`inject-questions:<n>`);
   - any other session gets only the items it queued itself, or a subagent of it did: the item's `session` or
     `host_session` is this session's CLI id or its app local_… id (`inject-own:<n>`);

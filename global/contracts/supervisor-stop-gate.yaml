@@ -1,0 +1,23 @@
+piece: supervisor-stop-gate
+dest: hooks/supervisor-stop-gate
+kind: hook
+event: Stop
+config: supervision
+probes:
+  - name: with no supervisor, Stop passes silently
+    stdin: {hook_event_name: Stop, session_id: probe}
+    exit: [0]
+    stdout: empty
+  - name: malformed input never fails the session
+    stdin_raw: not json
+    exit: [0]
+    stdout: empty
+  - name: an unrelated tool passes silently
+    stdin: {hook_event_name: PreToolUse, tool_name: Bash, session_id: probe, tool_input: {command: ls}}
+    exit: [0]
+    stdout: empty
+  - name: a corrupt config never fails the session
+    stdin: {hook_event_name: PreToolUse, tool_name: AskUserQuestion, session_id: probe, tool_input: {}}
+    corrupt_config: true
+    exit: [0]
+    stdout: empty-or-json

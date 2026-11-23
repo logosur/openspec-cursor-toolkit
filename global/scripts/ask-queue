@@ -5,7 +5,7 @@ A session that hits a hard limit (money, credentials, a fact only the developer 
 unauthorized deploy, deleting others' work, a model-family change) does not stop to ask: it registers the question
 here, with the default it will assume, and keeps working on everything that does not depend on it. The next time the
 developer writes in that project, the UserPromptSubmit hook `ask-queue-prompt` lists the open items, but only in the
-session that queued them or in the project's questions session («Preguntas de la supervisión de <project>»), never in
+session that queued them or in the project's questions session («Sesión de preguntas de <project>», the supervision config title), never in
 another session of the project.
 
 Each item records its origin: `session` (the CLI session id, from --session or CLAUDE_CODE_SESSION_ID) and

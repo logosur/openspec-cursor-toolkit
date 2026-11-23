@@ -34,7 +34,8 @@ def ask_gate_mailbox_closed_days():
 def recent_closed_mailboxes():
     """Questions-session ids (`local_…`) of locks released within ASK_GATE_MAILBOX_CLOSED_DAYS. Never raises.
 
-    The supervisor releases its lock once the final batch is sent, and the questions session presents it afterwards.
+    A supervisor that released its lock (the developer ordered it, or the project ended) may leave a questions session
+    that still has the final batch to present; this keeps recognising it for a while.
     Reads only the tail of each closed-history file whose mtime is inside the window; bad lines are skipped.
     """
     window = ask_gate_mailbox_closed_days() * 86400

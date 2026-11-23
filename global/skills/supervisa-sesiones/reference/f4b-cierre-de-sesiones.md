@@ -72,7 +72,8 @@ o una regla del proyecto lo impide. «Por si acaso» no vale. Una renovación di
 trabajo: lo que le queda pasa a **Trabajo en vuelo** con su encargo.
 
 Si un hook pide archivar una que no puedes (sin permiso o sin publicar), no la archivas: dices qué espera, lo apuntas
-para la tanda y sigues. Si `hold` la rechaza porque ya dio su veredicto, basta con esa nota.
+para la tanda y sigues. Sin permiso para archivar, la decisión va a `ask-queue add` y la sesión se aparca con
+`--reason "ask-queue <id>: …"` (el id de esa entrada); con eso el hook de fin de turno da el turno por bien cerrado.
 
 ## 1. Comprobaciones en disco
 

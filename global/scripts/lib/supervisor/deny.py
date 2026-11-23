@@ -34,8 +34,9 @@ def deny_question(owner, local):
             f'panel no vote radical por unanimidad, va a ask-queue para la tanda final, y sigues. Antes del final solo '
             f'va a la sesión de preguntas una decisión que el panel votó radical por unanimidad (ask-queue add '
             f'--radical --cost). La tanda final se manda una sola vez (F9), cuando todo está integrado (y, donde las '
-            f'reglas lo autorizan, desplegado en pre-producción) y has cerrado y archivado todas las sesiones hijas: la sesión de preguntas la presenta '
-            f'entera como diálogos de preguntas, sin informe aparte, y tú liberas el cerrojo. ')
+            f'reglas lo autorizan, desplegado en pre-producción) y cada sesión hija está archivada o, sin autorización para archivarla, aparcada con su '
+            f'decisión en ask-queue: la sesión de preguntas la presenta entera como diálogos de preguntas, sin informe '
+            f'aparte, y tú conservas el cerrojo de guardia (F9). ')
     tail = ' Termina el turno con la caja solo con el resumen, sin pregunta ni botones.'
     if session_roles.mailbox_alive(mailbox):
         reason = head + f'Para eso, la sesión de preguntas es {mailbox} (SendMessage).' + tail
@@ -95,7 +96,7 @@ def deny_absent(minutes, last_s=None, fresh=None):
         f'4) Si una supervisora lleva este proyecto, la duda que no puedas decidir va a decisiones_abiertas de tu '
         f'informe para ella, y sigues con lo demás. Al desarrollador se le pregunta todo a la vez al final, en la '
         f'sesión de preguntas, cuando no queda ninguna spec por implementar, todo está integrado (y, donde las reglas '
-        f'lo autorizan, desplegado en pre-producción) y la supervisora ha cerrado todas las sesiones hijas. '
+        f'lo autorizan, desplegado en pre-producción) y cada sesión hija está archivada o aparcada con su decisión en ask-queue. '
         f'En wrap_up, quita `ask` y `actions` y deja solo el recap.')
     return json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
                                               'permissionDecisionReason': reason}})
@@ -110,8 +111,8 @@ def deny_supervised(lock, minutes):
         f'Esta sesión la supervisa «{who}» ({project}), y el desarrollador no está delante: no ha escrito aquí hace menos de '
         f'{ask_gate.ask_gate_fresh_minutes():g} min ni, en los últimos {minutes:g} min, ha pedido que se le pregunte. Solo se le '
         f'pregunta en una sesión que esté llevando en persona. Lo demás se le pregunta todo a la vez al final, en la sesión '
-        f'de preguntas, cuando todo está integrado (y, donde las reglas lo autorizan, desplegado en pre-producción) y las '
-        f'sesiones hijas están cerradas ({settings.DEPLOY_RULE}). Decide tú con lo documentado '
+        f'de preguntas, cuando todo está integrado (y, donde las reglas lo autorizan, desplegado en pre-producción) y cada '
+        f'sesión hija está archivada o aparcada con su decisión en ask-queue ({settings.DEPLOY_RULE}). Decide tú con lo documentado '
         f'o con el panel de {PANEL_SKILL}, eligiendo {settings.DECISION_CRITERION}, y anótala. Si no puedes, deja la duda en '
         f'decisiones_abiertas de tu informe a la supervisora, con las opciones y la que recomiendas, y sigue con todo '
         f'lo que no dependa de ella: la supervisora la contesta. Un límite duro (dinero, credenciales, un dato que '

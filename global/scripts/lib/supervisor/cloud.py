@@ -223,6 +223,9 @@ def cmd_cloud(args):
     for r in rows:
         print(cloud_line(r))
         print(f'      → {CLOUD_TODO.get(r["verdict"], "")}')
+    if not settings.ARCHIVE_PREAUTHORISED and any('archívala' in CLOUD_TODO.get(r['verdict'], '') for r in rows):
+        print('      (archivar necesita la autorización escrita del desarrollador o de una regla del proyecto: si no '
+              'consta, la decisión va a ask-queue y la sesión se aparca con hold)')
     count = lambda *vs: sum(1 for r in rows if r['verdict'] in vs)
     print(f'cloud: {count(*CLOUD_ACTIONABLE)} to act on now (HUNG/WAITING/CHECK), {count("WORKING")} working, '
           f'{count("RECENT")} recent, {count("HOLD")} on hold, {count("RUNNER")} cloud-tests runners')

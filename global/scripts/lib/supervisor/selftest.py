@@ -2646,13 +2646,13 @@ def cmd_self_test(args):
     reasons = {k: v['hookSpecificOutput']['permissionDecisionReason'] for k, v in texts.items()}
     check('deny texts: none of the five variants says «buzón» (it is the questions session now)',
           len(reasons) == 5 and not any('buzón' in r.lower() for r in reasons.values()))
-    check('deny texts: the owner variants send the final batch to the questions session after the child sessions are closed',
-          all('sesiones hijas' in reasons[k] and 'sin informe aparte' in reasons[k] and '--radical --cost' in reasons[k]
+    check('deny texts: the owner variants send the final batch to the questions session once each child session is archived or parked in ask-queue',
+          all('sesión hija está archivada o' in reasons[k] and 'aparcada con su' in reasons[k] and 'conservas el cerrojo de guardia' in reasons[k] and 'sin informe aparte' in reasons[k] and '--radical --cost' in reasons[k]
               for k in ('question alive', 'question missing', 'question archived'))
           and 'sesión de preguntas es local_qs (SendMessage)' in reasons['question alive']
           and 'ábrela' in reasons['question missing'] and 'La sesión de preguntas local_gone guardada' in reasons['question archived'])
     check('deny texts: absent and supervised ones say the final batch is asked in the questions session',
-          all('sesión de preguntas' in reasons[k] and 'sesiones hijas' in reasons[k] for k in ('absent', 'supervised')))
+          all('sesión de preguntas' in reasons[k] and 'sesión hija está archivada o aparcada con su decisión en ask-queue' in reasons[k] for k in ('absent', 'supervised')))
 
     def a_text(mins, text):
         return {'type': 'assistant', 'timestamp': stamp(mins),

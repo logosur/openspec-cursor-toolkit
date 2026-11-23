@@ -27,6 +27,16 @@ Hooks: 21 identical (7 from the toolkit, 14 from the override's hook fragment), 
 
 Installed from the toolkit: 40 files; from the override: 232.
 
+### Second batch (section 8), re-run on 2026-11-23
+
+- Default modules: 0 unexplained; installed from the toolkit 41 files, from the override 233.
+- Every module (`--modules openspec,core,devtools,sessions,supervision,heavy-jobs`): 0 unexplained;
+  identical 7, override 233, toolkit-newer 6, neutral-text 2, declared 2, added 59, excluded 6; hooks 21
+  identical. The override keeps the literal single-file supervisor, skill and rules, and its `remove:`
+  list drops the three neutral texts that would contradict them (two rules and one skill reference).
+  `process-kill-gate` moved from neutral-text to override: the toolkit copy now gives the technical
+  reason in its denial instead of a past event.
+
 ## The non-trivial classes, by piece
 
 - toolkit-newer: `skills/00-openspec-master`, `skills/00-openspec-orchestrator`, `skills/20-hydrate-spec`,

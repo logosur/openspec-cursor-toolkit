@@ -169,6 +169,11 @@ Third-party skills and plugins (listed in README as optional), skills of client 
   belong to one machine's way of working. The published pieces name them as optional and work
   without them, so D11's "only as a whole" no longer applies: the unit that ships is the one whose
   tests pass with those six absent.
+- **The session supervisor ships as a package** behind the same `supervisor-lock` entry point. Its
+  public defaults authorise nothing: deploying, archiving and the decision criterion come from the
+  `supervision` config (`deploy_preauthorised`, `archive_preauthorised`, `decision_criterion`), so the
+  Stop hook accepts a decision queued in ask-queue as a valid end of turn instead of demanding an archive.
+  The default questions-session title is neutral and configurable; the old title is still recognised.
 - **Probes take raw stdin** (`stdin_raw`), so a contract can test unparseable input. A probe found that
   the authorship gate exits 1 on valid JSON that is not an object; the gate is edited only by its
   owner by hand, so it is recorded (core-scope.md) and not changed.
@@ -203,6 +208,7 @@ Consumers of the per-project catalog: nothing to do. A project with project-leve
 
 ## Follow-ups (not in this change)
 
-- Tasks §8 (supervision unit).
+- Migrating the developer's machine to the package entry point: the override keeps the single-file
+  supervisor for now, and its config already holds the values that reproduce today's behaviour.
 - Optional: a `pre-commit` hook in this repo that runs the privacy guard (`core.hooksPath` changes are the developer's).
 - Optional: translations of user-facing strings.

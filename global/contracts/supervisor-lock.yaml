@@ -1,0 +1,51 @@
+piece: supervisor-lock
+dest: scripts/supervisor-lock
+kind: cli
+config: supervision
+# Fast probes only: the full self-test (`supervisor-lock self-test`) runs in the toolkit's test suite.
+probes:
+  - name: help lists the subcommands
+    args: [--help]
+    exit: [0]
+    contains: self-test
+  - name: with no state, list prints an empty census
+    args: [list, --json]
+    exit: [0]
+    stdout: json
+    contains: '"locks"'
+  - name: with no state, revive plans nothing
+    args: [revive, --json]
+    env: {SUPERVISOR_USAGE: unknown}
+    exit: [0]
+    stdout: json
+    contains: '"targets"'
+  - name: outside a git repository a project command fails cleanly
+    args: [project]
+    exit: [2]
+    stdout: empty
+  - name: the hook ignores malformed input
+    args: [hook]
+    stdin_raw: not json
+    exit: [0]
+    stdout: empty
+  - name: the hook leaves an unrelated tool alone
+    args: [hook]
+    stdin: {hook_event_name: PreToolUse, tool_name: Bash, session_id: probe, tool_input: {command: ls}}
+    exit: [0]
+    stdout: empty
+  - name: with no supervisor, Stop is left alone
+    args: [hook]
+    stdin: {hook_event_name: Stop, session_id: probe}
+    exit: [0]
+    stdout: empty
+  - name: a corrupt config never breaks the hook
+    args: [hook]
+    stdin: {hook_event_name: PreToolUse, tool_name: AskUserQuestion, session_id: probe, tool_input: {}}
+    corrupt_config: true
+    exit: [0]
+    stdout: empty-or-json
+  - name: a corrupt config gives the defaults
+    args: [list, --json]
+    corrupt_config: true
+    exit: [0]
+    stdout: json

@@ -1,0 +1,58 @@
+{
+  "PreToolUse": [
+    {
+      "matcher": "SendMessage|mcp__ccd_session_mgmt__send_message",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/cross-project-message-gate",
+          "timeout": 10
+        }
+      ]
+    },
+    {
+      "matcher": "AskUserQuestion|mcp__ccd_turn__wrap_up|ExitPlanMode|mcp__ccd_session__start_session",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/supervisor-stop-gate",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "UserPromptSubmit": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/ask-queue-prompt",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "SessionStart": [
+    {
+      "matcher": "startup|resume|clear|compact",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/supervisor-stop-gate",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "Stop": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.claude/hooks/supervisor-stop-gate",
+          "timeout": 10
+        }
+      ]
+    }
+  ]
+}

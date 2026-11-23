@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from scripts.toolkit import contracts, drift, equivalence, modules, overlay
@@ -21,7 +22,7 @@ class Contracts(Sandbox):
         return code, out.getvalue()
 
     def test_every_contract_names_an_installed_piece(self):
-        dests = {f.dest for m in modules.load_many(modules.DEFAULT_MODULES) for f in m.files}
+        dests = {f.dest for m in modules.load_many(modules.available()) for f in m.files}
         for c in contracts.load_all():
             self.assertIn(c['dest'], dests, c['piece'])
             self.assertTrue(c['probes'], c['piece'])
@@ -54,11 +55,21 @@ class Contracts(Sandbox):
         code, out = self.verify()
         self.assertEqual(code, 0, out)
 
+    def test_corrupt_config_probe_corrupts_the_piece_the_contract_names(self):
+        self.assertEqual(self.run_cli('install')[0], 0)
+        probe = {'name': 'sees it', 'corrupt_config': True, 'contains': 'shared.json'}
+        piece = self.write('hooks/lists-config', '#!/usr/bin/env python3\nimport os\n'
+                           'print(os.listdir(os.environ["CLAUDE_TOOLKIT_CONFIG_DIR"]))\n')
+        piece.chmod(0o755)
+        contract = {'piece': 'lists-config', 'dest': 'hooks/lists-config', 'config': 'shared', 'probes': [probe]}
+        with unittest.mock.patch.object(contracts, 'load_all', return_value=[contract]):
+            self.assertEqual(contracts.run_probes(self.target), (1, []))
+
 
 class Drift(Sandbox):
     def rows(self, override: bool = False) -> dict[str, str]:
         ov = overlay.load(self.override if override else None)
-        return dict(drift.classify(self.target, modules.load_many(modules.DEFAULT_MODULES), ov))
+        return dict(drift.classify(self.target, modules.load_many(modules.available()), ov))
 
     def test_states(self):
         self.assertEqual(self.run_cli('install')[0], 0)
@@ -105,7 +116,7 @@ class Equivalence(Sandbox):
 
     def summary(self, live: Path, override: bool = False) -> dict:
         ov = overlay.load(self.override if override else None)
-        return equivalence.summarise(equivalence.compare(live, modules.load_many(modules.DEFAULT_MODULES), ov))
+        return equivalence.summarise(equivalence.compare(live, modules.load_many(modules.available()), ov))
 
     def test_fresh_install_is_equivalent(self):
         s = self.summary(self.live_copy())

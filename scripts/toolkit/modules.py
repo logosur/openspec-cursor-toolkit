@@ -17,7 +17,8 @@ class ManifestError(Exception):
     pass
 
 
-DEFAULT_MODULES = ['openspec', 'core', 'devtools', 'sessions']
+# A module that widens what sessions may do unattended is never here: it is opt-in.
+DEFAULT_MODULES = ['openspec', 'core', 'devtools']
 
 @dataclass
 class FileEntry:

@@ -1,0 +1,24 @@
+name: heavy-jobs
+summary: >-
+  One semaphore for the heavy development jobs of every project on the machine (suites, builds,
+  installs, emulators, models) with the gate that sends those commands through it.
+depends: [core]
+requires:
+  python: "3.10"
+  os: linux
+  binaries: [python3, git]
+notes:
+  - Opt-in. Its gate denies heavy commands that are not launched through heavy-job.
+  - Set default_slots in the heavy-job config piece to what the machine can take.
+  - Priority by the developer's order needs the supervision module; without it heavy-job refuses priority.
+project_provided:
+  - scripts/cloud-tests
+  - scripts/project-pause
+files:
+  - {src: global/scripts/heavy-job, dest: scripts/heavy-job, mode: "0755"}
+  - {src: global/scripts/lib/heavy_job_classifier.py, dest: scripts/lib/heavy_job_classifier.py}
+  - {src: global/hooks/heavy-job-gate, dest: hooks/heavy-job-gate, mode: "0755"}
+  - {src: global/rules/trabajos-pesados.md, dest: rules/trabajos-pesados.md}
+hooks:
+  - global/settings/hooks.heavy-jobs.json
+config: [heavy-job]

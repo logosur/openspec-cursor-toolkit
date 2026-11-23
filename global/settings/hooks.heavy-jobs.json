@@ -1,0 +1,14 @@
+{
+  "PreToolUse": [
+    {
+      "matcher": "Bash",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 ~/.claude/hooks/heavy-job-gate",
+          "timeout": 10
+        }
+      ]
+    }
+  ]
+}

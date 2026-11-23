@@ -1,0 +1,23 @@
+piece: ask-queue-prompt
+dest: hooks/ask-queue-prompt
+kind: hook
+event: UserPromptSubmit
+config: supervision
+probes:
+  - name: an empty queue adds nothing
+    stdin: {prompt: hello, session_id: probe}
+    exit: [0]
+    stdout: empty
+  - name: a prompt that is not the developer's adds nothing
+    stdin: {prompt: "<task-notification>x</task-notification>", session_id: probe}
+    exit: [0]
+    stdout: empty
+  - name: a corrupt config adds nothing and does not fail
+    stdin: {prompt: hello, session_id: probe}
+    corrupt_config: true
+    exit: [0]
+    stdout: empty
+  - name: unparseable stdin fails open
+    stdin_raw: "{not json"
+    exit: [0]
+    stdout: empty

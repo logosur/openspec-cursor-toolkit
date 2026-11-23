@@ -3,6 +3,7 @@
 global/contracts/<piece>.yaml:
   piece: heavy-job-gate
   dest: hooks/heavy-job-gate
+  config: supervision          # config piece it reads, when not named like the piece
   kind: hook | cli
   probes:
     - name: unrelated command passes
@@ -95,7 +96,7 @@ def run_probes(target: Path, only_sources: set[str] | None = None, manifest: dic
                 continue
             for name in os.listdir(corrupt):
                 os.unlink(corrupt / name)
-            (corrupt / f'{contract["piece"]}.json').write_text('{not json')
+            (corrupt / f'{contract.get("config", contract["piece"])}.json').write_text('{not json')
             for probe in contract.get('probes') or []:
                 ran += 1
                 env = dict(os.environ, **{k: str(v) for k, v in (probe.get('env') or {}).items()})

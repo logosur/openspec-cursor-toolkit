@@ -1,0 +1,35 @@
+piece: cross-project-message-gate
+dest: hooks/cross-project-message-gate
+kind: hook
+event: PreToolUse
+config: supervision
+probes:
+  - name: unrelated tool passes silently
+    stdin: {tool_name: Bash, tool_input: {command: ls}}
+    exit: [0]
+    stdout: empty
+  - name: in bypass, a session of an unknown project is denied
+    stdin: {tool_name: mcp__ccd_session_mgmt__send_message, session_id: probe, permission_mode: bypassPermissions, tool_input: {session_id: "eeeeeeee-3333-4333-8333-333333333333", message: hello}}
+    exit: [0]
+    stdout: json
+    contains: '"deny"'
+  - name: outside bypass, the developer is asked
+    stdin: {tool_name: mcp__ccd_session_mgmt__send_message, session_id: probe, permission_mode: default, tool_input: {session_id: "eeeeeeee-3333-4333-8333-333333333333", message: hello}}
+    exit: [0]
+    stdout: json
+    contains: '"ask"'
+  - name: a marker alone opens nothing
+    stdin: {tool_name: mcp__ccd_session_mgmt__send_message, session_id: probe, permission_mode: bypassPermissions, tool_input: {session_id: "eeeeeeee-3333-4333-8333-333333333333", message: "[recarga de skill] go"}}
+    exit: [0]
+    stdout: json
+    contains: '"deny"'
+  - name: a corrupt config never allows more
+    stdin: {tool_name: mcp__ccd_session_mgmt__send_message, session_id: probe, permission_mode: bypassPermissions, tool_input: {session_id: "eeeeeeee-3333-4333-8333-333333333333", message: "[cambio de cuenta] go"}}
+    corrupt_config: true
+    exit: [0]
+    stdout: json
+    contains: '"deny"'
+  - name: unparseable stdin fails open
+    stdin_raw: "{not json"
+    exit: [0]
+    stdout: empty

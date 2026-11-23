@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""supervisor-lock: one live session supervisor per project, plus the Claude sessions of that project.
+
+Thin, stable entry point: the code is the package in lib/supervisor, one module per responsibility. Callers may load
+this file as a module (importlib SourceFileLoader, any module name) and read the names in EXPORTS; they are resolved
+in their owner module when they are read. `supervisor-lock --help` lists the subcommands.
+"""
+import hashlib
+import importlib
+import importlib.util
+import os
+import sys
+
+ENTRY = os.path.realpath(__file__)
+PACKAGE_DIR = os.path.join(os.path.dirname(ENTRY), 'lib', 'supervisor')
+# a name of its own per installation: two copies (a repo and an installed one) can live in the same process
+PACKAGE = '_supervisor_lock_' + hashlib.sha1(PACKAGE_DIR.encode()).hexdigest()[:12]
+
+EXPORTS = {
+    'census': ('app_glob', 'cli_dir', 'collect_sessions', 'pid_alive', 'read_json_files'),
+    'human_turns': ('NOT_HUMAN_PREFIXES', 'last_human_input'),
+    'lock': ('read_locks',),
+    'projects': ('git', 'resolve'),
+    'session_roles': ('ASK_GATE_MAILBOX_TITLES', 'session_role', 'title_names_project'),
+    'transcripts': ('session_files',),
+    'util': ('fold_text', 'span'),
+}
+
+
+def _module(name):
+    """A module of the package, which is loaded once per installation."""
+    if PACKAGE not in sys.modules:
+        spec = importlib.util.spec_from_file_location(PACKAGE, os.path.join(PACKAGE_DIR, '__init__.py'),
+                                                      submodule_search_locations=[PACKAGE_DIR])
+        package = importlib.util.module_from_spec(spec)
+        sys.modules[PACKAGE] = package
+        try:
+            spec.loader.exec_module(package)
+        except BaseException:
+            sys.modules.pop(PACKAGE, None)
+            raise
+        importlib.import_module(f'{PACKAGE}.runtime').ENTRY = ENTRY
+    return importlib.import_module(f'{PACKAGE}.{name}')
+
+
+_cli = _module('cli')   # loaded with the entry, so that a broken installation fails here and not at a caller's use
+
+
+def __getattr__(name):
+    for owner, names in EXPORTS.items():
+        if name in names:
+            return getattr(_module(owner), name)
+    raise AttributeError(f'supervisor-lock has no attribute {name!r}')
+
+
+def main():
+    _cli.main()
+
+
+if __name__ == '__main__':
+    main()

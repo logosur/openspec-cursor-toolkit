@@ -1,0 +1,41 @@
+{
+  "account_switch_marker": "[cambio de cuenta]",
+  "project_resume_marker": "[reanudar proyecto]",
+  "skill_reload_marker": "[recarga de skill]",
+  "supervisor_revive_marker": "[reanimar supervisora]",
+  "account_switch_ttl_s": 21600,
+  "account_switch_claim_window_s": 1800,
+  "supervisor_revive_valid_s": 1800,
+  "presence_min": 20,
+  "app_sessions_dir": "~/.config/Claude/claude-code-sessions",
+  "message_exceptions": [],
+  "config_session_dirs": [],
+  "fresh_min": 3,
+  "questions_session_titles": [
+    "sesión de preguntas",
+    "preguntas de la supervisión",
+    "buzón de preguntas"
+  ],
+  "questions_session_title": "Sesión de preguntas de {project}",
+  "closer_session_titles": [
+    "cierre de sesiones de"
+  ],
+  "skill_file": "~/.claude/skills/supervisa-sesiones/SKILL.md",
+  "guard_section": "## Motivo de la guardia",
+  "skill_anchors": [
+    "## Prohibido",
+    "## §0",
+    "## Nunca parada",
+    "$L backlog",
+    "$L wait-closer",
+    "--no-work",
+    "en español",
+    "reference/cambios.md"
+  ],
+  "skill_lint_roots": [],
+  "deploy_rule": "despliegue-y-limites-duros.md",
+  "deploy_preauthorised": false,
+  "excluded_projects": [],
+  "archive_preauthorised": false,
+  "decision_criterion": "la opción mejor fundada en lo documentado (ante la duda, la más reversible)"
+}

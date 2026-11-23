@@ -709,8 +709,9 @@ def decide(command, own_root=None, session_id=None, table=None, hook_pid=None, c
         reason += ('esta orden alcanzaría %d proceso%s que no %s de esta sesión: %s%s. '
                    % (len(foreign), '' if len(foreign) == 1 else 's', 'es' if len(foreign) == 1 else 'son',
                       '; '.join(shown), ' (y %d más)' % more if more > 0 else ''))
-    reason += ('El 21-11 un `pkill -f "monitor|until grep -q"` cerró la sesión de escritorio del desarrollador y '
-               'paró el router de DDEV (~/.claude/rules/matar-procesos-solo-propios.md). Mata solo lo tuyo: '
+    reason += ('Un patrón amplio de `pkill -f` alcanza procesos de todo el usuario y puede cerrar la sesión de '
+               'escritorio, la app con todas sus sesiones o los contenedores '
+               '(~/.claude/rules/matar-procesos-solo-propios.md). Mata solo lo tuyo: '
                "mira con `pgrep -af '<patrón>'` qué encaja, y usa `kill <PID>` con los tuyos, `pkill -P <PID>` "
                'para los hijos de uno tuyo, o un patrón con una marca única que solo lleve la orden que lanzaste. '
                'Una sesión de Claude se para con stop_session y un contenedor con ddev/docker stop. Si el '
@@ -780,7 +781,7 @@ def self_test():
         if not other_pids:
             print('FAIL could not start the foreign test process')
             failed += 1
-        check('incident pattern is denied', 'cd /tmp; pkill -f "monitor|until grep -q" 2>/dev/null; echo', True)
+        check('broad monitor pattern is denied', 'cd /tmp; pkill -f "monitor|until grep -q" 2>/dev/null; echo', True)
         check('own child by unique marker passes', "pkill -f '^%s 120'" % marker, False)
         check('same marker seen from another root is denied', "pkill -f '^%s 120'" % marker, True,
               root=min(other_pids) if other_pids else 1)

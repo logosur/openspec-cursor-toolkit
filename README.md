@@ -50,12 +50,19 @@ What the installer guarantees:
 
 ## Modules
 
+`openspec`, `core` and `devtools` are installed by default. `sessions`, `supervision` and `heavy-jobs` are opt-in,
+because they change what sessions do unattended (`sessions` makes started sessions run without
+permission prompts): choose them with `--modules openspec,core,devtools,sessions,supervision,heavy-jobs` or in
+the override's `modules`.
+
 | Module | Contents |
 |---|---|
 | `openspec` | `.claude/commands/`, `.claude/skills/`, `openspec-list.sh` and `docs/openspec/` (the catalog below) |
 | `core` | `commit-authorship-gate`, `process-kill-gate`, `worktree-location-gate` + `worktree-location`, the config helper, the rules that explain them, the `panel-de-decision` skill and the global `CLAUDE.md` block |
 | `devtools` | `port-lease` (a fixed block of local ports per project) and `test-account` (private store of the test users sessions create), with their rules |
 | `sessions` | for the Claude desktop app: `start-session-bypass-gate` (sessions started to work now are born in bypassPermissions: one approval card for the caller instead of one per session) and `spawn-task-duplicate-gate` (denies a proposal card that repeats one already offered for the same project) |
+| `supervision` | the `supervisa-sesiones` skill and command (one supervisor per project: census, write turns, watcher, decisions, closing; it integrates, deploys or archives only with written authorisation) with the rules it relies on, `ask-queue` (decisions left for the developer) with the hook that shows each one in the session that queued it, and `cross-project-message-gate` (a session only messages sessions of its own project; every exception is off until configured) |
+| `heavy-jobs` | `heavy-job` (one semaphore for the machine's suites, builds, installs, emulators and models; set `default_slots` for the machine) and `heavy-job-gate`, which denies a heavy command launched outside it |
 
 Manifests are in `global/modules/<name>.yaml`; the files they install are in `global/` (and, for
 `openspec`, in `.claude/`). The rule texts of `core` and `devtools` are written in Spanish, like the
@@ -122,10 +129,10 @@ python3 scripts/privacy-check.py --range origin/main..HEAD       # a branch's co
 
 ## What is not in the toolkit, and why
 
-- **Session supervision** (the supervisor skill and its lock, census, question queue and cross-project
-  message gate): it is
-  personal today and lives in the developer's override. Making it general is planned, with acceptance
-  criteria, in `openspec/changes/global-claude-toolkit/tasks.md` §8.
+- **Account switching, session nudging, a cloud test runner, project pauses, a handoff guard and a
+  routines engine**: the first three handle session tokens, an app socket or OAuth credentials, the
+  others belong to one machine's way of working. The pieces that name them treat them as optional and
+  work without them.
 - Pieces that still carry machine values (a job semaphore, deploy gates, scheduled routines): listed one by one, with what each needs to enter, in
   `openspec/changes/global-claude-toolkit/evidence/core-scope.md`.
 - **Third-party skills** are never redistributed; install them from their own source.

@@ -32,7 +32,10 @@ def _common(ap: argparse.ArgumentParser) -> None:
 def _context(args):
     target = resolve_target(args.target)
     ov = overlay.load(resolve_override(args.override))
-    names = args.modules.split(',') if args.modules else (ov.modules or DEFAULT_MODULES)
+    # --modules > the override's choice > what the last install put there > the defaults: a plain re-run must
+    # never drop an opt-in module the user installed on purpose.
+    installed = plan_mod.read_manifest(target).get('modules')
+    names = args.modules.split(',') if args.modules else (ov.modules or installed or DEFAULT_MODULES)
     mods = modules.load_many(names)
     return target, ov, mods
 

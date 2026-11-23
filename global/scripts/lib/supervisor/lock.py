@@ -84,8 +84,12 @@ def lacks_mailbox(owner):
     return owner.get('state') == 'running' and not owner.get('mailbox')
 
 
-def status_line(owner, with_checkout=False):
-    line = (f'{status_word(owner)} {owner["key"]} session={owner.get("session_id")} state={owner.get("state")} '
+def status_line(owner, with_checkout=False, asking=None):
+    """`asking` is the session that asks: the owner reads MINE for its own live lock, never the HELD of «another»."""
+    word = status_word(owner)
+    if asking and word == 'HELD' and owner.get('session_id') == asking:
+        word = 'MINE'
+    line = (f'{word} {owner["key"]} session={owner.get("session_id")} state={owner.get("state")} '
             f'phase={owner.get("phase") or "-"} round={owner.get("round")} '
             f'heartbeat_age_s={util.age_seconds(owner.get("heartbeat"))} title={owner.get("title") or "-"}')
     if owner.get('mailbox'):
@@ -300,7 +304,7 @@ def cmd_status(args):
         print(json.dumps({'key': project['key'], 'status': 'FREE'} if owner is None else with_age(owner),
                          indent=2, sort_keys=True))
     else:
-        print(f'FREE {project["key"]}' if owner is None else status_line(owner))
+        print(f'FREE {project["key"]}' if owner is None else status_line(owner, asking=args.session))
     return 0
 
 

@@ -1,6 +1,7 @@
 """The hook entry: PreToolUse, SessionStart and Stop decisions."""
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -32,6 +33,11 @@ def wait_armed_in_proc(owner_id):
     return False
 
 
+# the watcher as a session writes it: the script by its path or through a variable (`L=…/supervisor-lock; $L wait …`),
+# never `wait-closer`, which is another session's watcher
+_RE_WAIT_COMMAND = re.compile(r'supervisor-lock(?![\w-]).*?(?<![\w-])wait(?![\w-])', re.S)
+
+
 def wait_armed(payload, owner_id):
     tasks = payload.get('background_tasks')
     if not isinstance(tasks, list):
@@ -41,9 +47,10 @@ def wait_armed(payload, owner_id):
             continue
         for field in ('command', 'description'):
             text = task.get(field)
-            if isinstance(text, str) and 'supervisor-lock wait' in text and owner_id in text:
+            if isinstance(text, str) and owner_id in text and _RE_WAIT_COMMAND.search(text):
                 return True
-    return False
+    # a watcher armed through a wrapper or an alias does not name the script in its command: the process does
+    return wait_armed_in_proc(owner_id)
 
 
 def hook_decide(raw):

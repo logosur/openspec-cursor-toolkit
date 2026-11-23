@@ -241,6 +241,9 @@ def wait_events(args):
     ready = os.environ.get('SUPERVISOR_WAIT_READY')
     if ready:  # tests: the first snapshot is taken, so a change made from now on is an event
         open(ready, 'w').close()
+    hold = os.environ.get('SUPERVISOR_WAIT_HOLD')
+    while hold and os.path.exists(hold) and time.monotonic() < deadline:
+        time.sleep(0.02)  # tests: several changes made after the first snapshot are seen in one poll, not half of them
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:

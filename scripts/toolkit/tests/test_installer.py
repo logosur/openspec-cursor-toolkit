@@ -109,6 +109,22 @@ class DefaultModules(Sandbox):
         self.assertNotIn('start-session-bypass-gate', json.dumps(self.settings()))
         self.assertFalse((self.target / 'hooks' / 'cross-project-message-gate').exists(), 'supervision is opt-in')
 
+    def test_plain_reinstall_keeps_the_modules_of_the_last_install(self):
+        quiet = lambda *argv: cli.main([*argv, '--override', '', '--target', str(self.target)])
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(quiet('install', '--modules', 'openspec,core,devtools,heavy-jobs'), 0)
+            before = snapshot(self.target)
+            self.assertEqual(quiet('install'), 0)
+        self.assertEqual(snapshot(self.target), before, 'a re-run without --modules dropped an opt-in module')
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(quiet('install', '--modules', 'openspec,core,devtools'), 0)
+        self.assertFalse((self.target / 'hooks' / 'heavy-job-gate').exists(), 'naming the modules still drops the rest')
+
+    def test_module_notes_are_plain_text(self):
+        for name in modules.available():
+            for note in modules.load_many([name])[0].notes:
+                self.assertIsInstance(note, str, f'{name}: quote the note, YAML read it as a mapping')
+
 
 class SettingsMerge(Sandbox):
     def test_user_keys_and_hooks_survive_and_no_duplicates(self):

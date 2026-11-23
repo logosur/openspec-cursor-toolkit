@@ -9,7 +9,7 @@ requires:
   binaries: [python3, git]
 notes:
   - Only useful in the Claude desktop app, whose session tools these hooks watch; elsewhere they never fire.
-  - Opt-in, never a default: the bypass policy removes permission prompts from started sessions. Choose it only for unattended setups.
+  - "Opt-in, never a default: the bypass policy removes permission prompts from started sessions. Choose it only for unattended setups."
 files:
   - {src: global/hooks/start-session-bypass-gate, dest: hooks/start-session-bypass-gate, mode: "0755"}
   - {src: global/hooks/spawn-task-duplicate-gate, dest: hooks/spawn-task-duplicate-gate, mode: "0755"}

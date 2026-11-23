@@ -16,7 +16,7 @@ notes:
   - >-
     supervisor-lock works without its optional pieces (cloud-tests, session-nudge, handoff-guard, routines notify):
     cloud actions say the provider is unavailable, and alerts, nudges and handoff checks do nothing.
-  - Deploys are never pre-authorised by default: only deploy_preauthorised in the supervision config says so.
+  - "Deploys are never pre-authorised by default: only deploy_preauthorised in the supervision config says so."
 # Named by these pieces and not installed by this module or its dependencies: absent from the toolkit, or (heavy-job)
 # installed by another module. Every caller works without them.
 project_provided:

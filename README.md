@@ -53,7 +53,8 @@ What the installer guarantees:
 `openspec`, `core` and `devtools` are installed by default. `sessions`, `supervision` and `heavy-jobs` are opt-in,
 because they change what sessions do unattended (`sessions` makes started sessions run without
 permission prompts): choose them with `--modules openspec,core,devtools,sessions,supervision,heavy-jobs` or in
-the override's `modules`.
+the override's `modules`. A later `install` without `--modules` keeps the modules of the last install; to drop
+one, name the ones you want.
 
 | Module | Contents |
 |---|---|

@@ -5,9 +5,13 @@
 set -euo pipefail
 [ "${CLAUDE_CODE_REMOTE:-}" = "true" ] || exit 0
 cd "${CLAUDE_PROJECT_DIR:-.}"
-ref=$(git symbolic-ref -q refs/remotes/origin/HEAD || echo refs/remotes/origin/main)
+# A cloud clone may bring only the branch it works on: without origin/HEAD or origin/main, fetch the default branch.
+ref=$(git symbolic-ref -q refs/remotes/origin/HEAD || true)
+[ -n "$ref" ] || ref=$(git rev-parse -q --verify refs/remotes/origin/main >/dev/null && echo refs/remotes/origin/main || true)
+if [ -z "$ref" ]; then git fetch -q origin main 2>/dev/null && ref=FETCH_HEAD || ref=HEAD; fi
 name=$(git log -1 --format=%an "$ref")
 email=$(git log -1 --format=%ae "$ref")
+case "$email" in *anthropic*) echo "cloud-session-start: $ref is not signed by the owner" >&2; exit 0 ;; esac
 [ -n "$name" ] && [ -n "$email" ] || { echo "cloud-session-start: no identity found on $ref" >&2; exit 0; }
 git config user.name "$name"
 git config user.email "$email"

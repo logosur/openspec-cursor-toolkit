@@ -12,6 +12,7 @@ set -uo pipefail
 IMAGE=${ANDROID_PROBE_IMAGE:-reactnativecommunity/react-native-android:latest}
 WORK=${ANDROID_PROBE_DIR:-/tmp/android-probe}
 SDK=/opt/android-sdk-probe
+JDK=/opt/jdk-probe
 BUILD_LIMIT=${ANDROID_PROBE_BUILD_LIMIT:-2700}
 SUMMARY=$WORK/summary.txt
 rm -rf "$WORK"; mkdir -p "$WORK"; : >"$SUMMARY"
@@ -23,13 +24,19 @@ now() { date +%s; }
 section "machine"
 note "cpus=$(nproc) mem_gb=$(free -g | awk '/^Mem:/{print $2}') disk_free_gb=$(df -BG --output=avail / | tail -1 | tr -dc 0-9)"
 if [ -e /dev/kvm ]; then note "kvm=present"; else note "kvm=absent"; fi
-note "java=$(java -version 2>&1 | head -1) node=$(node -v 2>/dev/null) uid=$(id -u)"
+note "java=$(java -version 2>&1 | grep -i version | head -1) node=$(node -v 2>/dev/null) uid=$(id -u)"
+
+section "session setup (yes/no only, no names)"
+note "env_file=$([ -n "${CLAUDE_ENV_FILE:-}" ] && echo yes || echo no) start_hook_ran=$([ -f "$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/info/cloud-identity.env" ] && echo yes || echo no)"
+note "remote_refs=$(git for-each-ref --format='%(refname:short)' refs/remotes 2>/dev/null | tr '\n' ' ' | cut -c1-200)"
 
 section "network (HTTP code, 000 = unreachable)"
 for url in \
   https://dl.google.com/android/repository/repository2-3.xml \
   https://maven.google.com/web/index.html \
   https://dl.google.com/dl/android/maven2/androidx/core/core/maven-metadata.xml \
+  https://maven.google.com/androidx/core/core/maven-metadata.xml \
+  https://repo1.maven.org/maven2/ \
   https://services.gradle.org/distributions/ \
   https://plugins.gradle.org/m2/ \
   https://repo.maven.apache.org/maven2/ \
@@ -58,7 +65,12 @@ if docker info >/dev/null 2>&1; then
   if [ "$ok" = yes ]; then
     image_sdk=$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE" | sed -n 's/^ANDROID_HOME=//p' | head -1)
     t=$(now)
-    c=$(docker create "$IMAGE"); rm -rf "$SDK"; docker cp "$c:${image_sdk:-/opt/android}" "$SDK" >/dev/null 2>&1; docker rm "$c" >/dev/null
+    image_jdk=$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE" | sed -n 's/^JAVA_HOME=//p' | head -1)
+    c=$(docker create "$IMAGE"); rm -rf "$SDK" "$JDK"; docker cp "$c:${image_sdk:-/opt/android}" "$SDK" >/dev/null 2>&1
+    # -L: JAVA_HOME is often a symlink into /usr/lib/jvm
+    [ -n "$image_jdk" ] && docker cp -L "$c:$image_jdk" "$JDK" >/dev/null 2>&1
+    docker rm "$c" >/dev/null
+    note "image_jdk=${image_jdk:-none} jdk_copied=$([ -x "$JDK/bin/java" ] && "$JDK/bin/java" -version 2>&1 | grep -i version | head -1 || echo no)"
     note "sdk_copy_seconds=$(( $(now) - t )) sdk_gb=$(du -s -BG "$SDK" 2>/dev/null | cut -f1) image_sdk=${image_sdk:-unknown}"
     note "sdk_platforms=$(ls "$SDK/platforms" 2>/dev/null | tr '\n' ' ')"
     note "sdk_build_tools=$(ls "$SDK/build-tools" 2>/dev/null | tr '\n' ' ')"
@@ -87,16 +99,38 @@ if [ -f package.json ] && [ -d "$SDK/platforms" ]; then
     note "prebuild=ok seconds=$(( $(now) - t )) wants_ndk=$(grep -rhoE 'ndkVersion *= *"[^"]+"' node_modules/react-native/gradle/libs.versions.toml android 2>/dev/null | head -1) wants=$(grep -hE '^(ndkVersion|compileSdk|buildTools) *=' node_modules/react-native/gradle/libs.versions.toml 2>/dev/null | tr '\n' ' ')"
     section "gradle bundleRelease (limit ${BUILD_LIMIT}s)"
     cd android || exit 0
-    t=$(now)
-    timeout "$BUILD_LIMIT" ./gradlew --no-daemon --console=plain :app:bundleRelease >"$WORK/gradle.log" 2>&1
-    rc=$?
-    note "gradle_exit=$rc seconds=$(( $(now) - t )) (124 = stopped at the limit)"
+    # The image's JDK, for Gradle itself and for its toolchains (the session's own Java may be another version).
+    if [ -x "$JDK/bin/java" ]; then
+      export JAVA_HOME=$JDK PATH=$JDK/bin:$PATH
+      printf '\norg.gradle.java.installations.paths=%s\norg.gradle.java.installations.auto-download=false\n' "$JDK" >>gradle.properties
+    fi
+    # The NDK cannot be downloaded when dl.google.com is closed: build with the one the image brings.
+    wanted_ndk=$(grep -hoE 'ndkVersion *= *"[^"]+"' ../node_modules/react-native/gradle/libs.versions.toml 2>/dev/null | grep -oE '[0-9.]+' | head -1)
+    have_ndk=$(ls "$SDK/ndk" 2>/dev/null | sort -V | tail -1)
+    if [ -n "$have_ndk" ] && [ ! -d "$SDK/ndk/$wanted_ndk" ]; then
+      printf 'android.ndkVersion=%s\n' "$have_ndk" >>gradle.properties
+      note "ndk_override=$have_ndk (wanted ${wanted_ndk:-unknown})"
+    fi
+    t=$(now); attempts=0; rc=1
+    # A shared exit address makes Maven Central answer 429 now and then: retry, Gradle keeps what it already downloaded.
+    while [ "$attempts" -lt 4 ]; do
+      attempts=$((attempts + 1))
+      left=$(( BUILD_LIMIT - ($(now) - t) )); [ "$left" -lt 60 ] && break
+      timeout "$left" ./gradlew --no-daemon --console=plain :app:bundleRelease >"$WORK/gradle.log" 2>&1
+      rc=$?
+      note "gradle_attempt=$attempts exit=$rc elapsed=$(( $(now) - t )) http_429=$(grep -c 'status code 429' "$WORK/gradle.log") tasks=$(grep -cE '^> Task ' "$WORK/gradle.log")"
+      [ "$rc" -eq 0 ] && break
+      grep -q 'status code 429' "$WORK/gradle.log" || break
+      sleep 90
+    done
+    note "gradle_exit=$rc seconds=$(( $(now) - t )) attempts=$attempts (124 = stopped at the limit)"
     aab=$(find app/build/outputs/bundle -name '*.aab' 2>/dev/null | head -1)
     if [ -n "$aab" ]; then note "aab=yes size_mb=$(( $(stat -c %s "$aab") / 1048576 )) abis=$(unzip -l "$aab" 2>/dev/null | grep -oE 'base/lib/[^/]+' | sort -u | cut -d/ -f3 | tr '\n' ' ')"; else note "aab=no"; fi
     note "gradle_tasks_run=$(grep -cE '^> Task ' "$WORK/gradle.log") native_tasks=$(grep -cE '^> Task .*(CMake|buildCMake|configureCMake)' "$WORK/gradle.log")"
     if [ "$rc" -ne 0 ]; then
       note "gradle_first_errors:"
-      grep -nE 'Could not (resolve|GET|HEAD|download|find)|FAILURE|What went wrong|NDK|> Failed|403|Connection' "$WORK/gradle.log" | head -12 | cut -c1-230 | tee -a "$SUMMARY"
+      grep -nE 'Could not (resolve|GET|HEAD|download|find)|FAILURE|What went wrong|NDK|> Failed|403|Connection|Cannot find' "$WORK/gradle.log" | head -12 | cut -c1-230 | tee -a "$SUMMARY"
+      note "gradle_blocked_hosts=$(grep -oE "Could not (GET|HEAD) 'https://[^/']+" "$WORK/gradle.log" | grep -oE 'https://.*' | sort | uniq -c | tr '\n' ' ' | cut -c1-300)"
     fi
     note "gradle_cache_gb=$(du -s -BG "$HOME/.gradle" 2>/dev/null | cut -f1) disk_free_gb_end=$(df -BG --output=avail / | tail -1 | tr -dc 0-9) mem_peak_note=see_free"
   else

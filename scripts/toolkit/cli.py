@@ -47,7 +47,8 @@ def print_plan(p: plan_mod.Plan, verbose: bool) -> None:
         if a.kind == 'unchanged' and not verbose:
             continue
         src = f' [{a.desired.source}]' if a.desired else ''
-        print(f'{a.kind:<11} {a.dest}{src}{"  (backup first)" if a.backup else ""}')
+        flag = '  (edited in place, backup first)' if a.edited else ('  (backup first)' if a.backup else '')
+        print(f'{a.kind:<11} {a.dest}{src}{flag}')
     for rec in p.hooks_to_add:
         print(f'hook-add    {rec["event"]} {rec.get("matcher") or "*"} -> {rec["hook"]["command"]}')
     c = p.counts()
@@ -67,6 +68,16 @@ def cmd_install(args) -> int:
         return 2
     p = plan_mod.build(target, mods, ov)
     print_plan(p, args.verbose)
+    edited = p.edited()
+    if edited and not args.overwrite_edited:
+        print(f'{"note    " if args.dry_run else "install refused:"} {len(edited)} file(s) written by the last install '
+              'were edited in place since; replacing them would lose those edits:')
+        for dest in edited:
+            print(f'  {dest}')
+        print('Keep an edit with `pull <path>` (it moves into the override) or put it in the toolkit, or rerun with '
+              '--overwrite-edited (each one is copied to the backups folder first).')
+        if not args.dry_run:
+            return 4
     if args.dry_run:
         print('dry run: nothing written')
         return 0
@@ -116,6 +127,8 @@ def main(argv: list[str] | None = None) -> int:
     p_install.add_argument('--dry-run', action='store_true')
     p_install.add_argument('-v', '--verbose', action='store_true')
     p_install.add_argument('--allow-contract-failures', action='store_true')
+    p_install.add_argument('--overwrite-edited', action='store_true',
+                           help='replace files edited in place since the last install (backed up first)')
     p_install.set_defaults(func=cmd_install)
     p_un = sub.add_parser('uninstall', help='remove what the last install wrote and restore backups')
     p_un.add_argument('--target')

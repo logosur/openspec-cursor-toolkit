@@ -29,7 +29,7 @@ cd openspec-skills-toolkit
 
 | Command | What it does |
 |---|---|
-| `install [--modules a,b] [--override DIR] [--target DIR] [--dry-run] [-v]` | copies the modules' files, writes per-piece config, merges hook entries into `settings.json`; idempotent |
+| `install [--modules a,b] [--override DIR] [--target DIR] [--dry-run] [-v] [--overwrite-edited]` | copies the modules' files, writes per-piece config, merges hook entries into `settings.json`; idempotent |
 | `uninstall` | removes what the last install wrote (files you edited since are kept), restores the files it replaced, removes its hook entries and its block in `CLAUDE.md` |
 | `status` | modules, files and hooks currently installed |
 | `verify` | runs each installed piece's contract probes; only inside a sandbox `HOME` |
@@ -42,6 +42,10 @@ What the installer guarantees:
   install with exit 2 and nothing written.
 - **Every file it replaces is backed up** (`~/.claude/backups/toolkit-<stamp>/`) and recorded in
   `~/.claude/toolkit/installed.json` with its hash, so `uninstall` can put it back.
+- **An edit made in place after an install is never lost.** If a file the last install wrote has changed
+  since, `install` stops with exit 4 and lists it: keep the edit with `pull <path>` (it moves into the
+  override) or put it in the toolkit, or rerun with `--overwrite-edited`, which copies each one to the
+  backups folder before replacing it. Outside its markers, `CLAUDE.md` is yours and never counts as edited.
 - Your own `~/.claude/CLAUDE.md` is kept: the toolkit's global rules go in a **managed block**
   between `<!-- claude-toolkit:begin … -->` and `<!-- claude-toolkit:end -->`.
 - It never installs symlinks, never touches systemd or the desktop app, and never runs a piece outside

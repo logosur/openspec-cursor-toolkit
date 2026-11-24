@@ -37,6 +37,7 @@ class Action:
     dest: str
     desired: Desired | None = None
     backup: bool = False
+    edited: bool = False  # update of a file the toolkit wrote and someone changed since: install refuses by default
 
 
 @dataclass
@@ -60,6 +61,9 @@ class Plan:
 
     def changes(self) -> bool:
         return any(a.kind in ('create', 'update', 'chmod', 'remove') for a in self.actions) or bool(self.hooks_to_add)
+
+    def edited(self) -> list[str]:
+        return [a.dest for a in self.actions if a.edited]
 
 
 def read_manifest(target: Path) -> dict:
@@ -152,8 +156,12 @@ def build(target: Path, mods: list[Module], ov: Override) -> Plan:
             actions.append(Action('chmod', dest, d))
         else:
             ours = dest in prev_files and sha(current) == prev_files[dest]['sha256']
-            needs_backup = not ours and dest not in previous.get('originals', {})
-            actions.append(Action('update', dest, d, backup=needs_backup and current != d.content))
+            # Written by an earlier install and changed in place since: replacing it would lose that edit, and
+            # `originals` only keeps what was there before the first install. A block-merged file keeps everything
+            # outside its markers, so only the block itself (the toolkit's zone) is replaced there.
+            edited = dest in prev_files and not ours and d.merge != 'block'
+            needs_backup = edited or (not ours and dest not in previous.get('originals', {}))
+            actions.append(Action('update', dest, d, backup=needs_backup, edited=edited))
     for dest, info in sorted(prev_files.items()):
         if dest in desired:
             continue

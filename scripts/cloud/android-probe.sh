@@ -69,6 +69,9 @@ if docker info >/dev/null 2>&1; then
     c=$(docker create "$IMAGE"); rm -rf "$SDK" "$JDK"; docker cp "$c:${image_sdk:-/opt/android}" "$SDK" >/dev/null 2>&1
     # -L: JAVA_HOME is often a symlink into /usr/lib/jvm
     [ -n "$image_jdk" ] && docker cp -L "$c:$image_jdk" "$JDK" >/dev/null 2>&1
+    # A Debian JDK keeps its configuration in /etc/<jdk name> behind absolute symlinks: bring it too, or the JVM cannot start.
+    jdk_etc=/etc/$(basename "${image_jdk:-none}" | sed 's/-amd64$//; s/-arm64$//')
+    [ -n "$image_jdk" ] && [ ! -e "$jdk_etc" ] && docker cp "$c:$jdk_etc" "$jdk_etc" >/dev/null 2>&1
     docker rm "$c" >/dev/null
     note "image_jdk=${image_jdk:-none} jdk_copied=$([ -x "$JDK/bin/java" ] && "$JDK/bin/java" -version 2>&1 | grep -i version | head -1 || echo no)"
     note "sdk_copy_seconds=$(( $(now) - t )) sdk_gb=$(du -s -BG "$SDK" 2>/dev/null | cut -f1) image_sdk=${image_sdk:-unknown}"

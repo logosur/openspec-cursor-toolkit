@@ -759,6 +759,17 @@ class DetachTest(SlotTestCase):
         self.assertIn('código 3', self.hj('jobs').stdout)
         self.assertIn('hecho', self.hj('logs', job_id).stdout)
 
+    def test_environment_reaches_the_job_and_leaves_the_disk(self):
+        self.env['HEAVY_JOB_TEST_MARK'] = 'marca-123'
+        job_id = self.detach(sys.executable, '-c', 'import os; print(os.environ.get("HEAVY_JOB_TEST_MARK"))')
+        out = self.hj('wait', job_id)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn('marca-123', out.stdout)
+        with open(os.path.join(self.ddir, job_id, 'job.json')) as handle:
+            job = json.load(handle)
+        self.assertNotIn('env', job)
+        self.assertEqual(job['id'], job_id)
+
     def test_survives_the_death_of_the_launching_session(self):
         # a stand-in for the session: a shell in its own process group that launches the job and is then killed
         session = subprocess.Popen(

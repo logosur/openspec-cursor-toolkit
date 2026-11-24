@@ -252,6 +252,21 @@ class DegradationTest(Base):
         revive = self.run_cli('revive', '--json')
         self.assertEqual(set(json.loads(revive.stdout)), {'targets', 'notes'})
 
+    def test_open_accepts_the_asking_session_like_status_does(self):
+        # supervisors pass `--session <their id>` to `open` as they do to `status`; it is not a usage error and it
+        # changes nothing: the owner, its questions session and its closing session are left out either way
+        repo = self.repo('proj')
+        self.assert_clean(self.run_cli('acquire', '--dir', repo, '--session', 'local_o', '--title', 't'))
+        bare = self.run_cli('open', '--dir', repo)
+        self.assert_clean(bare, (0, 6))
+        for sid in ('local_o', 'local_other'):
+            with self.subTest(session=sid):
+                r = self.run_cli('open', '--dir', repo, '--session', sid)
+                self.assert_clean(r, (bare.returncode,))
+                self.assertEqual(r.stdout, bare.stdout)
+                self.assertEqual(json.loads(self.run_cli('open', '--dir', repo, '--session', sid, '--json').stdout),
+                                 json.loads(self.run_cli('open', '--dir', repo, '--json').stdout))
+
     def test_the_hook_never_fails_a_session(self):
         repo = self.repo('proj')
         self.assert_clean(self.run_cli('acquire', '--dir', repo, '--session', 'local_o', '--title', 't'))

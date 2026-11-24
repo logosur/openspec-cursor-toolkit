@@ -379,6 +379,7 @@ class SkillReloadExceptionTest(unittest.TestCase):
         self.state, self.registry, self.app = mk('state'), mk('registry'), mk('app')
         self.locks, self.config, self.skills = mk('locks'), mk('config'), mk('skills')
         self.scratch = mk('config/scratch-1')
+        self.config_dirs = self.config  # the folders whose sessions count as configuration sessions
         self.proj_a = os.path.realpath(mk('project-a'))
         self.proj_b = os.path.realpath(mk('project-b'))
         for p in (self.proj_a, self.proj_b):
@@ -401,7 +402,7 @@ class SkillReloadExceptionTest(unittest.TestCase):
                    'tool_input': {'session_id': to, 'message': text}}
         env = gate_env(self.tmp, CROSS_PROJECT_GATE_STATE=self.state, CROSS_PROJECT_GATE_REGISTRY=self.registry,
                    CROSS_PROJECT_GATE_APP_SESSIONS=self.app, ACCOUNT_SWITCH_STATE=os.path.join(self.tmp, 'none'),
-                   ACCOUNT_SWITCH_PROJECTS=os.path.join(self.tmp, 'none'), CROSS_PROJECT_GATE_CONFIG_DIRS=self.config,
+                   ACCOUNT_SWITCH_PROJECTS=os.path.join(self.tmp, 'none'), CROSS_PROJECT_GATE_CONFIG_DIRS=self.config_dirs,
                    CROSS_PROJECT_GATE_LOCKS=self.locks,
                    CROSS_PROJECT_GATE_REVIVE=os.path.join(self.tmp, 'revive.json'),
                    CROSS_PROJECT_GATE_UPDATED_GLOBS=os.path.join(self.skills, '*.md'),
@@ -436,6 +437,18 @@ class SkillReloadExceptionTest(unittest.TestCase):
 
     def test_a_project_session_with_the_marker_is_gated_as_before(self):
         self.assertGated(self.send(cwd=self.proj_a), 'solo la manda una sesión de la configuración global')
+
+    def test_the_refusal_names_the_configuration_folders_not_the_config_key(self):
+        out = self.send(text=RELOAD, cwd=self.proj_a)
+        self.assertGated(out, f'solo la manda una sesión de la configuración global, es decir, una que empezó o '
+                              f'trabaja dentro de «{self.config}»')
+        self.assertNotIn('config_session_dirs', out['permissionDecisionReason'])
+        other = os.path.join(self.tmp, 'second-config')
+        self.config_dirs = os.pathsep.join([self.config, other])
+        out = self.send(text=RELOAD, cwd=self.proj_a)
+        self.assertGated(out, f'solo la manda una sesión de la configuración global, es decir, una que empezó o '
+                              f'trabaja dentro de alguna de estas carpetas: «{self.config}», «{other}»')
+        self.assertNotIn('config_session_dirs', out['permissionDecisionReason'])
 
     def sender_record(self, origin, cwd):
         with open(os.path.join(self.app, 'acc', 'org', 'local_sender.json'), 'w') as fh:
@@ -616,6 +629,16 @@ class DefaultsTest(unittest.TestCase):
         self.assertEqual(self.decide('[reanimar supervisora] go', values=values), 'deny')
         self.assertIsNone(self.decide('[reanimar supervisora] go',
                                       values=dict(values, config_session_dirs=['~/.claude'])))
+
+    def test_with_no_configuration_folder_the_refusal_says_none_is_declared(self):
+        payload = {'tool_name': TOOL, 'session_id': SENDER, 'cwd': self.sender, 'permission_mode': 'bypassPermissions',
+                   'tool_input': {'session_id': TARGET, 'message': '[recarga de skill] go'}}
+        out = subprocess.run([sys.executable, HOOK], input=json.dumps(payload), capture_output=True, text=True,
+                             env=gate_env(self.tmp, values={'message_exceptions': ['skill_reload']}), timeout=30)
+        reason = json.loads(out.stdout)['hookSpecificOutput']['permissionDecisionReason']
+        self.assertIn('no aplica: solo la manda una sesión de la configuración global, y no hay ninguna carpeta '
+                      'declarada para eso: la lista config_session_dirs de la configuración de supervisión está vacía',
+                      reason)
 
     def test_a_payload_that_is_not_an_object_fails_open(self):
         self.assertIsNone(self.decide('', payload=['x']))

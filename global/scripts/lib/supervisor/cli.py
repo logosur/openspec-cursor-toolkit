@@ -46,7 +46,9 @@ def build_parser():
     p.add_argument('--verdict')
     p.add_argument('--force-close', metavar='REASON')
     p.add_argument('--open-ok', metavar='REASON', help='release although other sessions of the project are still open')
-    add('open', lock_mod.cmd_open, json_out=True)
+    p = add('open', lock_mod.cmd_open, json_out=True)
+    p.add_argument('--session', help='the session that asks, as `status` takes it; the list is the same, because '
+                   'the supervisor, its questions session and its closing session are always left out')
     add('closable', closable.cmd_closable, json_out=True)
     p = add('hold', closable.cmd_hold, session=True)
     p.add_argument('--target', required=True, metavar='LOCAL_ID', help='the finished session to leave open for now')

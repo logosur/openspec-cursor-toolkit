@@ -48,6 +48,7 @@ for url in \
   https://storage.googleapis.com/ \
   https://huggingface.co/ \
   https://api.elevenlabs.io/ \
+  https://api.elevenlabs.io/v1/voices \
   https://api.openai.com/ ; do
   code=$(curl -sS -L -m 20 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || true)
   note "net ${code:-000} $url"

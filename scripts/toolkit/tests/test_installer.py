@@ -16,7 +16,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
-from scripts.toolkit import cli, modules, plan as plan_mod, settings_merge
+from scripts.toolkit import apply as apply_mod, cli, modules, plan as plan_mod, settings_merge
 from scripts.toolkit.paths import REPO_ROOT, is_sandbox
 
 
@@ -111,6 +111,49 @@ class InstallBasics(Sandbox):
         code, out = self.run_cli('uninstall')
         self.assertTrue(path.is_file(), out)                      # it was there before: uninstall keeps it
 
+    def test_file_edited_in_place_is_not_overwritten_silently(self):
+        # the first install already backed up what was there before; a later edit is in no backup
+        rule = 'rules/worktrees-ubicacion.md'
+        self.write(rule, 'before the toolkit\n')
+        self.run_cli('install')
+        self.write(rule, 'edited in place\n')
+        code, out = self.run_cli('install', '--dry-run')
+        self.assertEqual(code, 0, out)
+        self.assertIn(f'update      {rule} [toolkit]  (edited in place, backup first)', out)
+        self.assertIn(rule, out.split('edited in place since', 1)[1])
+        before = snapshot(self.target)
+        code, out = self.run_cli('install')
+        self.assertEqual(code, 4, out)
+        self.assertIn('install refused', out)
+        self.assertEqual(snapshot(self.target), before)           # nothing written, the edit is still there
+        code, out = self.run_cli('install', '--overwrite-edited')
+        self.assertEqual(code, 0, out)
+        self.assertNotEqual((self.target / rule).read_text(), 'edited in place\n')
+        backups = sorted((self.target / 'backups').glob(f'toolkit-*/{rule}'))
+        self.assertIn(b'edited in place\n', [b.read_bytes() for b in backups])
+        manifest = json.loads((self.target / 'toolkit/installed.json').read_text())
+        first = (self.target / manifest['originals'][rule]).read_text()
+        self.assertEqual(first, 'before the toolkit\n')         # uninstall still restores the pre-toolkit file
+        code, out = self.run_cli('install')
+        self.assertEqual(code, 0, out)
+        self.assertIn('already installed', out)
+
+    def test_installs_in_the_same_second_get_their_own_backup_folder(self):
+        first = apply_mod._backup_dir(self.target, '20260101-000000')
+        first.mkdir(parents=True)
+        second = apply_mod._backup_dir(self.target, '20260101-000000')
+        self.assertNotEqual(first, second)
+        self.assertEqual(second.name, 'toolkit-20260101-000000-2')
+
+    def test_block_merged_file_edited_outside_the_block_installs(self):
+        self.run_cli('install')
+        claude_md = self.target / 'CLAUDE.md'
+        claude_md.write_text('my own notes\n\n' + claude_md.read_text())
+        code, out = self.run_cli('install')
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('install refused', out)
+        self.assertTrue(claude_md.read_text().startswith('my own notes\n'))
+
     def test_missing_required_binary_exits_2_and_writes_nothing(self):
         os.environ['PATH'] = str(self.tmp / 'empty-bin')
         code, out = self.run_cli('install')
@@ -198,7 +241,7 @@ class Uninstall(Sandbox):
         self.write('rules/worktrees-ubicacion.md', 'original\n')
         self.run_cli('install')
         self.write('rules/worktrees-ubicacion.md', 'edited in between\n')
-        self.run_cli('install')
+        self.assertEqual(self.run_cli('install', '--overwrite-edited')[0], 0)
         self.run_cli('uninstall')
         self.assertEqual((self.target / 'rules/worktrees-ubicacion.md').read_text(), 'original\n')
 

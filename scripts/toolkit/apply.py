@@ -33,7 +33,13 @@ def write_atomic(path: Path, data: bytes, mode: int | None = None) -> None:
 
 
 def _backup_dir(target: Path, stamp: str) -> Path:
-    return target / BACKUPS_REL / f'toolkit-{stamp}'
+    # two installs in the same second must not share a folder: the second copy would replace the first
+    base = target / BACKUPS_REL / f'toolkit-{stamp}'
+    path, n = base, 1
+    while path.exists():
+        n += 1
+        path = base.with_name(f'{base.name}-{n}')
+    return path
 
 
 def install(plan: Plan, toolkit_version: str) -> dict:
@@ -52,6 +58,7 @@ def install(plan: Plan, toolkit_version: str) -> dict:
                 bpath = backup_dir / dest
                 bpath.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(path, bpath)
+                # first backup only: uninstall restores what was there before the toolkit, not a later edit
                 originals.setdefault(dest, str(bpath.relative_to(target)))
             write_atomic(path, action.desired.content, action.desired.mode)
         elif action.kind == 'chmod':

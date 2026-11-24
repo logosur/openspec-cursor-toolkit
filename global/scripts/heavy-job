@@ -1757,6 +1757,8 @@ def cmd_detached_runner(args):
     sys.stderr = os.fdopen(2, 'w', buffering=1, closefd=False)
     os.environ.clear()
     os.environ.update(job.get('env') or {})
+    # the launcher's environment may hold tokens: once loaded it lives only in this process, not on disk
+    write_json(os.path.join(base, 'job.json'), {k: v for k, v in job.items() if k != 'env'})
     runner = {'pid': os.getpid(), 'started': now_iso(), 'admitted': None}
     write_json(os.path.join(base, 'runner.json'), runner)
     code = 1

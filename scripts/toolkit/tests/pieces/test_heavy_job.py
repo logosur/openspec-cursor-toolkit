@@ -8,6 +8,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import signal
 import socket
@@ -722,6 +723,107 @@ class SlotTest(SlotTestCase):
         self.assertIsNotNone(status['mem_available_kib'])
         self.assertIsNotNone(status['swap_used_kib'])
         self.assertEqual(len(status['load']), 3)
+
+
+class DetachTest(SlotTestCase):
+    """`run --detach`: the job waits and runs outside the launching process (setsid launcher in tests)."""
+
+    def setUp(self):
+        super().setUp()
+        self.ddir = os.path.join(self.dir, 'detached')
+        self.env.update(HEAVY_JOB_DETACHED_DIR=self.ddir, HEAVY_JOB_DETACH_LAUNCHER='setsid')
+
+    def tearDown(self):
+        for name in (os.listdir(self.ddir) if os.path.isdir(self.ddir) else []):
+            try:
+                with open(os.path.join(self.ddir, name, 'runner.json')) as handle:
+                    os.killpg(json.load(handle)['pid'], signal.SIGKILL)
+            except (OSError, ValueError, KeyError):
+                pass
+        super().tearDown()
+
+    def detach(self, *cmd, label='D', extra=()):
+        out = self.hj('run', '--detach', '--label', label, *extra, '--', *cmd)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        job_id = out.stdout.strip().splitlines()[0]
+        self.assertRegex(job_id, r'^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$')
+        return job_id
+
+    def test_returns_at_once_and_wait_gives_code_and_output(self):
+        started = time.monotonic()
+        job_id = self.detach(sys.executable, '-c', 'import time,sys; time.sleep(1); print("hecho"); sys.exit(3)')
+        self.assertLess(time.monotonic() - started, 5)
+        out = self.hj('wait', job_id)
+        self.assertEqual(out.returncode, 3, out.stderr)
+        self.assertIn('hecho', out.stdout)
+        self.assertIn('código 3', self.hj('jobs').stdout)
+        self.assertIn('hecho', self.hj('logs', job_id).stdout)
+
+    def test_survives_the_death_of_the_launching_session(self):
+        # a stand-in for the session: a shell in its own process group that launches the job and is then killed
+        session = subprocess.Popen(
+            ['bash', '-c', f'{shlex.quote(sys.executable)} {shlex.quote(SCRIPT)} run --detach --label cut -- '
+                           f'{shlex.quote(sys.executable)} -c "import time; time.sleep(2); print(\'sobrevive\')"; sleep 60'],
+            env=self.env, start_new_session=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        self.procs.append(session)
+        job_id = session.stdout.readline().strip()
+        os.killpg(session.pid, signal.SIGKILL)
+        out = self.hj('wait', job_id)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn('sobrevive', out.stdout)
+
+    def test_queued_behind_a_busy_slot_and_named_in_status(self):
+        self.spawn('run', '--label', 'ocupa', '--', 'sleep', '3')
+        self.wait_for_json()
+        job_id = self.detach(sys.executable, '-c', 'print("tras la cola")', label='en cola')
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not self.status()['queue']:
+            time.sleep(0.1)
+        queue = self.status()['queue']
+        self.assertEqual([e.get('detached') for e in queue], [job_id])
+        self.assertIn(f'desacoplado {job_id}', self.hj('status').stdout)
+        self.assertEqual(self.hj('wait', job_id, '--timeout', '0.5').returncode, HJ.WAIT_TIMED_OUT)
+        out = self.hj('wait', job_id)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn('tras la cola', out.stdout)
+
+    def test_stop_ends_the_job_and_frees_the_slot(self):
+        job_id = self.detach('sleep', '30')
+        info = self.wait_for_json()
+        self.assertEqual(info.get('detached'), job_id)
+        self.assertEqual(self.hj('stop', job_id).returncode, 0)
+        out = self.hj('wait', job_id)
+        self.assertEqual(out.returncode, 128 + signal.SIGTERM, out.stderr)
+        self.assertFalse(any(e['held'] for e in self.status()['slots']))
+        self.assertEqual(self.hj('stop', job_id).returncode, 1)
+
+    def test_a_runner_killed_hard_is_reported_dead_and_its_slot_freed(self):
+        job_id = self.detach('sleep', '30')
+        self.wait_for_json()
+        with open(os.path.join(self.ddir, job_id, 'runner.json')) as handle:
+            os.killpg(json.load(handle)['pid'], signal.SIGKILL)
+        out = self.hj('wait', job_id)
+        self.assertEqual(out.returncode, HJ.DETACHED_DIED, out.stderr)
+        self.assertFalse(any(e['held'] for e in self.status()['slots']))
+
+    def test_keeps_cwd_and_environment_and_a_private_job_file(self):
+        work = tempfile.mkdtemp(dir=self.dir)
+        env = dict(self.env, PROBE_VAR='valor-del-lanzador')
+        out = subprocess.run([sys.executable, SCRIPT, 'run', '--detach', '--', sys.executable, '-c',
+                              'import os; print(os.getcwd()); print(os.environ["PROBE_VAR"])'],
+                             capture_output=True, text=True, env=env, cwd=work, timeout=30)
+        job_id = out.stdout.strip().splitlines()[0]
+        waited = self.hj('wait', job_id)
+        self.assertEqual(waited.returncode, 0, waited.stderr)
+        self.assertIn(os.path.realpath(work), waited.stdout)
+        self.assertIn('valor-del-lanzador', waited.stdout)
+        self.assertEqual(os.stat(os.path.join(self.ddir, job_id, 'job.json')).st_mode & 0o777, 0o600)
+        self.assertEqual(os.stat(os.path.join(self.ddir, job_id)).st_mode & 0o777, 0o700)
+
+    def test_bad_ids_and_hold_detach_are_refused(self):
+        self.assertEqual(self.hj('wait', '../../etc').returncode, 2)
+        self.assertEqual(self.hj('wait', '20990101-000000-abcdef').returncode, 2)
+        self.assertEqual(self.hj('hold', '--detach', '--', 'true').returncode, 2)
 
 
 class TwoSlotTest(SlotTestCase):

@@ -4,9 +4,12 @@ Every test works in a throwaway HOME; nothing touches the real Claude dir.
 """
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
 import os
+import py_compile
+import re
 import shutil
 import subprocess
 import sys
@@ -261,6 +264,26 @@ class Uninstall(Sandbox):
         self.run_cli('uninstall')
         self.assertEqual((self.target / 'rules/autoria-commits.md').read_bytes(), src)
 
+    def test_bytecode_of_removed_files_goes_with_them(self):
+        """A piece that imports an installed file (a library, or a script loaded as a module) leaves its bytecode in
+        __pycache__; uninstall removes it with its source, so the folders it created go too. Runtime state the pieces
+        wrote (logs, queues) is the user's and stays."""
+        self.assertEqual(self.run_cli('install')[0], 0)
+        caches = []
+        for rel in ('scripts/lib/toolkit_config.py', 'scripts/supervisor-lock', 'scripts/heavy-job'):
+            caches.append(Path(importlib.util.cache_from_source(str(self.target / rel))))
+            py_compile.compile(str(self.target / rel), cfile=str(caches[-1]), doraise=True)
+        foreign = self.target / 'scripts/lib/__pycache__/not-ours.cpython-312.pyc'
+        foreign.write_bytes(b'')
+        self.write('state/heavy-job-gate/decisions.log', 'runtime state\n')
+        code, out = self.run_cli('uninstall')
+        self.assertEqual(code, 0, out)
+        self.assertFalse(any(c.exists() for c in caches), caches)
+        self.assertFalse((self.target / 'scripts/lib/supervisor').exists())
+        self.assertFalse((self.target / 'scripts/__pycache__').exists())
+        self.assertTrue(foreign.exists())   # bytecode of a file the toolkit never wrote is not touched
+        self.assertTrue((self.target / 'state/heavy-job-gate/decisions.log').exists())
+
 
 class OverrideLayer(Sandbox):
     def test_no_override_uses_defaults(self):
@@ -300,6 +323,40 @@ class OverrideLayer(Sandbox):
         self.assertEqual(cfg, {'root': '~/code/worktrees'})
         cmds = [h['command'] for e in self.settings()['hooks'].get('Stop', []) for h in e['hooks']]
         self.assertTrue(any('my-stop-notifier' in c for c in cmds), cmds)
+
+    def test_full_example_override_turns_everything_on(self):
+        """examples/override-full/ is the way to try all of the toolkit from zero: it must name every module and
+        every message exception the toolkit has, so a new one breaks this test instead of leaving the example
+        behind, and its install must pass every contract probe with its own values."""
+        example = REPO_ROOT / 'examples/override-full'
+        text = (example / 'override.yaml').read_text()
+        listed = next(line for line in text.splitlines() if line.startswith('modules:'))
+        self.assertEqual(sorted(m.strip() for m in listed.split('[', 1)[1].rstrip(']').split(',')),
+                         sorted(modules.available()))
+        gate = (REPO_ROOT / 'global/hooks/cross-project-message-gate').read_text()
+        known = set(re.findall(r'enabled\("(\w+)"\)', gate))
+        self.assertEqual(len(known), 4, known)
+        example_cfg = json.loads((example / 'config/supervision.json').read_text())
+        self.assertEqual(set(example_cfg['message_exceptions']), known)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):   # no --modules: the example's own choice
+            code = cli.main(['install', '--override', str(example), '--target', str(self.target)])
+        self.assertEqual(code, 0, out.getvalue() + err.getvalue())
+        self.assertEqual(sorted(plan_mod.read_manifest(self.target)['modules']), sorted(modules.available()))
+        supervision = json.loads((self.target / 'toolkit/config/supervision.json').read_text())
+        self.assertEqual(set(supervision['message_exceptions']), known)
+        self.assertEqual(supervision['presence_min'], 20)   # keys the example leaves out keep their defaults
+        self.assertFalse(supervision['deploy_preauthorised'] or supervision['archive_preauthorised'])
+        self.assertEqual(json.loads((self.target / 'toolkit/config/heavy-job.json').read_text())['default_slots'], 2)
+        commands = ' '.join(h['command'] for entries in self.settings()['hooks'].values() for e in entries
+                            for h in e['hooks'])
+        for hook in ('commit-authorship-gate', 'start-session-bypass-gate', 'cross-project-message-gate',
+                     'supervisor-stop-gate', 'heavy-job-gate', 'my-stop-notifier'):
+            self.assertIn(hook, commands)
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(out):
+            code = cli.main(['verify', '--target', str(self.target)])
+        self.assertEqual(code, 0, out.getvalue())
 
     def test_symlink_in_override_is_refused(self):
         self.override.mkdir()

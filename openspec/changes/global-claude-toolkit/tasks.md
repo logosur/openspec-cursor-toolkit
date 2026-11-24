@@ -33,6 +33,7 @@ Requirement references: **GI** = `specs/global-install`, **OL** = `specs/overrid
 - [x] 4.3 Config resolution per piece written to `toolkit/config/<piece>.json`; `global/scripts/lib/toolkit_config.py` with `load()` and `get` CLI; verify override-value and no-config tests.
 - [x] 4.4 Contracts + `verify` probes in a sandbox `HOME`; `install` exit `3` for a failing override piece; verify the faithful and broken replacement tests.
 - [x] 4.5 `examples/override/` with README (private versioning steps, no remote created); verify `install --override examples/override` works.
+- [x] 4.6 `examples/override-full/` (every module and message exception on, authority switches off) with `try.sh` (throwaway `HOME`, clean environment, every check, uninstall) and a CI step that runs it; verify the test that derives "every module" and "every exception" from the toolkit, and `try.sh` green from zero. Its first run found that `uninstall` left the `__pycache__` of the files it removed (and so their folders): it now removes that bytecode too, with a test that fails without the fix.
 
 ## 5. Modules content (D1, D2, D10)
 

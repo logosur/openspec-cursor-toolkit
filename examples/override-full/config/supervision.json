@@ -1,0 +1,4 @@
+{
+  "message_exceptions": ["account_switch", "project_resume", "skill_reload", "supervisor_revive"],
+  "config_session_dirs": ["~/.claude"]
+}

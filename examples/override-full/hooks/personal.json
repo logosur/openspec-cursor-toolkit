@@ -1,0 +1,5 @@
+{
+  "Stop": [
+    {"hooks": [{"type": "command", "command": "~/.claude/scripts/my-stop-notifier", "timeout": 5}]}
+  ]
+}

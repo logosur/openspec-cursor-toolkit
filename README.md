@@ -27,10 +27,14 @@ cd openspec-skills-toolkit
 ./install.sh install
 ```
 
+To try all of it first without touching your own `~/.claude`, run `bash examples/override-full/try.sh`: it installs
+every module with every option on into a throwaway `HOME`, runs every check the toolkit has and cleans up
+([`examples/override-full/`](examples/override-full/README.md)).
+
 | Command | What it does |
 |---|---|
 | `install [--modules a,b] [--override DIR] [--target DIR] [--dry-run] [-v] [--overwrite-edited]` | copies the modules' files, writes per-piece config, merges hook entries into `settings.json`; idempotent |
-| `uninstall` | removes what the last install wrote (files you edited since are kept), restores the files it replaced, removes its hook entries and its block in `CLAUDE.md` |
+| `uninstall` | removes what the last install wrote (files you edited since are kept) and the bytecode Python compiled from it, restores the files it replaced, removes its hook entries and its block in `CLAUDE.md`; the logs and state the pieces wrote while they ran are yours and stay |
 | `status` | modules, files and hooks currently installed |
 | `verify` | runs each installed piece's contract probes; only inside a sandbox `HOME` |
 | `drift`, `pull`, `equivalence` | keep the live dir, the override and the toolkit in sync (see below) |
@@ -77,7 +81,9 @@ catalog's task aliases.
 
 Your personal layer: by default `~/.config/claude-toolkit/`, or `CLAUDE_TOOLKIT_OVERRIDE`, or
 `--override DIR` (`--override ''` installs the toolkit alone). See [`examples/override/`](examples/override/README.md)
-for a complete example and how to version it in a private repository of your own.
+for a careful starting point and how to version it in a private repository of your own, and
+[`examples/override-full/`](examples/override-full/README.md) for every module and option turned on, with
+`try.sh`, which installs it into a throwaway `HOME` and runs every check the toolkit has (`bash examples/override-full/try.sh`).
 
 Precedence, highest first:
 
@@ -148,7 +154,8 @@ python3 scripts/privacy-check.py --range origin/main..HEAD       # a branch's co
 |------|-------------|
 | `install.sh`, `scripts/toolkit/` | Installer (Python package) and its tests (`scripts/toolkit/tests/`). |
 | `global/` | Modules, the files they install, per-piece config defaults, hook fragments and contracts. |
-| `examples/override/` | A complete example override. |
+| `examples/override/` | An example override to start from: the default modules, every opt-in behaviour off. |
+| `examples/override-full/` | An example override with every module and option on, and `try.sh`, which tries it all from zero in a throwaway `HOME`. |
 | `.claude/commands/`, `.claude/skills/` | The OpenSpec catalog for Claude Code (installed by the `openspec` module). Rule content is folded into each skill's `SKILL.md`. |
 | `.claude/scripts/openspec-list.sh` | List active OpenSpec changes (Markdown + HTML). |
 | `.cursor/commands/`, `.cursor/skills/`, `.cursor/rules/` | The same catalog as a Cursor package (secondary target), kept in parity, exported per project. |

@@ -6,6 +6,11 @@
       "command": "bash scripts/cloud/android-probe.sh",
       "timeout_min": 75,
       "equivalent_to": "bash scripts/cloud/android-probe.sh (measures whether a cloud session can build an Android bundle; not a gate)"
+    },
+    "network-probe": {
+      "command": "bash scripts/cloud/android-probe.sh --net-only",
+      "timeout_min": 10,
+      "equivalent_to": "nothing local: reports which hosts the cloud session reaches; not a gate"
     }
   }
 }

@@ -54,6 +54,9 @@ for url in \
   note "net ${code:-000} $url"
 done
 
+# --net-only: just the machine and the network, to check a change of the environment's allowed domains in seconds.
+if [ "${1:-}" = "--net-only" ]; then section "SUMMARY"; cat "$SUMMARY"; exit 0; fi
+
 section "docker and the SDK image"
 if ! docker info >/dev/null 2>&1; then
   (nohup dockerd >/tmp/dockerd-probe.log 2>&1 &)

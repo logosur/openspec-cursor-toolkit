@@ -979,6 +979,9 @@ def cmd_self_test(args):
           and 'local_sup' not in r.stdout and 'local_qs' not in r.stdout)
     oj = json.loads(run('open', '--dir', repo, '--json').stdout or '{}')
     check('open --json: count and the rows', oj.get('count') == 1 and [x['id'] for x in oj.get('open', [])] == ['local_nb'])
+    same = [run('open', '--dir', repo, '--session', sid) for sid in ('local_sup', 'local_nb')]
+    check('open --session (the owner or any other session): accepted, the same rows and exit code as without it',
+          all(x.returncode == r.returncode and x.stdout == r.stdout for x in same))
     r = run('release', '--dir', repo, '--session', 'local_sup', '--verdict', 'DONE')
     check('release: a session nobody opened (not archived) is still open -> exit 6, OPEN line, explanation, lock kept, nothing recorded',
           r.returncode == 6 and r.stdout.startswith('OPEN local_nb | ') and 'local_qs' not in r.stdout and 'local_sup' not in r.stdout

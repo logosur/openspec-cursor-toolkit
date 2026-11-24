@@ -147,6 +147,22 @@ def _env_list(name: str, default: list) -> list:
     return [p for p in value.split(os.pathsep) if p] if value else default
 
 
+def _config_dirs() -> list:
+    """`config_session_dirs` as written (the test override first): the one list the check and its message both use."""
+    return _env_list("CROSS_PROJECT_GATE_CONFIG_DIRS", CONFIG["config_session_dirs"])
+
+
+def _not_a_config_sender() -> str:
+    """Why a sender outside those folders cannot send the marker, naming the folders instead of the config key."""
+    dirs = _config_dirs()
+    lead = "solo la manda una sesión de la configuración global"
+    if not dirs:
+        return (f"{lead}, y no hay ninguna carpeta declarada para eso: la lista config_session_dirs de la "
+                "configuración de supervisión está vacía")
+    where = f"«{dirs[0]}»" if len(dirs) == 1 else "alguna de estas carpetas: " + ", ".join(f"«{d}»" for d in dirs)
+    return f"{lead}, es decir, una que empezó o trabaja dentro de {where}"
+
+
 def _config_sender(cwd: str, sid: str) -> bool:
     """The sender maintains the global configuration: its current folder or the one it started in (the app's
     `originCwd`) is one of `config_session_dirs`."""
@@ -154,8 +170,7 @@ def _config_sender(cwd: str, sid: str) -> bool:
     if sid and sid != "unknown":
         for rec in app_sessions(sid, lambda r: r.get("cliSessionId") == sid):
             folders += [rec.get("originCwd") or "", rec.get("cwd") or ""]
-    config = [os.path.realpath(os.path.expanduser(p)) for p in _env_list(
-        "CROSS_PROJECT_GATE_CONFIG_DIRS", CONFIG["config_session_dirs"])]
+    config = [os.path.realpath(os.path.expanduser(p)) for p in _config_dirs()]
     return any(real == d or real.startswith(d.rstrip("/") + "/")
                for real in (os.path.realpath(f) for f in folders if f) for d in config)
 
@@ -195,7 +210,7 @@ def skill_reload(to: str, inp: dict, cwd: str, sid: str = ""):
     if RELOAD_MARKER not in text:
         return None
     if not _config_sender(cwd, sid):
-        return "ignore", "solo la manda una sesión de la configuración global (config_session_dirs)"
+        return "ignore", _not_a_config_sender()
     key, lock = _supervisor_lock(to)
     project = (lock.get("project") or key) if lock else None
     seen = lock.get("skill_seen") if lock and isinstance(lock.get("skill_seen"), (int, float)) else None

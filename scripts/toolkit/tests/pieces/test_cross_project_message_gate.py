@@ -380,6 +380,7 @@ class SkillReloadExceptionTest(unittest.TestCase):
         self.locks, self.config, self.skills = mk('locks'), mk('config'), mk('skills')
         self.scratch = mk('config/scratch-1')
         self.config_dirs = self.config  # the folders whose sessions count as configuration sessions
+        self.updated_globs = os.path.join(self.skills, '*.md')  # the files whose change makes a reload due
         self.proj_a = os.path.realpath(mk('project-a'))
         self.proj_b = os.path.realpath(mk('project-b'))
         for p in (self.proj_a, self.proj_b):
@@ -405,7 +406,7 @@ class SkillReloadExceptionTest(unittest.TestCase):
                    ACCOUNT_SWITCH_PROJECTS=os.path.join(self.tmp, 'none'), CROSS_PROJECT_GATE_CONFIG_DIRS=self.config_dirs,
                    CROSS_PROJECT_GATE_LOCKS=self.locks,
                    CROSS_PROJECT_GATE_REVIVE=os.path.join(self.tmp, 'revive.json'),
-                   CROSS_PROJECT_GATE_UPDATED_GLOBS=os.path.join(self.skills, '*.md'),
+                   CROSS_PROJECT_GATE_UPDATED_GLOBS=self.updated_globs,
                    )
         out = subprocess.run([sys.executable, HOOK], input=json.dumps(payload), capture_output=True, text=True,
                              env=env, timeout=30)
@@ -482,6 +483,38 @@ class SkillReloadExceptionTest(unittest.TestCase):
         os.utime(self.skill, (old, old))
         self.lock(skill_seen=old - 3600)
         self.assertIsNone(self.send())
+        self.assertIn('allow-skill-reload', self.log())
+
+    def watched(self, name, mtime):
+        path = os.path.join(self.skills, name)
+        open(path, 'w').close()
+        os.utime(path, (mtime, mtime))
+
+    def test_a_change_older_than_the_reload_is_not_new_although_the_skill_is_older(self):
+        # the skill file is older than another watched file (a rule, the supervisor-lock code), but she reloaded after
+        # that change: `skill_seen` alone (the skill's mtime) would let a reload through after every reload
+        now = time.time()
+        os.utime(self.skill, (now - 7200, now - 7200))
+        self.watched('rule.md', now - 600)
+        self.lock(skill_seen=now - 7200, skill_seen_at=now - 60)
+        self.assertGated(self.send(text=RELOAD), 'ya recargó la skill después del último cambio')
+
+    def test_a_change_after_the_reload_passes(self):
+        now = time.time()
+        os.utime(self.skill, (now - 7200, now - 7200))
+        self.watched('rule.md', now - 60)
+        self.lock(skill_seen=now - 7200, skill_seen_at=now - 600)
+        self.assertIsNone(self.send(text=RELOAD))
+        self.assertIn('allow-skill-reload', self.log())
+
+    def test_a_change_to_the_supervisor_lock_package_makes_a_reload_due(self):
+        self.updated_globs = ''  # the hook's own list, under the throwaway HOME
+        package = os.path.join(self.tmp, 'home', '.claude', 'scripts', 'lib', 'supervisor')
+        os.makedirs(package, exist_ok=True)
+        open(os.path.join(package, 'cli.py'), 'w').close()
+        now = time.time()
+        self.lock(skill_seen=now - 7200, skill_seen_at=now - 600)
+        self.assertIsNone(self.send(text=RELOAD))
         self.assertIn('allow-skill-reload', self.log())
 
     def test_a_supervisor_that_never_read_the_skill_may_be_told_to(self):
@@ -561,6 +594,9 @@ class SupervisorReviveExceptionTest(SkillReloadExceptionTest):
     test_a_project_session_that_started_in_its_project_stays_gated = None
     test_a_recipient_without_a_supervisor_lock_is_gated_as_before = None
     test_a_supervisor_that_already_read_the_latest_change_is_gated_as_before = None
+    test_a_change_older_than_the_reload_is_not_new_although_the_skill_is_older = None
+    test_a_change_after_the_reload_passes = None
+    test_a_change_to_the_supervisor_lock_package_makes_a_reload_due = None
     test_a_change_newer_than_the_version_she_read_passes_even_days_later = None
     test_a_supervisor_that_never_read_the_skill_may_be_told_to = None
     test_without_the_marker_it_is_gated_as_before = None

@@ -1958,8 +1958,12 @@ def cmd_self_test(args):
     os.utime(skill, (t0, t0))
     run('acquire', '--dir', repo, '--session', 'local_mb', '--title', 'mb')
     check('acquire: leaves skill_seen unset (taking the lock is not reading the skill)', 'skill_seen' not in load() and 'mailbox' not in load())
+    before = time.time()
     run('beat', '--dir', repo, '--session', 'local_mb', '--skill-seen')
+    after = time.time()
     check('beat --skill-seen right after acquire: stores the skill file mtime', load().get('skill_seen') == t0)
+    check('beat --skill-seen: also stores when the skill was read (skill_seen_at), which the message gate compares with',
+          before <= (load().get('skill_seen_at') or 0) <= after)
     check('status: no mailbox= while unset', 'mailbox=' not in run('status', '--dir', repo).stdout)
     r = run('beat', '--dir', repo, '--session', 'local_mb', '--mailbox', 'local_box')
     check('beat --mailbox: stores the mailbox, state untouched', r.returncode == 0 and load().get('mailbox') == 'local_box' and load()['state'] == 'running')

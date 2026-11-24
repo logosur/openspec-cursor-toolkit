@@ -645,8 +645,8 @@ class GlobalTree:
                     cited = cited.rstrip('.`/')
                     if cited in reach or cited in provided or cited in reach_dirs:
                         continue
-                    if cited.startswith('skills/') and any(d.startswith(cited + '/') for d in reach):
-                        continue
+                    if any(d.startswith(cited + '/') for d in reach):
+                        continue   # a folder (or a glob in it) the module fills, like a skill's or a package's
                     self.v.error(self.v.rel(src), 'global-citation',
                                  f'cites ~/.claude/{cited}, which module {name!r} and its dependencies do not install')
 

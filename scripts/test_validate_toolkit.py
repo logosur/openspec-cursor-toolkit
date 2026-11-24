@@ -493,6 +493,18 @@ class GlobalTreeChecks(CatalogTestCase):
         self.write('global/rules/extra.md', 'Uses `~/.claude/rules/gate.md`.\n')
         self.assertNoRule('global-citation')
 
+    def test_cited_folder_the_module_fills_is_fine(self):
+        manifest = (self.root / 'global/modules/core.yaml').read_text()
+        self.write('global/modules/core.yaml', manifest.replace(
+            'files:\n', 'files:\n  - {src: global/scripts/lib/pkg/, dest: scripts/lib/pkg/}\n', 1))
+        self.write('global/scripts/lib/pkg/a.py', 'x = 1\n')
+        self.append('global/rules/gate.md', 'Watches `~/.claude/scripts/lib/pkg/*.py`.\n')
+        self.assertNoRule('global-citation')
+
+    def test_cited_folder_the_module_does_not_fill(self):
+        self.append('global/rules/gate.md', 'Watches `~/.claude/scripts/lib/absent/*.py`.\n')
+        self.assertFinding('ERROR', 'global/rules/gate.md', 'global-citation', 'scripts/lib/absent')
+
     def test_global_skill_without_trigger_clause(self):
         self.write('global/modules/core.yaml', (self.root / 'global/modules/core.yaml').read_text()
                    .replace('files:\n', 'files:\n  - {src: global/skills/panel/SKILL.md, dest: skills/panel/SKILL.md}\n'))

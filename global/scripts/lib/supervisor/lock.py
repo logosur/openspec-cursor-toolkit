@@ -5,6 +5,7 @@ import json
 import os
 import socket
 import sys
+import time
 
 from . import backlog, census, lint, projects, session_roles, settings, util, workmode
 
@@ -187,6 +188,8 @@ def cmd_beat(args):
             mtime = lint.skill_mtime()
             if mtime is not None:
                 owner['skill_seen'] = mtime
+                # when it was read: the message gate counts as a new update only what changed after this moment
+                owner['skill_seen_at'] = time.time()
         store.write(project['key'], owner)
         print(f'BEAT {project["key"]}')
     hint = no_mailbox_hint(project, owner)

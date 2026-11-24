@@ -213,21 +213,23 @@ def skill_reload(to: str, inp: dict, cwd: str, sid: str = ""):
         return "ignore", _not_a_config_sender()
     key, lock = _supervisor_lock(to)
     project = (lock.get("project") or key) if lock else None
-    seen = lock.get("skill_seen") if lock and isinstance(lock.get("skill_seen"), (int, float)) else None
+    seen = [lock.get(k) for k in ("skill_seen", "skill_seen_at")
+            if lock and isinstance(lock.get(k), (int, float)) and not isinstance(lock.get(k), bool)]
     if not project:
         return "ignore", f"«{to}» no es una supervisora (no tiene cerrojo de supervisión; nómbrala por su id local_…)"
     newest = 0.0
     for pattern in _env_list("CROSS_PROJECT_GATE_UPDATED_GLOBS", [
             "~/.claude/skills/*/SKILL.md", "~/.claude/skills/*/reference/*.md", "~/.claude/rules/*.md",
-            "~/.claude/scripts/supervisor-lock"]):
+            "~/.claude/scripts/supervisor-lock", "~/.claude/scripts/lib/supervisor/*.py"]):
         for path in glob.glob(os.path.expanduser(pattern)):
             try:
                 newest = max(newest, os.stat(path).st_mtime)
             except OSError:
                 pass
-    # `skill_seen` is the mtime of the skill version the supervisor read (supervisor-lock beat --skill-seen); without it
-    # the supervisor never read it. An update is anything newer than that version.
-    if seen is not None and newest <= seen + 1e-6:
+    # `supervisor-lock beat --skill-seen` records the mtime of the skill version the supervisor read (`skill_seen`) and,
+    # since then, when it read it (`skill_seen_at`); without either it never read it. An update is anything newer than
+    # the later of the two: a rule or the supervisor-lock code changed before the read is not new to it.
+    if seen and newest <= max(seen) + 1e-6:
         return "ignore", ("ya recargó la skill después del último cambio de una skill, una regla global o "
                           "supervisor-lock")
     return "allow", project

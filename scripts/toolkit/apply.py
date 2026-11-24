@@ -54,6 +54,10 @@ def install(plan: Plan, toolkit_version: str) -> dict:
                 shutil.copy2(path, bpath)
                 originals.setdefault(dest, str(bpath.relative_to(target)))
             write_atomic(path, action.desired.content, action.desired.mode)
+        elif action.kind == 'chmod':
+            # the content was already there before the toolkit: uninstall leaves it (and its new mode)
+            originals.setdefault(dest, PREEXISTING)
+            os.chmod(path, action.desired.mode)
         elif action.kind == 'unchanged':
             # identical content was already there before the toolkit: uninstall must leave it
             originals.setdefault(dest, PREEXISTING)

@@ -101,6 +101,7 @@ if [ -f package.json ] && [ -d "$SDK/platforms" ]; then
     cd android || exit 0
     # The image's JDK, for Gradle itself and for its toolchains (the session's own Java may be another version).
     if [ -x "$JDK/bin/java" ]; then
+      host_path=$PATH
       export JAVA_HOME=$JDK PATH=$JDK/bin:$PATH
       printf '\norg.gradle.java.installations.paths=%s\norg.gradle.java.installations.auto-download=false\n' "$JDK" >>gradle.properties
     fi
@@ -120,6 +121,11 @@ if [ -f package.json ] && [ -d "$SDK/platforms" ]; then
       rc=$?
       note "gradle_attempt=$attempts exit=$rc elapsed=$(( $(now) - t )) http_429=$(grep -c 'status code 429' "$WORK/gradle.log") tasks=$(grep -cE '^> Task ' "$WORK/gradle.log")"
       [ "$rc" -eq 0 ] && break
+      if [ "$attempts" -eq 1 ] && [ $(( $(now) - t )) -lt 15 ] && [ -n "${host_path:-}" ]; then
+        # Gradle did not even start on the image's JDK: say why, then run it on the session's Java (toolchain still set).
+        note "gradle_start_failure:"; head -12 "$WORK/gradle.log" | cut -c1-230 | tee -a "$SUMMARY"
+        unset JAVA_HOME; export PATH=$host_path; continue
+      fi
       grep -q 'status code 429' "$WORK/gradle.log" || break
       sleep 90
     done
@@ -128,6 +134,7 @@ if [ -f package.json ] && [ -d "$SDK/platforms" ]; then
     if [ -n "$aab" ]; then note "aab=yes size_mb=$(( $(stat -c %s "$aab") / 1048576 )) abis=$(unzip -l "$aab" 2>/dev/null | grep -oE 'base/lib/[^/]+' | sort -u | cut -d/ -f3 | tr '\n' ' ')"; else note "aab=no"; fi
     note "gradle_tasks_run=$(grep -cE '^> Task ' "$WORK/gradle.log") native_tasks=$(grep -cE '^> Task .*(CMake|buildCMake|configureCMake)' "$WORK/gradle.log")"
     if [ "$rc" -ne 0 ]; then
+      note "gradle_log_tail:"; grep -v '^$' "$WORK/gradle.log" | tail -25 | cut -c1-230 | tee -a "$SUMMARY"
       note "gradle_first_errors:"
       grep -nE 'Could not (resolve|GET|HEAD|download|find)|FAILURE|What went wrong|NDK|> Failed|403|Connection|Cannot find' "$WORK/gradle.log" | head -12 | cut -c1-230 | tee -a "$SUMMARY"
       note "gradle_blocked_hosts=$(grep -oE "Could not (GET|HEAD) 'https://[^/']+" "$WORK/gradle.log" | grep -oE 'https://.*' | sort | uniq -c | tr '\n' ' ' | cut -c1-300)"

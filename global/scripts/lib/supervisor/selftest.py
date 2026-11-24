@@ -26,6 +26,7 @@ from . import (
 # toolkit config and every state path live in a new sandbox, with the variables that could point elsewhere removed;
 # the child checks every path it is about to use (sandbox_paths) and refuses to run if one resolves outside.
 SANDBOX_ENV = 'SUPERVISOR_SELFTEST_SANDBOX'
+INSTALLED_CONFIG_ENV = 'SUPERVISOR_SELFTEST_INSTALLED_CONFIG'   # set by the sandbox, never by hand
 SANDBOX_SCRUB_PREFIXES = ('SUPERVISOR_', 'ASK_GATE', 'ASK_QUEUE', 'CLOUD_TESTS_', 'ACCOUNT_SWITCH', 'PROJECT_PAUSE',
                           'CROSS_PROJECT_GATE_', 'CLAUDE_TOOLKIT_', 'XDG_', 'GIT_')
 SANDBOX_SCRUB_NAMES = ('CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_HOST_SESSION_ID',
@@ -51,6 +52,12 @@ def enter_sandbox():
     for name in ('skills', 'rules'):
         if os.path.isdir(os.path.join(shipped, name)):
             shutil.copytree(os.path.join(shipped, name), os.path.join(claude, name), symlinks=False)
+    # The installed skill is linted with the installed config: a machine whose skill has its own anchors sets them
+    # there. Every other check runs with the defaults.
+    installed_cfg = os.path.join(shipped, 'toolkit', 'config')
+    installed_copy = os.path.join(root, 'installed-config')
+    if os.path.isdir(installed_cfg):
+        shutil.copytree(installed_cfg, installed_copy, symlinks=False)
     env = {k: v for k, v in os.environ.items()
            if k in SANDBOX_KEEP or not (k.startswith(SANDBOX_SCRUB_PREFIXES) or k in SANDBOX_SCRUB_NAMES)}
     env.update({'HOME': home, 'TMPDIR': os.path.join(root, 'tmp'),
@@ -58,6 +65,8 @@ def enter_sandbox():
                 'XDG_CONFIG_HOME': os.path.join(home, '.config'), 'XDG_STATE_HOME': os.path.join(home, '.local', 'state'),
                 'XDG_CACHE_HOME': os.path.join(home, '.cache'), 'XDG_DATA_HOME': os.path.join(home, '.local', 'share'),
                 'XDG_RUNTIME_DIR': os.path.join(root, 'run'), SANDBOX_ENV: root})
+    if os.path.isdir(installed_copy):
+        env[INSTALLED_CONFIG_ENV] = installed_copy
     try:
         return subprocess.run([sys.executable, entry, 'self-test'], env=env, cwd=root).returncode
     finally:
@@ -3407,7 +3416,10 @@ def cmd_self_test(args):
     r = subprocess.run([sys.executable, runtime.ENTRY, 'skill-lint'], capture_output=True, text=True, env=lenv)
     check('skill-lint: a core without what must survive a compaction fails', r.stdout.count('ANCHOR_MISSING') == len(lint.SKILL_ANCHORS))
     if not os.environ.get('SUPERVISOR_SKIP_INSTALLED_LINT'):
-        r = subprocess.run([sys.executable, runtime.ENTRY, 'skill-lint'], capture_output=True, text=True)
+        installed_env = dict(os.environ)
+        if os.environ.get(INSTALLED_CONFIG_ENV):
+            installed_env['CLAUDE_TOOLKIT_CONFIG_DIR'] = os.environ[INSTALLED_CONFIG_ENV]
+        r = subprocess.run([sys.executable, runtime.ENTRY, 'skill-lint'], capture_output=True, text=True, env=installed_env)
         check('skill-lint: the installed skill, its references and the rules are sound\n' + r.stdout.strip(), r.returncode == 0)
 
 

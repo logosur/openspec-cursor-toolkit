@@ -41,6 +41,8 @@ for url in \
   https://plugins.gradle.org/m2/ \
   https://repo.maven.apache.org/maven2/ \
   https://www.jitpack.io/ \
+  https://jitpack.io/ \
+  https://huggingface.co/openai/whisper-tiny/resolve/main/model.safetensors \
   https://registry.npmjs.org/expo \
   https://registry-1.docker.io/v2/ \
   https://storage.googleapis.com/ \

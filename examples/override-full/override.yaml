@@ -1,0 +1,14 @@
+schema: 1
+# Every module the toolkit ships, so an install from zero can try all of it. sessions, supervision and heavy-jobs
+# change what sessions do unattended: read README.md (next to this file) before copying it to ~/.config/claude-toolkit.
+modules: [openspec, core, devtools, sessions, supervision, heavy-jobs]
+
+# Toolkit files you do not want at all; their hooks go too. Empty here: everything is installed.
+remove: []
+
+# Live files the toolkit must never manage (equivalence and drift ignore them).
+excluded:
+  - skills/some-third-party-skill/**
+
+# Intended differences between an install and your live dir, each with a reason and its proof.
+equivalence: []

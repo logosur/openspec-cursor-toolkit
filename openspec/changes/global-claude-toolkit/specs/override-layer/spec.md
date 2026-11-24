@@ -56,3 +56,14 @@ The repository SHALL ship `examples/override/` with the layout and instructions 
 #### Scenario: Template
 - **WHEN** a user copies `examples/override/` to `~/.config/claude-toolkit/`
 - **THEN** `install` accepts it and the README explains how to version it privately
+
+### Requirement: Everything can be tried from zero
+The repository SHALL ship `examples/override-full/`, an override that turns on every module and every message exception the toolkit has (and no switch that grants authority), with `try.sh`, which installs it into a throwaway `HOME` with a clean environment and runs every check the toolkit has; CI SHALL run it on every push.
+
+#### Scenario: A new module or exception
+- **WHEN** a module manifest or a message exception is added to the toolkit and the full example does not name it
+- **THEN** the installer tests fail
+
+#### Scenario: Trying from zero
+- **WHEN** a user runs `bash examples/override-full/try.sh` on a machine where the toolkit was never installed
+- **THEN** it installs, runs `verify`, the pieces' self-tests, `drift`, a second install that changes nothing and `uninstall`, touches nothing outside its throwaway `HOME`, removes that `HOME` and exits `0` when every step passes

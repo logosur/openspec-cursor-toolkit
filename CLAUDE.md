@@ -23,7 +23,7 @@ Claude Code solo carga este archivo y `.claude/rules/*.md`; `.cursor/rules/*.mdc
 - `docs/openspec/` índice, prompts, templates; compartido.
 - `install.sh` + `scripts/toolkit/` instalador (install, uninstall, status, verify, drift, pull, equivalence) y sus tests (`scripts/toolkit/tests/`, siempre en un `HOME` temporal).
 - `global/` lo que instalan los módulos que no es catálogo: `modules/*.yaml` (manifiestos), `hooks/`, `scripts/` (+ `lib/toolkit_config.py`), `rules/`, `skills/`, `CLAUDE.md` (bloque gestionado), `config/<pieza>.json` (valores por defecto), `settings/hooks.*.json` (fragmentos de hooks) y `contracts/<pieza>.yaml` (sondas).
-- `examples/override/` override de ejemplo; el real nunca entra en el repo.
+- `examples/override/` override de ejemplo para empezar (módulos por defecto); `examples/override-full/` lo enciende todo y su `try.sh` lo prueba entero desde cero en un `HOME` temporal (la CI lo ejecuta). El override real nunca entra en el repo.
 - `scripts/` validador del catálogo, comprobador de privacidad (`privacy-check.py`, patrones y excepciones), sus tests; herramienta de este repo, no se instala ni se exporta.
 - `.{cursor,claude}/context/` salida de sesión, gitignored.
 

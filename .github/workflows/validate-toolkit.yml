@@ -27,3 +27,5 @@ jobs:
         run: python scripts/privacy-check.py
       - name: Installer, contract, drift and equivalence tests (throwaway HOME)
         run: python -m unittest discover -s scripts/toolkit/tests -t .
+      - name: Try everything from zero with the full example override (throwaway HOME)
+        run: bash examples/override-full/try.sh

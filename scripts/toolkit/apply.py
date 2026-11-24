@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -136,6 +137,9 @@ def uninstall(target: Path, dry_run: bool = False) -> list[str]:
             report.append(f'remove    {dest}')
             if not dry_run:
                 path.unlink()
+                for cache in _compiled_caches(path):
+                    cache.unlink()
+                _prune_empty(path.parent / '__pycache__', target)
                 _prune_empty(path.parent, target)
     keys = [tuple(k) for k in manifest.get('hooks_added', [])]
     settings_path = target / 'settings.json'
@@ -152,6 +156,19 @@ def uninstall(target: Path, dry_run: bool = False) -> list[str]:
         (target / MANIFEST_REL).unlink()
         _prune_empty((target / MANIFEST_REL).parent, target)
     return report
+
+
+def _compiled_caches(path: Path) -> list[Path]:
+    """The bytecode Python wrote for PATH when a piece imported it, for any interpreter version, named the way
+    importlib names it: `__pycache__/x.<tag>.pyc` for `x.py`, `__pycache__/x<tag>.pyc` for a script `x` without a
+    suffix loaded as a module. Python made them, not the user: once their source is gone they only keep folders alive."""
+    cache_dir = path.parent / '__pycache__'
+    if not cache_dir.is_dir():
+        return []
+    base, dot, rest = path.name.rpartition('.')
+    head = re.escape(base or rest) + re.escape(dot)
+    pattern = re.compile(head + r'(?:cpython-[0-9]+|pypy[0-9]+)(?:\.opt-[0-9])?\.pyc')
+    return [c for c in cache_dir.iterdir() if c.is_file() and pattern.fullmatch(c.name)]
 
 
 def _prune_empty(directory: Path, stop: Path) -> None:

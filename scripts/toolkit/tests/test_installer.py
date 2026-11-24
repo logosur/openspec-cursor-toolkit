@@ -91,6 +91,26 @@ class InstallBasics(Sandbox):
         self.assertIn('already installed', out)
         self.assertEqual(snapshot(self.target), before)
 
+    def test_same_content_other_mode_is_chmodded_not_rewritten(self):
+        # an existing Claude dir written with umask 002 has 0664 files: same bytes as the toolkit's 0644 copy
+        self.run_cli('install')
+        manifest = json.loads((self.target / 'toolkit/installed.json').read_text())
+        (self.target / 'toolkit/installed.json').unlink()
+        rule = next(d for d in manifest['files'] if d.startswith('rules/'))
+        path = self.target / rule
+        os.chmod(path, 0o664)
+        os.utime(path, (1_000_000_000, 1_000_000_000))
+        code, out = self.run_cli('install', '--dry-run')
+        self.assertIn(f'chmod       {rule}', out)
+        code, out = self.run_cli('install')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(path.stat().st_mtime, 1_000_000_000)      # not rewritten
+        manifest = json.loads((self.target / 'toolkit/installed.json').read_text())
+        self.assertEqual(manifest['originals'][rule], '@preexisting')
+        code, out = self.run_cli('uninstall')
+        self.assertTrue(path.is_file(), out)                      # it was there before: uninstall keeps it
+
     def test_missing_required_binary_exits_2_and_writes_nothing(self):
         os.environ['PATH'] = str(self.tmp / 'empty-bin')
         code, out = self.run_cli('install')

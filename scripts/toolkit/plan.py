@@ -33,7 +33,7 @@ class Desired:
 
 @dataclass
 class Action:
-    kind: str             # create | update | unchanged | remove | keep-edited
+    kind: str             # create | update | chmod | unchanged | remove | keep-edited
     dest: str
     desired: Desired | None = None
     backup: bool = False
@@ -59,7 +59,7 @@ class Plan:
         return out
 
     def changes(self) -> bool:
-        return any(a.kind in ('create', 'update', 'remove') for a in self.actions) or bool(self.hooks_to_add)
+        return any(a.kind in ('create', 'update', 'chmod', 'remove') for a in self.actions) or bool(self.hooks_to_add)
 
 
 def read_manifest(target: Path) -> dict:
@@ -146,6 +146,10 @@ def build(target: Path, mods: list[Module], ov: Override) -> Plan:
             actions.append(Action('create', dest, d))
         elif current == d.content and (path.stat().st_mode & 0o777) == d.mode:
             actions.append(Action('unchanged', dest, d))
+        elif current == d.content:
+            # same bytes, other permission bits: fix the mode only. Rewriting would bump the mtime, and running
+            # sessions read a newer mtime as a changed skill or hook.
+            actions.append(Action('chmod', dest, d))
         else:
             ours = dest in prev_files and sha(current) == prev_files[dest]['sha256']
             needs_backup = not ours and dest not in previous.get('originals', {})

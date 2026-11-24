@@ -4,13 +4,6 @@ description: Start OpenSpec work from master prompt (explore -> propose -> hydra
 disable-model-invocation: true
 ---
 
----
-name: /prepara-tarea
-id: prepara-tarea
-category: Workflow
-description: "Start OpenSpec work from master prompt (explore -> propose -> hydrate -> verify; no product code)"
----
-
 # Prepara tarea (OpenSpec)
 
 > **MANDATORY — this same user message**  

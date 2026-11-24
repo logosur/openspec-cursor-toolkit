@@ -4,13 +4,6 @@ description: Propose a new change - create it and generate all artifacts in one 
 disable-model-invocation: true
 ---
 
----
-name: /opsx-propose
-id: opsx-propose
-category: Workflow
-description: Propose a new change - create it and generate all artifacts in one step
----
-
 Propose a new change - create the change and generate all artifacts in one step.
 
 I'll create a change with artifacts:

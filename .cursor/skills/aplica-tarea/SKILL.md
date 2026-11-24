@@ -4,13 +4,6 @@ description: Apply an OpenSpec change (same workflow as /opsx:apply)
 disable-model-invocation: true
 ---
 
----
-name: /aplica-tarea
-id: aplica-tarea
-category: Workflow
-description: "Apply an OpenSpec change (same workflow as /opsx:apply)"
----
-
 # Aplica tarea (OpenSpec)
 
 You are running **aplica-tarea**: implement pending work for `openspec/changes/<slug>/`. Use this **only** after the user explicitly chooses to apply (e.g. after `/prepara-tarea` or `/verifica-tarea` completed and the user wants implementation). **Do not** chain automatically from those commands in the same user message without a new explicit request.

@@ -4,13 +4,6 @@ description: Hydrate an OpenSpec change until READY TO APPLY (artefacts + status
 disable-model-invocation: true
 ---
 
----
-name: /mejora-tarea
-id: mejora-tarea
-category: Workflow
-description: "Hydrate an OpenSpec change until READY TO APPLY (artefacts + status)"
----
-
 # Mejora tarea (OpenSpec)
 
 You are running **mejora-tarea**: bring `openspec/changes/<slug>/` to **READY TO APPLY**.

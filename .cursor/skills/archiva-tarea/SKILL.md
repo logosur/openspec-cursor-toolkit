@@ -4,13 +4,6 @@ description: Archive an OpenSpec change (same workflow as /opsx:archive)
 disable-model-invocation: true
 ---
 
----
-name: /archiva-tarea
-id: archiva-tarea
-category: Workflow
-description: "Archive an OpenSpec change (same workflow as /opsx:archive)"
----
-
 # Archiva tarea (OpenSpec)
 
 You are running **archiva-tarea**: archive `openspec/changes/<slug>/` when work is complete.

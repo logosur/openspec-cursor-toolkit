@@ -1,5 +1,5 @@
 ---
-description: RUNE specs — optional formal specifications for business logic services (stack-agnostic)
+description: "Writes RUNE specifications (SIGNATURE, INTENT, BEHAVIOR, TESTS) for business-logic services such as validators, guards, mappers and calculators before they are implemented; optional and PHP-oriented, only for projects that adopt RUNE. Use when creating, documenting or refactoring such a service in a RUNE project, or when the user mentions RUNE specs or .rune files."
 alwaysApply: false
 ---
 

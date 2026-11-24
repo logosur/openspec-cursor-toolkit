@@ -1,5 +1,5 @@
 ---
-description: "OpenSpec gap analysis — honest multiagent loop (max 5 iter), GAPS.md, no implementation. NL triggers: gap analysis, analiza gaps, revisar gaps, casuísticas faltantes, huecos en la spec, spec gaps, missing casuistics, GAPS.md"
+description: "Honest OpenSpec gap analysis — multiagent loop (max 5 iter), evidence-backed GAPS.md; no implementation. Auto-invoke on NL: gap analysis, analiza gaps, revisar gaps, casuísticas faltantes, huecos en la spec, missing casuistics, GAPS.md, spec gaps, qué falta en la spec, gaps stats-net, gaps en polling rider."
 globs: openspec/changes/**/GAPS.md, openspec/changes/**/proposal.md, openspec/changes/**/specs/**/spec.md, openspec/changes/**/design.md, openspec/changes/**/tasks.md, openspec/changes/**/VERIFY.md, openspec/changes/**/OPERATOR.md
 alwaysApply: false
 ---

@@ -784,16 +784,21 @@ class DetachTest(SlotTestCase):
         self.assertIn('sobrevive', out.stdout)
 
     def test_queued_behind_a_busy_slot_and_named_in_status(self):
-        self.spawn('run', '--label', 'ocupa', '--', 'sleep', '3')
+        # the slot stays busy until the test lets go of it: a holder that ends on a timer can end, on a slow machine,
+        # before the checks that need the detached job still queued
+        release = os.path.join(self.dir, 'release-holder')
+        self.spawn('run', '--label', 'ocupa', '--', sys.executable, '-c',
+                   f'import os, time\nwhile not os.path.exists({release!r}): time.sleep(0.05)')
         self.wait_for_json()
         job_id = self.detach(sys.executable, '-c', 'print("tras la cola")', label='en cola')
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 30
         while time.monotonic() < deadline and not self.status()['queue']:
             time.sleep(0.1)
         queue = self.status()['queue']
         self.assertEqual([e.get('detached') for e in queue], [job_id])
         self.assertIn(f'desacoplado {job_id}', self.hj('status').stdout)
         self.assertEqual(self.hj('wait', job_id, '--timeout', '0.5').returncode, HJ.WAIT_TIMED_OUT)
+        open(release, 'w').close()
         out = self.hj('wait', job_id)
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn('tras la cola', out.stdout)

@@ -21,6 +21,9 @@ semáforo de máquina, las suites, los builds y los emuladores se amontonan hast
   núcleos.
 - Si hay que esperar, se lanza en segundo plano y mientras se hace trabajo ligero. Existen `--max-wait N`, `--no-wait`
   (sale con 75) y `--weight N`; `--weight 1` no sirve para colarse.
+- **Desacoplado:** `heavy-job run --detach …` devuelve un id al momento y el trabajo espera y corre fuera de la sesión
+  (una unidad de `systemd --user`, o una sesión propia), así que un corte de la sesión no lo mata ni le quita el turno.
+  Después: `heavy-job wait <id>` (código y final de la salida), `logs <id>`, `stop <id>` y `jobs`.
 - **Prioridad, solo por orden del desarrollador:** `heavy-job priority <pid> --order '<sus palabras>'` pone primero un
   trabajo que espera, y `run|hold --priority-order '<sus palabras>'` lo lanza ya primero. Exige que el desarrollador
   haya escrito en esa misma sesión en los últimos `presence_min` minutos (necesita el módulo `supervision`; sin él no

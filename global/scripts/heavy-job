@@ -124,6 +124,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
@@ -159,6 +160,12 @@ CLOUD_TESTS_BIN = os.environ.get('CLOUD_TESTS_BIN', os.path.expanduser('~/.claud
 CLOUD_EXIT = 76
 CLOUD_STOPPED_DIR = 'cloud-stopped'
 EX_TEMPFAIL = 75
+DETACHED_DIR = os.path.expanduser('~/.local/state/heavy-job/detached')  # $HEAVY_JOB_DETACHED_DIR overrides it
+DETACHED_UNIT_PREFIX = 'heavy-job-'
+DETACHED_ID_RE = re.compile(r'^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$')
+DETACHED_DIED = 70          # `wait`: the runner died without leaving an exit code
+WAIT_TIMED_OUT = 124        # `wait --timeout`: the job is still queued or running
+DETACHED_KEEP_DAYS = 7      # finished detached jobs older than this are pruned at the next launch
 ML_WEIGHT = 2
 DEFAULT_MIN_AVAIL_GIB = 2.5
 DEFAULT_SETTLE = 45.0
@@ -1024,6 +1031,8 @@ def holder_text(entry):
     if info.get('project'):
         parts.append(f'proyecto {info["project"]}')
     parts.append(f'desde hace {age_text(info.get("started"))}')
+    if info.get('detached'):
+        parts.append(f'(desacoplado {info["detached"]})')
     text = ' '.join(parts)
     if info.get('argv'):
         text += ': ' + ' '.join(info['argv'])[:120]
@@ -1082,7 +1091,8 @@ def queue_entry(item):
     return {'position': item['position'], 'pid': item['pid'], 'kind': info.get('kind'), 'label': info.get('label') or '',
             'project': info.get('project'), 'weight': info.get('weight', 1), 'mode': info.get('mode'),
             'queued': info.get('queued'), 'argv': info.get('argv') or [], 'paused': paused_cwd(info.get('cwd')),
-            'priority': info.get('priority') if isinstance(info.get('priority'), dict) else None}
+            'priority': info.get('priority') if isinstance(info.get('priority'), dict) else None,
+            'detached': info.get('detached')}
 
 
 def queue_in_turn_order(queue):
@@ -1108,6 +1118,8 @@ def queue_line(entry, numbered=True):
         parts.append('(proyecto en pausa: va detrás de los activos)')
     if entry.get('priority'):
         parts.append(f'(PRIORIDAD por orden del desarrollador: «{entry["priority"].get("order") or ""}»)')
+    if entry.get('detached'):
+        parts.append(f'(desacoplado {entry["detached"]})')
     text = ' '.join(parts)
     if entry.get('argv'):
         text += ': ' + ' '.join(entry['argv'])[:120]
@@ -1350,8 +1362,11 @@ def build_info(slots, weight, kind, pid, args, mode, spec=None):
 def waiter_info(args, kind, mode):
     """What the queue ticket says about a waiting job (`status` shows it)."""
     cwd = os.getcwd()
-    return {'mode': mode, 'kind': kind, 'label': args.label or '', 'cwd': cwd, 'project': project_of(cwd),
+    info = {'mode': mode, 'kind': kind, 'label': args.label or '', 'cwd': cwd, 'project': project_of(cwd),
             'argv': list(args.cmd), 'priority_aware': 1}
+    if getattr(args, 'detached_id', None):
+        info['detached'] = args.detached_id
+    return info
 
 
 def ask_priority_for_self(args):
@@ -1430,6 +1445,8 @@ def stopped_while_waiting(signum, _frame):
 
 
 def cmd_run(args):
+    if getattr(args, 'detach', False):
+        return run_detached(args)
     cloud_stop_note(os.getpid())  # a note left for a dead process that had this pid is not about this job
     kind = resolve_kind(args)
     spec = start_pool(args, kind)
@@ -1440,6 +1457,8 @@ def cmd_run(args):
     fds, slots, directory, weight = acquire(resolve_weight(args, kind), args.max_wait, args.no_wait,
                                             waiter_info(args, kind, 'run'), spec)
     env = dict(os.environ, **slot_env(spec, slots, args.label))
+    if getattr(args, 'on_admitted', None):
+        args.on_admitted()
     child = {'proc': None}
     pending = []
 
@@ -1469,6 +1488,8 @@ def cmd_run(args):
     child['proc'] = proc
     info = build_info(slots, weight, kind, proc.pid, args, 'run', spec)
     info['wrapper_pid'] = os.getpid()
+    if getattr(args, 'detached_id', None):
+        info['detached'] = args.detached_id
     write_infos(directory, slots, info)
     for signum in pending:
         proc.send_signal(signum)
@@ -1589,6 +1610,248 @@ def cmd_priority(args):
     return 0
 
 
+# ---- detached jobs: `run --detach`, `wait`, `logs`, `stop`, `jobs` -------------------------------------------------
+#
+# A job launched with `run --detach` does not live inside the session that asked for it: if that session is cut
+# (usage limit, account switch, app restart) the job keeps its place in the queue, its slot and its run. The
+# launcher writes the job to <detached dir>/<id>/job.json (command, cwd, environment; 0600 in a 0700 dir), starts
+# a runner outside the session (a systemd user unit, else a new session) and prints the id. The runner restores
+# that cwd and environment and runs the job exactly as `run` does; its output goes to <id>/log and its exit code
+# to <id>/exit.json. Slot and queue files keep their format: the json of a detached job only adds `detached`.
+
+
+def detached_root():
+    path = os.environ.get('HEAVY_JOB_DETACHED_DIR') or DETACHED_DIR
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
+
+
+def detached_dir(job_id):
+    if not DETACHED_ID_RE.match(job_id or ''):
+        die(f'heavy-job: «{job_id}» no es un id de trabajo desacoplado (como 20261124-031500-a1b2c3)', 2)
+    return os.path.join(detached_root(), job_id)
+
+
+def read_json(path):
+    try:
+        with open(path) as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return None
+
+
+def write_json(path, data, mode=0o600):
+    tmp = f'{path}.{os.getpid()}.tmp'
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+    with os.fdopen(fd, 'w') as handle:
+        json.dump(data, handle, indent=2)
+    os.replace(tmp, path)
+
+
+def runner_alive(job_id, pid):
+    """True while `pid` is still this job's runner (not a recycled pid)."""
+    if not pid:
+        return False
+    argv = _argv_of(pid) or []
+    return '_detached' in argv and job_id in argv
+
+
+def detached_state(job_id):
+    """queued | running | finished | dead, with the job, runner and exit records."""
+    base = detached_dir(job_id)
+    job, runner, exit_info = (read_json(os.path.join(base, name)) for name in ('job.json', 'runner.json', 'exit.json'))
+    if exit_info is not None:
+        state = 'finished'
+    elif runner and runner_alive(job_id, runner.get('pid')):
+        state = 'running' if runner.get('admitted') else 'queued'
+    elif read_json(os.path.join(base, 'exit.json')) is not None:   # it finished between the two reads
+        exit_info, state = read_json(os.path.join(base, 'exit.json')), 'finished'
+    elif runner or (job and time.time() - job.get('requested_ts', 0) > 60):
+        state = 'dead'
+    else:
+        state = 'queued'          # the runner is still starting
+    return state, job, runner, exit_info
+
+
+def detach_launcher():
+    choice = os.environ.get('HEAVY_JOB_DETACH_LAUNCHER', 'auto')
+    if choice in ('systemd', 'setsid'):
+        return choice
+    runtime = os.environ.get('XDG_RUNTIME_DIR') or f'/run/user/{os.getuid()}'
+    return 'systemd' if shutil.which('systemd-run') and os.path.exists(os.path.join(runtime, 'bus')) else 'setsid'
+
+
+def prune_detached():
+    """Remove finished (or dead) detached jobs older than DETACHED_KEEP_DAYS. Never raises."""
+    cutoff = time.time() - DETACHED_KEEP_DAYS * 86400
+    try:
+        for name in os.listdir(detached_root()):
+            base = os.path.join(detached_root(), name)
+            if not DETACHED_ID_RE.match(name) or os.path.getmtime(base) > cutoff:
+                continue
+            if detached_state(name)[0] in ('finished', 'dead'):
+                shutil.rmtree(base, ignore_errors=True)
+    except OSError:
+        pass
+
+
+def start_runner(job_id, base, label):
+    """Start `heavy-job _detached ID` outside this session; returns how ('systemd' or 'setsid')."""
+    runner = [sys.executable, os.path.realpath(__file__), '_detached', job_id]
+    if detach_launcher() == 'systemd':
+        env = dict(os.environ)
+        env.setdefault('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')
+        # KillMode=process: like a plain `run`, daemons the job leaves behind (Gradle, emulators) outlive it
+        out = subprocess.run(['systemd-run', '--user', '--quiet', '--collect', f'--unit={DETACHED_UNIT_PREFIX}{job_id}',
+                              '--property=KillMode=process', f'--description=heavy-job {label or job_id}', *runner],
+                             capture_output=True, text=True, env=env, timeout=30)
+        if out.returncode == 0:
+            return 'systemd'
+        print(f'heavy-job: systemd-run no lo arrancó ({out.stderr.strip()[:200]}); lo lanzo en una sesión propia.',
+              file=sys.stderr)
+    with open(os.path.join(base, 'log'), 'ab') as log, open(os.devnull, 'rb') as null:
+        subprocess.Popen(runner, stdin=null, stdout=log, stderr=log, start_new_session=True, close_fds=True)
+    return 'setsid'
+
+
+def run_detached(args):
+    """`run --detach`: refuse now what would be refused anyway, write the job, start its runner, print its id."""
+    cloud_stop_note(os.getpid())
+    kind = resolve_kind(args)
+    spec = start_pool(args, kind)
+    cloud_guard(args, spec)
+    order = (getattr(args, 'priority_order', None) or '').strip()
+    if order:
+        ok, why = developer_ordered_here()
+        if not ok:
+            die(f'heavy-job: --priority-order solo vale por orden del desarrollador dada en esta misma sesión: {why}. '
+                'Lanza el trabajo sin --priority-order (por orden de llegada).', 3)
+    prune_detached()
+    job_id = time.strftime('%Y%m%d-%H%M%S') + '-' + os.urandom(3).hex()
+    base = detached_dir(job_id)
+    os.makedirs(base, mode=0o700)
+    write_json(os.path.join(base, 'job.json'), {
+        'id': job_id, 'argv': list(args.cmd), 'cwd': os.getcwd(), 'env': dict(os.environ),
+        'kind': args.kind, 'label': args.label or '', 'weight': args.weight, 'max_wait': args.max_wait,
+        'no_wait': args.no_wait, 'priority_order': order, 'session': os.environ.get('CLAUDE_CODE_SESSION_ID', ''),
+        'project': project_of(os.getcwd()), 'requested': now_iso(), 'requested_ts': time.time()})
+    how = start_runner(job_id, base, args.label)
+    print(job_id)
+    print(f'heavy-job: desacoplado ({how}); espera turno y corre aunque se corte esta sesión. '
+          f'Resultado: heavy-job wait {job_id} · salida: heavy-job logs {job_id} · parar: heavy-job stop {job_id}',
+          file=sys.stderr)
+    return 0
+
+
+def cmd_detached_runner(args):
+    """`_detached ID`: the runner of a detached job (started by run_detached, never by hand)."""
+    base = detached_dir(args.job_id)
+    job = read_json(os.path.join(base, 'job.json'))
+    if job is None:
+        die(f'heavy-job: no encuentro el trabajo {args.job_id}', 2)
+    log = os.open(os.path.join(base, 'log'), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    os.dup2(log, 1)
+    os.dup2(log, 2)
+    os.close(log)
+    sys.stdout = os.fdopen(1, 'w', buffering=1, closefd=False)
+    sys.stderr = os.fdopen(2, 'w', buffering=1, closefd=False)
+    os.environ.clear()
+    os.environ.update(job.get('env') or {})
+    runner = {'pid': os.getpid(), 'started': now_iso(), 'admitted': None}
+    write_json(os.path.join(base, 'runner.json'), runner)
+    code = 1
+    try:
+        os.chdir(job['cwd'])
+        ns = argparse.Namespace(command='run', kind=job.get('kind'), label=job.get('label'), max_wait=job.get('max_wait'),
+                                no_wait=job.get('no_wait'), weight=job.get('weight'),
+                                priority_order=job.get('priority_order'), cmd=job['argv'], detached_id=args.job_id,
+                                on_admitted=lambda: write_json(os.path.join(base, 'runner.json'),
+                                                               dict(runner, admitted=now_iso())))
+        code = cmd_run(ns)
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 1
+    except OSError as exc:
+        print(f'heavy-job: no pude arrancar el trabajo: {exc}', file=sys.stderr)
+        code = 126
+    finally:
+        write_json(os.path.join(base, 'exit.json'), {'code': code, 'ended': now_iso()})
+    return code
+
+
+def tail_lines(path, count):
+    try:
+        with open(path, errors='replace') as handle:
+            lines = handle.readlines()
+    except OSError:
+        return []
+    return lines[-count:] if count > 0 else lines
+
+
+def cmd_wait(args):
+    """Block until the detached job ends; print the tail of its log and return its exit code."""
+    base = detached_dir(args.job_id)
+    if not os.path.isdir(base):
+        die(f'heavy-job: no hay ningún trabajo desacoplado {args.job_id} (heavy-job jobs los lista)', 2)
+    poll = float(os.environ.get('HEAVY_JOB_POLL', '2'))
+    deadline = time.monotonic() + args.timeout if args.timeout else None
+    while True:
+        state, job, _runner, exit_info = detached_state(args.job_id)
+        if state in ('finished', 'dead'):
+            sys.stdout.writelines(tail_lines(os.path.join(base, 'log'), args.lines))
+            sys.stdout.flush()
+            if state == 'dead':
+                print(f'heavy-job: el trabajo {args.job_id} murió sin dejar código de salida', file=sys.stderr)
+                return DETACHED_DIED
+            print(f'heavy-job: {args.job_id} terminó con código {exit_info.get("code")}', file=sys.stderr)
+            return exit_info.get('code') if isinstance(exit_info.get('code'), int) else 1
+        if deadline is not None and time.monotonic() >= deadline:
+            print(f'heavy-job: {args.job_id} sigue {"en marcha" if state == "running" else "en cola"}', file=sys.stderr)
+            return WAIT_TIMED_OUT
+        time.sleep(poll)
+
+
+def cmd_logs(args):
+    base = detached_dir(args.job_id)
+    if not os.path.isdir(base):
+        die(f'heavy-job: no hay ningún trabajo desacoplado {args.job_id} (heavy-job jobs los lista)', 2)
+    sys.stdout.writelines(tail_lines(os.path.join(base, 'log'), args.lines))
+    return 0
+
+
+def cmd_stop(args):
+    """SIGTERM to the runner of a detached job: it forwards it to the job (or leaves the queue), as `run` does."""
+    state, _job, runner, _exit = detached_state(args.job_id)
+    if state not in ('queued', 'running') or not runner:
+        print(f'heavy-job: {args.job_id} no está en marcha ({state})', file=sys.stderr)
+        return 1
+    os.kill(runner['pid'], signal.SIGTERM)
+    print(f'heavy-job: enviado SIGTERM al trabajo {args.job_id} (pid {runner["pid"]})', file=sys.stderr)
+    return 0
+
+
+def cmd_jobs(args):
+    rows = []
+    for name in sorted(os.listdir(detached_root()), reverse=True):
+        if not DETACHED_ID_RE.match(name):
+            continue
+        state, job, _runner, exit_info = detached_state(name)
+        job = job or {}
+        rows.append({'id': name, 'state': state, 'label': job.get('label', ''), 'project': job.get('project'),
+                     'session': job.get('session'), 'code': (exit_info or {}).get('code'),
+                     'requested': job.get('requested'), 'argv': job.get('argv') or []})
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    for row in rows[:args.limit]:
+        code = f' código {row["code"]}' if row['state'] == 'finished' else ''
+        label = f' "{row["label"]}"' if row['label'] else ''
+        print(f'{row["id"]}  {row["state"]}{code}{label} proyecto {row["project"] or "?"} '
+              f'pedido hace {age_text(row["requested"])}: {" ".join(row["argv"])[:100]}')
+    if not rows:
+        print('heavy-job: no hay trabajos desacoplados')
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog='heavy-job', description='Semáforo global para trabajos pesados.')
     sub = parser.add_subparsers(dest='command', required=True)
@@ -1603,11 +1866,29 @@ def build_parser():
         p.add_argument('--weight', type=int, metavar='N', help='slots the job takes (default 1, or 2 for --kind ml)')
         p.add_argument('--priority-order', metavar='SUS PALABRAS',
                        help="go first in the queue, only on the developer's order given in this same session")
+        if name == 'run':
+            p.add_argument('--detach', action='store_true',
+                           help='return at once with an id; the job waits and runs outside this session')
     p = sub.add_parser('priority', help='poner primero en su cola un trabajo que espera, por orden del desarrollador')
     p.add_argument('pid', type=int, help='el pid de la línea de la cola en `heavy-job status`')
     p.add_argument('--order', required=True, metavar='SUS PALABRAS', help='la orden del desarrollador, literal')
     for name in ('status', 'scan'):
         sub.add_parser(name).add_argument('--json', action='store_true')
+    for name, text in (('wait', 'esperar a que termine un trabajo desacoplado y devolver su código'),
+                       ('logs', 'ver la salida de un trabajo desacoplado'),
+                       ('stop', 'parar un trabajo desacoplado (SIGTERM a su lanzador)')):
+        p = sub.add_parser(name, help=text)
+        p.add_argument('job_id', metavar='ID')
+        if name in ('wait', 'logs'):
+            p.add_argument('-n', '--lines', type=int, default=40 if name == 'wait' else 0,
+                           help='últimas líneas de la salida (0: todas)')
+        if name == 'wait':
+            p.add_argument('--timeout', type=float, default=0, metavar='SECONDS',
+                           help=f'dejar de esperar (sale con {WAIT_TIMED_OUT}) si no ha terminado')
+    p = sub.add_parser('jobs', help='listar los trabajos desacoplados')
+    p.add_argument('--json', action='store_true')
+    p.add_argument('--limit', type=int, default=20)
+    sub.add_parser('_detached').add_argument('job_id')
     p = sub.add_parser('classify')
     p.add_argument('--json', action='store_true')
     p.add_argument('--stdin', action='store_true')
@@ -1627,12 +1908,13 @@ def main(argv=None):
         parser.error(f'{args.command}: falta el comando tras --')
     if args.command in ('run', 'hold') and args.weight is not None and args.weight < 1:
         parser.error(f'{args.command}: --weight debe ser un entero >= 1')
-    if args.command in ('status', 'scan') and args.cmd:
+    if args.command in ('status', 'scan', 'wait', 'logs', 'stop', 'jobs', '_detached') and args.cmd:
         parser.error(f'{args.command}: no admite comando')
     if args.command == 'priority' and args.cmd:
         parser.error('priority: no admite comando')
     handlers = {'run': cmd_run, 'hold': cmd_hold, 'status': cmd_status, 'scan': cmd_scan, 'classify': cmd_classify,
-                'priority': cmd_priority}
+                'priority': cmd_priority, 'wait': cmd_wait, 'logs': cmd_logs, 'stop': cmd_stop, 'jobs': cmd_jobs,
+                '_detached': cmd_detached_runner}
     try:
         return handlers[args.command](args)
     except KeyboardInterrupt:

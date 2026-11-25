@@ -49,10 +49,11 @@ Speech and model work also needs `huggingface.co`, `*.huggingface.co`, `*.hf.co`
 ## Environment setup script and caching
 
 - The environment's **setup script** (environment settings, Setup script) runs as root on the first session; its
-  result is a filesystem snapshot that later sessions start from, also the sessions the CLI launches. Measured: a
-  stamp written by the script at 02:19 was present on a machine booted at 02:22, and still on one booted 3.5 hours
-  later. Changing the allowed domains rebuilt it. Documented: cached only when it ends in about 5 minutes; expires
-  after about 7 days; also rebuilt when the script changes.
+  result is a filesystem snapshot that later sessions start from, also the sessions the CLI launches. Measured on
+  2026-11-25 (UTC): a stamp the script wrote at 02:19 was present on a machine booted at 02:22. Changing the allowed
+  domains at about 02:30 rebuilt it: the next session wrote a new stamp at 02:32, and that stamp was still present on a
+  machine booted at 06:11. Documented: cached only when it ends in about 5 minutes; expires after about 7 days; also
+  rebuilt when the script changes.
 - A **SessionStart hook** in the repository runs on every session and is not cached.
 - The Android SDK stays out of the environment's setup script: the script is shared by every repository using that
   environment, every edit rebuilds the snapshot for all of them, and the SDK is only about 75 s of a half-hour build.

@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
-# Probe revision: 5.
 # Measures whether a Claude Code cloud session can build an Android App Bundle, on a throwaway app made from the public
 # Expo template, so that a cloud build setup is designed on measured facts:
 #   1. the machine (CPUs, memory, disk, KVM);
 #   2. which hosts an Android build needs are reachable through the session's network;
 #   3. where the SDK and the NDK can come from (a Docker Hub image), how long that takes and how much disk it uses;
 #   4. a real `bundleRelease` (native code included), timed, or the first thing that stops it.
+# The SDK, JDK and Gradle steps are the reusable preset scripts/cloud/android-env.sh, so a passing probe also checks it.
 # It prints no environment variables. Each step is bounded, a failed step never stops the next one, and the last lines are
 # a short SUMMARY (the runner keeps only the tail of the log). Exit 0 when the probe ran, whatever it found.
 set -uo pipefail
 
-IMAGE=${ANDROID_PROBE_IMAGE:-reactnativecommunity/react-native-android:latest}
+HERE=$(cd "$(dirname "$0")" && pwd)
+ENV_SH=$HERE/android-env.sh
 WORK=${ANDROID_PROBE_DIR:-/tmp/android-probe}
-SDK=/opt/android-sdk-probe
-JDK=/opt/jdk-probe
-BUILD_LIMIT=${ANDROID_PROBE_BUILD_LIMIT:-2700}
+export ANDROID_ENV_SDK=${ANDROID_ENV_SDK:-/opt/android-sdk-probe} ANDROID_ENV_JDK=${ANDROID_ENV_JDK:-/opt/jdk-probe}
+export ANDROID_ENV_LOG=$WORK/gradle.log
+SDK=$ANDROID_ENV_SDK
+export ANDROID_ENV_GRADLE_LIMIT=${ANDROID_PROBE_BUILD_LIMIT:-2700}
 SUMMARY=$WORK/summary.txt
 rm -rf "$WORK"; mkdir -p "$WORK"; : >"$SUMMARY"
 
@@ -62,38 +64,13 @@ done
 # --net-only: just the machine and the network, to check a change of the environment's allowed domains in seconds.
 if [ "${1:-}" = "--net-only" ]; then section "SUMMARY"; cat "$SUMMARY"; exit 0; fi
 
-section "docker and the SDK image"
-if ! docker info >/dev/null 2>&1; then
-  (nohup dockerd >/tmp/dockerd-probe.log 2>&1 &)
-  for _ in $(seq 1 40); do docker info >/dev/null 2>&1 && break; sleep 1; done
-fi
-if docker info >/dev/null 2>&1; then
-  t=$(now)
-  ok=no
-  for _ in 1 2 3; do timeout 1500 docker pull -q "$IMAGE" >/dev/null 2>"$WORK/pull.err" && { ok=yes; break; }; sleep 5; done
-  note "image_pull=$ok seconds=$(( $(now) - t )) image=$IMAGE"
-  [ "$ok" = no ] && note "image_pull_error=$(tail -1 "$WORK/pull.err" | cut -c1-200)"
-  if [ "$ok" = yes ]; then
-    image_sdk=$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE" | sed -n 's/^ANDROID_HOME=//p' | head -1)
-    t=$(now)
-    image_jdk=$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$IMAGE" | sed -n 's/^JAVA_HOME=//p' | head -1)
-    c=$(docker create "$IMAGE"); rm -rf "$SDK" "$JDK"; docker cp "$c:${image_sdk:-/opt/android}" "$SDK" >/dev/null 2>&1
-    # -L: JAVA_HOME is often a symlink into /usr/lib/jvm
-    [ -n "$image_jdk" ] && docker cp -L "$c:$image_jdk" "$JDK" >/dev/null 2>&1
-    # A Debian JDK keeps its configuration in /etc/<jdk name> behind absolute symlinks: bring it too, or the JVM cannot start.
-    jdk_etc=/etc/$(basename "${image_jdk:-none}" | sed 's/-amd64$//; s/-arm64$//')
-    [ -n "$image_jdk" ] && [ ! -e "$jdk_etc" ] && docker cp "$c:$jdk_etc" "$jdk_etc" >/dev/null 2>&1
-    docker rm "$c" >/dev/null
-    note "image_jdk=${image_jdk:-none} jdk_copied=$([ -x "$JDK/bin/java" ] && "$JDK/bin/java" -version 2>&1 | grep -i version | head -1 || echo no)"
-    note "sdk_copy_seconds=$(( $(now) - t )) sdk_gb=$(du -s -BG "$SDK" 2>/dev/null | cut -f1) image_sdk=${image_sdk:-unknown}"
-    note "sdk_platforms=$(ls "$SDK/platforms" 2>/dev/null | tr '\n' ' ')"
-    note "sdk_build_tools=$(ls "$SDK/build-tools" 2>/dev/null | tr '\n' ' ')"
-    note "sdk_ndk=$(ls "$SDK/ndk" 2>/dev/null | tr '\n' ' ') cmake=$(ls "$SDK/cmake" 2>/dev/null | tr '\n' ' ')"
-    docker image rm "$IMAGE" >/dev/null 2>&1 || true
-    note "disk_free_gb_after_sdk=$(df -BG --output=avail / | tail -1 | tr -dc 0-9)"
-  fi
+section "SDK and JDK (android-env.sh prepare)"
+t=$(now)
+if bash "$ENV_SH" prepare >"$WORK/prepare.log" 2>&1; then
+  note "prepare=ok seconds=$(( $(now) - t ))"; sed 's/^/  /' "$WORK/prepare.log" | cut -c1-230 | tee -a "$SUMMARY"
+  note "sdk_gb=$(du -s -BG "$SDK" 2>/dev/null | cut -f1) disk_free_gb_after_sdk=$(df -BG --output=avail / | tail -1 | tr -dc 0-9)"
 else
-  note "docker=unavailable $(tail -1 /tmp/dockerd-probe.log 2>/dev/null | cut -c1-160)"
+  note "prepare=failed seconds=$(( $(now) - t )) $(tail -2 "$WORK/prepare.log" | tr '\n' ' ' | cut -c1-240)"
 fi
 
 section "template app"
@@ -111,42 +88,16 @@ if [ -f package.json ] && [ -d "$SDK/platforms" ]; then
   t=$(now)
   if timeout 600 npx expo prebuild --platform android --no-install >"$WORK/prebuild.log" 2>&1; then
     note "prebuild=ok seconds=$(( $(now) - t )) wants_ndk=$(grep -rhoE 'ndkVersion *= *"[^"]+"' node_modules/react-native/gradle/libs.versions.toml android 2>/dev/null | head -1) wants=$(grep -hE '^(ndkVersion|compileSdk|buildTools) *=' node_modules/react-native/gradle/libs.versions.toml 2>/dev/null | tr '\n' ' ')"
-    section "gradle bundleRelease (limit ${BUILD_LIMIT}s)"
+    section "gradle bundleRelease (limit ${ANDROID_ENV_GRADLE_LIMIT}s)"
+    # A warm second run on the same machine shows how much of the build time is downloads.
+    note "gradle_cache_before_gb=$(du -s -BG "$HOME/.gradle" 2>/dev/null | cut -f1 || echo 0)"
+    bash "$ENV_SH" gradle-props android 2>&1 | tee -a "$SUMMARY"
+    t=$(now)
+    bash "$ENV_SH" gradle android :app:bundleRelease >"$WORK/gradle-attempts.log" 2>&1
+    rc=$?
+    cut -c1-230 "$WORK/gradle-attempts.log" | tee -a "$SUMMARY"
+    note "gradle_exit=$rc seconds=$(( $(now) - t ))"
     cd android || exit 0
-    # The image's JDK, for Gradle itself and for its toolchains (the session's own Java may be another version).
-    if [ -x "$JDK/bin/java" ]; then
-      host_path=$PATH
-      export JAVA_HOME=$JDK PATH=$JDK/bin:$PATH
-      printf '\norg.gradle.java.installations.paths=%s\norg.gradle.java.installations.auto-download=false\n' "$JDK" >>gradle.properties
-    fi
-    # The NDK cannot be downloaded when dl.google.com is closed: build with the one the image brings.
-    wanted_ndk=$(grep -hoE 'ndkVersion *= *"[^"]+"' ../node_modules/react-native/gradle/libs.versions.toml 2>/dev/null | grep -oE '[0-9.]+' | head -1)
-    have_ndk=$(ls "$SDK/ndk" 2>/dev/null | sort -V | tail -1)
-    if [ -n "$have_ndk" ] && [ ! -d "$SDK/ndk/$wanted_ndk" ]; then
-      printf 'android.ndkVersion=%s\n' "$have_ndk" >>gradle.properties
-      note "ndk_override=$have_ndk (wanted ${wanted_ndk:-unknown})"
-    fi
-    t=$(now); attempts=0; rc=1
-    # A shared exit address makes Maven Central answer 429 now and then: retry, Gradle keeps what it already downloaded.
-    # A failed plugin or dependency lookup right after a 429 fails again at once: wait and retry those too.
-    while [ "$attempts" -lt 6 ]; do
-      attempts=$((attempts + 1))
-      left=$(( BUILD_LIMIT - ($(now) - t) )); [ "$left" -lt 60 ] && break
-      timeout "$left" ./gradlew --no-daemon --console=plain --info -Dorg.gradle.internal.repository.max.tentatives=8 \
-        -Dorg.gradle.internal.repository.initial.backoff=3000 :app:bundleRelease >"$WORK/gradle.log" 2>&1
-      rc=$?
-      note "gradle_attempt=$attempts exit=$rc elapsed=$(( $(now) - t )) http_429=$(grep -c 'status code 429' "$WORK/gradle.log") tasks=$(grep -cE '^> Task ' "$WORK/gradle.log")"
-      [ "$rc" -eq 0 ] && break
-      if [ "$attempts" -eq 1 ] && [ $(( $(now) - t )) -lt 15 ] && [ -n "${host_path:-}" ]; then
-        # Gradle did not even start on the image's JDK: say why, then run it on the session's Java (toolchain still set).
-        note "gradle_start_failure:"; head -12 "$WORK/gradle.log" | cut -c1-230 | tee -a "$SUMMARY"
-        unset JAVA_HOME; export PATH=$host_path; continue
-      fi
-      note "gradle_http_statuses=$(grep -oE 'status code [0-9]+' "$WORK/gradle.log" | sort | uniq -c | tr '\n' ' ')"
-      grep -qE 'status code 429|was not found in any of the following sources|Could not resolve' "$WORK/gradle.log" || break
-      sleep 120
-    done
-    note "gradle_exit=$rc seconds=$(( $(now) - t )) attempts=$attempts (124 = stopped at the limit)"
     aab=$(find app/build/outputs/bundle -name '*.aab' 2>/dev/null | head -1)
     if [ -n "$aab" ]; then note "aab=yes size_mb=$(( $(stat -c %s "$aab") / 1048576 )) abis=$(unzip -l "$aab" 2>/dev/null | grep -oE 'base/lib/[^/]+' | sort -u | cut -d/ -f3 | tr '\n' ' ')"; else note "aab=no"; fi
     note "gradle_tasks_run=$(grep -cE '^> Task ' "$WORK/gradle.log") native_tasks=$(grep -cE '^> Task .*(CMake|buildCMake|configureCMake)' "$WORK/gradle.log")"

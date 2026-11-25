@@ -29,9 +29,10 @@ root, no KVM, Java 21 and Node 22 preinstalled, no Android SDK, no Java 17):
   tasks, a 43 MB bundle with arm64-v8a, armeabi-v7a, x86 and x86_64.
 - **Retries.** Maven Central answers 429 now and then from the shared exit address, and a plugin lookup right after one
   fails again at once. The preset waits 120 s and retries, up to 6 attempts within 45 minutes.
-- **Time.** A cold `bundleRelease` of the blank Expo 58 app: 1755 s of Gradle (392 tasks), 1885 s in all. With a warm
-  Gradle cache (3 GB) the same build takes 344 s of Gradle and 407 s in all: about 80 % of a cold build is downloading
-  and configuring, not compiling. A cloud-tests runner keeps its disk while it lives, also across a restart of its
+- **Time.** On a new runner, `prepare` takes about 107 s (64 s pull, 41 s copy) and a cold `bundleRelease` of the
+  blank Expo 58 app takes 739–1755 s of Gradle depending on the run (893–1885 s in all). With a warm Gradle cache
+  (3 GB) the same build takes 344 s of Gradle and 407 s in all: most of a cold build is downloading and configuring,
+  not compiling. A cloud-tests runner keeps its disk while it lives, also across a restart of its
   machine, so the SDK and the Gradle cache survive from one run to the next; a new runner starts cold.
 
 ## Network the cloud environment needs

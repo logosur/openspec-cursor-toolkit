@@ -193,3 +193,31 @@ def local_owner_of(session, locks):
             if rec.get('cliSessionId') == session:
                 return owner_id
     return None
+
+
+def transcripts_of(session):
+    """Main transcripts of the session `session` (its app `local_…` id, or a CLI session id), without duplicates.
+
+    They come from the running process when it is that session (CLAUDE_CODE_HOST_SESSION_ID, or
+    CLAUDE_CODE_SESSION_ID for a CLI id), from its CLI records and from its app records; a session restarted with a
+    new CLI id has one transcript per id. Any other process's own variables are ignored, so a command run from
+    another session still reads the transcripts of `session`, never its own."""
+    pairs = []
+    env_cli = os.environ.get('CLAUDE_CODE_SESSION_ID')
+    if env_cli and session in (os.environ.get('CLAUDE_CODE_HOST_SESSION_ID'), env_cli):
+        pairs.append((env_cli, os.getcwd()))
+    for rec in read_json_files(os.path.join(cli_dir(), '*.json')):
+        if rec.get('hostSessionId') == session and isinstance(rec.get('sessionId'), str):
+            pairs.append((rec['sessionId'], rec.get('cwd')))
+    app_base = os.path.dirname(app_glob())
+    for rec in read_json_files(os.path.join(app_base, glob.escape(session) + '.json')):
+        if isinstance(rec.get('cliSessionId'), str):
+            pairs.append((rec['cliSessionId'], rec.get('cwd')))
+    if not str(session).startswith('local_'):
+        pairs.append((session, os.getcwd()))   # a CLI session that passed its own id
+    found = []
+    for cli, cwd in pairs:
+        main, _ = transcripts.session_files(cli, cwd if isinstance(cwd, str) else '')
+        if main and main not in found:
+            found.append(main)
+    return found

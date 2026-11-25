@@ -32,6 +32,8 @@ DEFAULTS = {
     'skill_anchors': ['## Prohibido', '## §0', '## Nunca parada', '$L backlog', '$L wait-closer',
                       '--no-work', 'en español', 'reference/cambios.md'],
     'skill_lint_roots': [],
+    'reload_globs': ['~/.claude/skills/*/SKILL.md', '~/.claude/skills/*/reference/*.md', '~/.claude/rules/*.md',
+                     '~/.claude/scripts/supervisor-lock', '~/.claude/scripts/lib/supervisor/*.py'],
     'deploy_rule': 'despliegue-y-limites-duros.md',
     'deploy_preauthorised': False,
     'excluded_projects': [],
@@ -67,6 +69,9 @@ SKILL_FILE = CONFIG['skill_file']
 GUARD_SECTION = CONFIG['guard_section']
 SKILL_ANCHORS = tuple(CONFIG['skill_anchors'][:5]) + (GUARD_SECTION,) + tuple(CONFIG['skill_anchors'][5:])
 SKILL_LINT_ROOTS = tuple(CONFIG['skill_lint_roots'])
+# what a skill reload covers: a change to any of these files after a supervisor last loaded the skill is an update it
+# has not read (the message gate lets a reload order through for it, and `beat --skill-seen` asks for a newer load)
+RELOAD_GLOBS = tuple(CONFIG['reload_globs'])
 
 # deploys: the rule that says who may deploy, and whether the developer has authorised them in writing
 DEPLOY_RULE = '~/.claude/rules/' + CONFIG['deploy_rule']

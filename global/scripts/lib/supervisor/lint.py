@@ -4,7 +4,7 @@ import os
 import re
 from datetime import datetime
 
-from . import lock as lock_mod, settings, util
+from . import census, lock as lock_mod, settings, transcripts, util
 
 
 def skill_file():
@@ -20,6 +20,48 @@ def skill_mtime():
     for path in glob.glob(os.path.join(glob.escape(os.path.dirname(skill_file())), 'reference', '*.md')):
         newest = max(newest, util.file_mtime(path))
     return newest
+
+
+def skill_name():
+    """Name of the supervisor's skill: the folder of the configured skill file (what the Skill tool is called with)."""
+    return os.path.basename(os.path.dirname(os.path.expanduser(settings.SKILL_FILE)))
+
+
+def reload_globs():
+    value = os.environ.get('SUPERVISOR_RELOAD_GLOBS')
+    return [p for p in value.split(os.pathsep) if p] if value else list(settings.RELOAD_GLOBS)
+
+
+def reload_floor():
+    """Newest mtime of what a skill reload covers: the skill (with its references), the global rules and the
+    supervisor-lock code (`reload_globs`, the list the message gate uses). A load older than this missed an update."""
+    newest = skill_mtime() or 0.0
+    for pattern in reload_globs():
+        for path in glob.glob(os.path.expanduser(pattern)):
+            newest = max(newest, util.file_mtime(path))
+    return newest
+
+
+def skill_load_proof(session):
+    """Whether `session`'s own transcript shows it loaded the skill after the newest update (`reload_floor`).
+
+    ('loaded', epoch of that load); ('not-loaded', floor) when a transcript was read and has none, or the scan ran over
+    its budget, which the supervisor fixes by invoking the skill; ('no-transcript', None) when none can be found or
+    read, which it cannot fix: the caller then fails open and says so."""
+    floor = reload_floor()
+    read_any = False
+    for path in census.transcripts_of(session):
+        try:
+            when = transcripts.skill_load_after(path, skill_name(), floor)
+        except TimeoutError:
+            read_any = True
+            continue
+        except OSError:
+            continue
+        read_any = True
+        if when is not None:
+            return 'loaded', when
+    return ('not-loaded', floor) if read_any else ('no-transcript', None)
 
 
 GUARD_SECTION = settings.GUARD_SECTION

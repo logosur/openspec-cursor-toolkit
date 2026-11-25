@@ -33,6 +33,13 @@
     "reference/cambios.md"
   ],
   "skill_lint_roots": [],
+  "reload_globs": [
+    "~/.claude/skills/*/SKILL.md",
+    "~/.claude/skills/*/reference/*.md",
+    "~/.claude/rules/*.md",
+    "~/.claude/scripts/supervisor-lock",
+    "~/.claude/scripts/lib/supervisor/*.py"
+  ],
   "deploy_rule": "despliegue-y-limites-duros.md",
   "deploy_preauthorised": false,
   "excluded_projects": [],

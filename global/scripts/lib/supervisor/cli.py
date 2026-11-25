@@ -39,7 +39,8 @@ def build_parser():
     p.add_argument('--phase')
     p.add_argument('--round', type=int)
     p.add_argument('--mailbox', metavar='LOCAL_ID', help='local id of the question mailbox session')
-    p.add_argument('--skill-seen', action='store_true', help='record that the current skill file has been read')
+    p.add_argument('--skill-seen', action='store_true', help='record that the current skill file has been read; refused (exit 8) unless the session\'s own '
+                   'transcript shows a load of the skill (Skill tool or slash command) after the newest update')
     p.add_argument('--closer', metavar='LOCAL_ID', help='local id of the closing session (verifies, closes and archives)')
     p.add_argument('--no-work', metavar='WHY', help="on guard: a message of the developer's neither asks for nor implies work, and why")
     p = add('release', lock_mod.cmd_release, session=True)

@@ -227,6 +227,8 @@ def cmd_self_test(args):
                SUPERVISOR_PROJECTS_DIR=projects_t, SUPERVISOR_HEAVY_JOB=os.path.join(tmp, 'fake-heavy'),
                SUPERVISOR_NOTIFY=os.path.join(tmp, 'fake-notify'), SUPERVISOR_NUDGE=os.path.join(tmp, 'fake-nudge'),
                SUPERVISOR_HANDOFF_GUARD=os.path.join(tmp, 'fake-handoff'),
+               # what a reload covers: a folder of the sandbox, so the copied skills and rules never move the floor
+               SUPERVISOR_RELOAD_GLOBS=os.path.join(tmp, 'reload-watch', '*'),
                ASK_GATE_DIR=os.path.join(tmp, 'ask-gate'), ASK_QUEUE_DIR=os.path.join(tmp, 'ask-queue'),
                ASK_GATE_XPROJECT_LOG=os.path.join(tmp, 'xproject-decisions.log'),
                GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
@@ -2059,6 +2061,132 @@ def cmd_self_test(args):
     put(os.path.join(lock_home, 'locks'), os.path.basename(other_lock), shift)
     run('reclaim', '--dir', other, '--session', 'local_recl', '--from', 'local_nosk')
     check('reclaim: leaves skill_seen unset too', json.load(open(other_lock)).get('session_id') == 'local_recl' and 'skill_seen' not in json.load(open(other_lock)))
+    os.utime(skill, (t1, t1))
+
+    # 9b. beat --skill-seen needs proof: a load of the skill in the session's own transcript after the newest update
+    # (the skill, a global rule or the supervisor-lock code). The marker is what the message gate and the Stop hook
+    # trust, so a supervisor that only runs the beat must not get it.
+    clear_locks()
+    clear_sessions()
+    reload_dir = os.path.join(tmp, 'reload-watch')
+    os.makedirs(reload_dir, exist_ok=True)
+    t0 = time.time() - 5000
+    os.utime(skill, (t0, t0))
+    run('acquire', '--dir', repo, '--session', 'local_pf', '--title', 'pf')
+    put(app_dir, 'local_pf.json', {'sessionId': 'local_pf', 'cliSessionId': 'cli-pf', 'cwd': repo, 'title': 'pf'})
+    hook_log_path = os.path.join(lock_home, 'hook.log')
+
+    def skill_use(ago, tid, name='supervisa-sesiones', side=False):
+        return {'type': 'assistant', 'timestamp': iso(ago), 'isSidechain': side, 'message': {'role': 'assistant', 'content': [
+            {'type': 'tool_use', 'name': 'Skill', 'id': tid, 'input': {'skill': name, 'args': 'recarga'}}]}}
+
+    def skill_result(ago, tid, error=False):
+        item = {'type': 'tool_result', 'tool_use_id': tid, 'content': 'Launching skill: supervisa-sesiones'}
+        if error:
+            item.update(is_error=True, content='denied')
+        return {'type': 'user', 'timestamp': iso(ago), 'message': {'role': 'user', 'content': [item]}}
+
+    def command_rec(ago, text=None):
+        body = text or ('<command-message>supervisa-sesiones</command-message>\n<command-name>/supervisa-sesiones'
+                        '</command-name>\n<command-args></command-args>')
+        return {'type': 'user', 'timestamp': iso(ago), 'message': {'role': 'user', 'content': body}}
+
+    def pf_beat(records, *extra, cli_id='cli-pf', beat_env=None):
+        if records is not None:
+            write_jsonl(tpath(cli_id), records)
+        return subprocess.run([sys.executable, runtime.ENTRY, 'beat', '--dir', repo, '--session', 'local_pf', '--skill-seen', *extra],
+                              capture_output=True, text=True, env=beat_env or env)
+
+    def forget():
+        data = load()
+        for key in ('skill_seen', 'skill_seen_at', 'skill_seen_proof'):
+            data.pop(key, None)
+        save(data)
+
+    def refused(r):
+        return r.returncode == 8 and 'SKILL SEEN REFUSED' in r.stderr and 'skill_seen' not in load()
+
+    r = pf_beat([text_rec(300), tool_rec(200, 'Bash', 'b1'), result_rec(190, 'b1')], '--phase', 'F3', '--round', '7')
+    check('skill-seen proof: a beat with no Skill call in the transcript is refused (exit 8), skill_seen stays unset',
+          refused(r) and 'BEAT' not in r.stdout)
+    check('skill-seen proof: the refusal says in Spanish to invoke the skill with the Skill tool and repeat the beat',
+          'herramienta Skill' in r.stderr and 'supervisor-lock beat --session local_pf --skill-seen' in r.stderr
+          and 'Ejecutar beat --skill-seen no la carga' in r.stderr)
+    check('skill-seen proof: a refused beat still records the heartbeat and its other fields',
+          load().get('phase') == 'F3' and load().get('round') == 7 and util.age_seconds(load().get('heartbeat')) < 30)
+    check('skill-seen proof: a Skill call older than the skill file is refused',
+          refused(pf_beat([skill_use(6000, 's1'), skill_result(5999, 's1'), text_rec(100)])))
+    check('skill-seen proof: a Skill call for another skill is refused',
+          refused(pf_beat([skill_use(100, 's2', name='panel-de-decision'), skill_result(99, 's2')])))
+    check('skill-seen proof: a Skill call made only by a subagent (sidechain) is refused',
+          refused(pf_beat([skill_use(100, 's3', side=True), skill_result(99, 's3')])))
+    check('skill-seen proof: a Skill call whose result is an error, or that has no result, is refused',
+          refused(pf_beat([skill_use(100, 's4'), skill_result(99, 's4', error=True)]))
+          and refused(pf_beat([skill_use(100, 's5')])))
+    check('skill-seen proof: a cross-session message that quotes the command is not a load',
+          refused(pf_beat([command_rec(100, 'Another Claude session sent a message:\n<command-name>/supervisa-sesiones</command-name>')])))
+    before = time.time()
+    r = pf_beat([text_rec(300), skill_use(100, 's6'), skill_result(99, 's6'), text_rec(50)], '--phase', 'F4')
+    check('skill-seen proof: a Skill call after the newest update is accepted: skill_seen, skill_seen_at and the proof',
+          r.returncode == 0 and 'BEAT ' in r.stdout and load().get('skill_seen') == t0
+          and before <= (load().get('skill_seen_at') or 0) <= time.time()
+          and abs((util.parse_ts(load().get('skill_seen_proof')) or 0) - (time.time() - 100)) < 5 and load().get('phase') == 'F4')
+    forget()
+    big = dict(text_rec(40), message={'role': 'assistant', 'content': [{'type': 'text', 'text': 'y' * 400000}]})
+    check('skill-seen proof: a load far beyond the 256 KB tail window is still found (the whole file is scanned backwards)',
+          pf_beat([skill_use(100, 's7'), skill_result(99, 's7'), big, big, text_rec(10)]).returncode == 0 and load().get('skill_seen') == t0)
+    forget()
+    check('skill-seen proof: the /supervisa-sesiones slash command that started the session counts as a load',
+          pf_beat([command_rec(100), text_rec(90)]).returncode == 0 and load().get('skill_seen') == t0)
+    # the incident this closes: the supervisor loaded the skill, the supervisor-lock code (or a rule) changed later and
+    # a reload order came; answering it with the beat alone must not mark the update as read
+    forget()
+    open(os.path.join(reload_dir, 'lock.py'), 'w').close()
+    os.utime(os.path.join(reload_dir, 'lock.py'), (time.time() - 50, time.time() - 50))
+    r = pf_beat([skill_use(100, 's8'), skill_result(99, 's8'), text_rec(20)])
+    check('skill-seen proof: a load older than a later change to the code or a rule (reload_globs) is refused', refused(r))
+    check('skill-seen proof: after invoking the skill again, the same beat is accepted',
+          pf_beat([skill_use(100, 's8'), skill_result(99, 's8'), skill_use(10, 's9'), skill_result(9, 's9')]).returncode == 0
+          and load().get('skill_seen') == t0)
+    os.remove(os.path.join(reload_dir, 'lock.py'))
+    # whose transcript: the running process's own only when it is the lock owner; otherwise the owner's app record
+    forget()
+    write_jsonl(tpath('cli-pf'), [text_rec(100)])
+    mine = dict(env, CLAUDE_CODE_HOST_SESSION_ID='local_pf', CLAUDE_CODE_SESSION_ID='cli-env')
+    other_env = dict(env, CLAUDE_CODE_HOST_SESSION_ID='local_other', CLAUDE_CODE_SESSION_ID='cli-env')
+    write_jsonl(tpath('cli-env', cwd=other), [skill_use(100, 'e1'), skill_result(99, 'e1')])
+    check('skill-seen proof: run by another session, the beat reads the owner\'s transcript, not the caller\'s',
+          refused(pf_beat(None, beat_env=other_env)))
+    os.remove(os.path.join(app_dir, 'local_pf.json'))
+    check('skill-seen proof: inside the owner\'s own process, CLAUDE_CODE_SESSION_ID names its transcript (found in any '
+          'project folder)', pf_beat(None, beat_env=mine).returncode == 0 and load().get('skill_seen') == t0)
+    forget()
+    put(app_dir, 'local_pf.json', {'sessionId': 'local_pf', 'cliSessionId': 'cli-pf', 'cwd': repo, 'title': 'pf'})
+    put(sessions_dir, 'pf-old.json', {'pid': os.getpid(), 'cwd': repo, 'sessionId': 'cli-pf-old',
+                                       'hostSessionId': 'local_pf', 'name': 'pf', 'status': 'idle'})
+    write_jsonl(tpath('cli-pf-old'), [skill_use(100, 'o1'), skill_result(99, 'o1')])
+    check('skill-seen proof: a session restarted with a new CLI id is checked in each of its transcripts',
+          pf_beat(None).returncode == 0 and load().get('skill_seen') == t0)
+    os.remove(os.path.join(sessions_dir, 'pf-old.json'))
+    os.remove(os.path.join(app_dir, 'local_pf.json'))
+    # Fail open when no transcript can be found or read. The refusal exists for a supervisor that skips the Skill call,
+    # and that one always has a transcript. A missing one means the check cannot run at all (another layout of the
+    # Claude dir, a renamed projects folder), and nothing the supervisor does would fix it: failing closed would leave
+    # every supervisor of such a machine blocked at the end of every turn by a SKILL_CHANGED it can never clear. So the
+    # beat is recorded as before, marked `unverified` in the lock, logged and said on stderr.
+    forget()
+    r = pf_beat(None)
+    check('skill-seen proof: no transcript at all fails open: recorded, marked unverified, said on stderr and logged',
+          r.returncode == 0 and load().get('skill_seen') == t0 and load().get('skill_seen_proof') == 'unverified'
+          and 'SKILL SEEN UNVERIFIED' in r.stderr
+          and 'local_pf skill-seen unverified' in (open(hook_log_path).read() if os.path.exists(hook_log_path) else ''))
+    check('skill-seen proof: the default reload_globs are the message gate\'s list (one config key for both)',
+          list(settings.DEFAULTS['reload_globs']) == ['~/.claude/skills/*/SKILL.md', '~/.claude/skills/*/reference/*.md',
+                                                     '~/.claude/rules/*.md', '~/.claude/scripts/supervisor-lock',
+                                                     '~/.claude/scripts/lib/supervisor/*.py'])
+    for name in os.listdir(os.path.join(projects_t, transcripts.slug_of(repo))):
+        if name.startswith('cli-pf'):
+            os.remove(os.path.join(projects_t, transcripts.slug_of(repo), name))
     os.utime(skill, (t1, t1))
 
     # 10. wait --owner: SKILL_CHANGED

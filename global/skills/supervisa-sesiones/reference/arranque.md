@@ -71,7 +71,7 @@ conviven.
 ```bash
 REG_DIR=$($L registry-dir)        # en el checkout principal; el script hace que git lo ignore
 $L acquire --session <id de get_session "self"> --title "<título>" --registry "$REG_DIR/SUPERVISOR-<YYYYMMDD-HHMM>.md"
-$L beat --session <id> --skill-seen   # cuando hayas leído la skill: acquire no lo da por leído
+$L beat --session <id> --skill-seen   # tras cargar la skill (Skill o /supervisa-sesiones); sin esa carga en tu transcripción sale con 8
 ```
 
 | Salida de `acquire` | Qué significa | Qué haces |

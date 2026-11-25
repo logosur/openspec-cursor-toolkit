@@ -6,6 +6,7 @@ import os
 import socket
 import sys
 import time
+from datetime import datetime
 
 from . import backlog, census, lint, projects, session_roles, settings, util, workmode
 
@@ -150,8 +151,21 @@ def not_owner(key):
     return 5
 
 
+SKILL_NOT_LOADED = 8   # `beat --skill-seen` without a load of the skill in the session's transcript
+
+
+def skill_seen_refusal(key, session, floor):
+    stamp = datetime.fromtimestamp(floor).strftime('%d-%m %H:%M') if floor else '?'
+    return (f'SKILL SEEN REFUSED {key}: tu transcripción no muestra que hayas cargado la skill {lint.skill_name()} '
+            f'después del último cambio de la skill, de una regla global o de supervisor-lock ({stamp}). Ejecutar '
+            f'beat --skill-seen no la carga: invócala con la herramienta Skill, aplica lo nuevo y repite '
+            f'supervisor-lock beat --session {session} --skill-seen.')
+
+
 def cmd_beat(args):
     project = projects.resolve(args.dir)
+    # before the flock: the transcript scan reads a file of up to hundreds of MB, and it does not need the lock
+    proof = lint.skill_load_proof(args.session) if args.skill_seen and lint.skill_mtime() is not None else None
     with Store() as store:
         owner = store.read(project['key'])
         if owner is None or owner.get('session_id') != args.session:
@@ -184,12 +198,26 @@ def cmd_beat(args):
             owner['mailbox'] = args.mailbox
         if getattr(args, 'closer', None):
             owner['closer'] = args.closer
-        if args.skill_seen:
+        if args.skill_seen and proof is not None:
+            verdict, when = proof
+            if verdict == 'not-loaded':
+                # the marker is the proof the message gate and the Stop hook trust: only a load in the session's own
+                # transcript sets it. The heartbeat and the other fields of this beat still count.
+                store.write(project['key'], owner)
+                print(skill_seen_refusal(project['key'], args.session, when), file=sys.stderr)
+                return SKILL_NOT_LOADED
             mtime = lint.skill_mtime()
             if mtime is not None:
                 owner['skill_seen'] = mtime
                 # when it was read: the message gate counts as a new update only what changed after this moment
                 owner['skill_seen_at'] = time.time()
+                # where the proof came from: the load's time, or none when no transcript could be read (fail open)
+                owner['skill_seen_proof'] = (datetime.fromtimestamp(when).astimezone().isoformat(timespec='seconds')
+                                             if verdict == 'loaded' else 'unverified')
+                if verdict == 'no-transcript':
+                    util.hook_log('hook.log', f'{project["key"]} {args.session} skill-seen unverified: no transcript found')
+                    print(f'SKILL SEEN UNVERIFIED {project["key"]}: no encuentro la transcripción de {args.session}; '
+                          f'se anota sin comprobar que la skill se cargó.', file=sys.stderr)
         store.write(project['key'], owner)
         print(f'BEAT {project["key"]}')
     hint = no_mailbox_hint(project, owner)

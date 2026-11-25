@@ -49,6 +49,8 @@ CONFIG = _load_config("supervision", {
     "app_sessions_dir": "~/.config/Claude/claude-code-sessions",
     "message_exceptions": [],
     "config_session_dirs": [],
+    "reload_globs": ["~/.claude/skills/*/SKILL.md", "~/.claude/skills/*/reference/*.md", "~/.claude/rules/*.md",
+                     "~/.claude/scripts/supervisor-lock", "~/.claude/scripts/lib/supervisor/*.py"],
 })
 
 REGISTRY = os.environ.get("CROSS_PROJECT_GATE_REGISTRY") or os.path.expanduser("~/.claude/sessions")
@@ -218,9 +220,8 @@ def skill_reload(to: str, inp: dict, cwd: str, sid: str = ""):
     if not project:
         return "ignore", f"«{to}» no es una supervisora (no tiene cerrojo de supervisión; nómbrala por su id local_…)"
     newest = 0.0
-    for pattern in _env_list("CROSS_PROJECT_GATE_UPDATED_GLOBS", [
-            "~/.claude/skills/*/SKILL.md", "~/.claude/skills/*/reference/*.md", "~/.claude/rules/*.md",
-            "~/.claude/scripts/supervisor-lock", "~/.claude/scripts/lib/supervisor/*.py"]):
+    # the same list `supervisor-lock beat --skill-seen` reads: one config key, so both agree on what an update is
+    for pattern in _env_list("CROSS_PROJECT_GATE_UPDATED_GLOBS", CONFIG["reload_globs"]):
         for path in glob.glob(os.path.expanduser(pattern)):
             try:
                 newest = max(newest, os.stat(path).st_mtime)

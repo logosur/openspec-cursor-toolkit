@@ -29,6 +29,9 @@ note "java=$(java -version 2>&1 | grep -i version | head -1) node=$(node -v 2>/d
 
 section "session setup (yes/no only, no names)"
 note "env_file=$([ -n "${CLAUDE_ENV_FILE:-}" ] && echo yes || echo no) start_hook_ran=$([ -f "$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)/info/cloud-identity.env" ] && echo yes || echo no)"
+# An environment setup script that writes this stamp shows whether its result is reused: a stamp older than the
+# machine means the session started from a saved copy of the setup, not from a fresh run of it.
+note "setup_stamp=$(cat /opt/cloud-setup-stamp 2>/dev/null || echo none) now=$(date -u +%FT%TZ) up_since=$(uptime -s 2>/dev/null | tr " " T) docker_images=$(docker images -q 2>/dev/null | wc -l)"
 note "remote_refs=$(git for-each-ref --format='%(refname:short)' refs/remotes 2>/dev/null | tr '\n' ' ' | cut -c1-200)"
 
 section "network (HTTP code, 000 = unreachable)"

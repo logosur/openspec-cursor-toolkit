@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Probe revision: 4.
+# Probe revision: 5.
 # Measures whether a Claude Code cloud session can build an Android App Bundle, on a throwaway app made from the public
 # Expo template, so that a cloud build setup is designed on measured facts:
 #   1. the machine (CPUs, memory, disk, KVM);

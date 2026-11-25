@@ -44,6 +44,7 @@ for url in \
   https://services.gradle.org/distributions/ \
   https://plugins.gradle.org/m2/ \
   https://repo.maven.apache.org/maven2/ \
+  https://repo.reactnative.dev/maven2/com/facebook/react/react-android/0.88.1/react-android-0.88.1.pom \
   https://www.jitpack.io/ \
   https://jitpack.io/ \
   https://huggingface.co/openai/whisper-tiny/resolve/main/model.safetensors \

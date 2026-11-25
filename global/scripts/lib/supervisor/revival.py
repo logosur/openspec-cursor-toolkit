@@ -20,6 +20,11 @@ REVIVE_MAX_ATTEMPTS = 3
 REVIVE_RETRY_S = 10 * 60
 REVIVE_VALID_S = settings.REVIVE_VALID_S
 DEAD_ALERT_GRACE_S = 50 * 60  # a DEAD supervisor reaches the developer only after the reviver had its chances
+# A supervisor whose turn was cut (the account's usage limit, an API error) keeps its process alive and idle: it is not
+# dead, and nothing wakes it once the account has usage again. `revive` wakes a live, idle supervisor whose lock is
+# running in a working phase (not `guardia`, where a still heartbeat is normal) and whose heartbeat is older than
+# STALLED_AFTER_S, the 45 min the skill allows without attending; only while the account has usage.
+STALLED_AFTER_S = 45 * 60
 
 
 def revive_path():
@@ -85,6 +90,42 @@ def revive_text(owner):
             'armar tu vigilante (`supervisor-lock wait`) y sigue tu ciclo desde donde lo dejaste, sin repetir lo hecho.')
 
 
+def stalled_supervisors(stalled_after, now=None):
+    """[(key, owner, verdict)] of live owners (project not paused) whose lock is running in a phase other than
+    `guardia` with a heartbeat older than `stalled_after` s. verdict is ('busy', None, '') when the session works now
+    (its CLI status, or a transcript touched within `stalled_after`), else the watchdog's (reason, epoch, detail)."""
+    from . import backlog, watchdog  # imported here: both import this module
+    now = time.time() if now is None else now
+    live = live_hosts()
+    store = lock_mod.Store()
+    out = []
+    for path in sorted(glob.glob(os.path.join(util.home(), 'locks', '*.json'))):
+        key = os.path.basename(path)[:-5]
+        owner = store.read(key)
+        rec = live.get((owner or {}).get('session_id'))
+        if (not owner or not rec or owner.get('state') != 'running' or backlog.on_guard(owner)
+                or util.age_seconds(owner.get('heartbeat')) <= stalled_after or providers.pause_of(owner.get('checkout'))):
+            continue
+        verdict = None if rec.get('status') == 'busy' else watchdog.stale_reason(rec, now, stalled_after)
+        out.append((key, owner, verdict or ('busy', None, '')))
+    return out
+
+
+def stalled_text(owner, reason, ts, detail):
+    since = time.strftime('%H:%M', time.localtime(ts)) if ts else util.clock(owner.get('heartbeat'))
+    quiet = int(util.age_seconds(owner.get('heartbeat')) / 60)
+    what = {'limit': f'tu turno se cortó hacia las {since} al agotarse el límite de uso de la cuenta («{detail}»)',
+            'api': f'tu turno se cortó hacia las {since} por un error de la API («{detail}»)',
+            'idle': f'terminaste un turno hacia las {since} sin dejar armado tu vigilante',
+            }.get(reason, f'no das señales desde las {since}')
+    return (f'{REVIVE_MARKER} No es que tu proceso muriera: sigue vivo, pero {what}, y llevas {quiet} min sin atender '
+            f'la supervisión de {owner.get("project")} (fase {owner.get("phase") or "-"}). La cuenta tiene uso ahora. Te '
+            'despierta la tarea programada de reanimación, no el desarrollador.\n\n'
+            'Antes de seguir: haz el censo de F1 (el corte pudo dejar a medias un merge, un deploy o un test), mira '
+            'get_usage antes de dar por vigente un límite de uso que anotaste (la cuenta pudo cambiar), vuelve a '
+            'armar tu vigilante (`supervisor-lock wait`) y sigue tu ciclo desde donde lo dejaste, sin repetir lo hecho.')
+
+
 def revive_exhausted(key, owner):
     entry = revive_load().get(key) or {}
     return entry.get('incident') == owner.get('heartbeat') and entry.get('attempts', 0) >= REVIVE_MAX_ATTEMPTS
@@ -115,7 +156,7 @@ def cmd_revive(args):
             data = revive_load()
             dead = dead_supervisors(args.dead_after)
             dead_keys = {k for k, _ in dead}
-            for key in [k for k in data if k not in dead_keys and (data[k] or {}).get('kind') != 'unattended']:
+            for key in [k for k in data if k not in dead_keys and (data[k] or {}).get('kind') not in ('unattended', 'stalled')]:
                 del data[key]  # alive again (or released): the next death is a new incident
             for key, owner in dead:
                 entry = data.get(key) or {}
@@ -136,11 +177,53 @@ def cmd_revive(args):
                                     'attempt': entry['attempts'], 'message': revive_text(owner)})
                     util.hook_log('revive.log', f'PLAN {key} {owner["session_id"]} attempt={entry["attempts"]}')
                 data[key] = entry
+            # a live, idle supervisor whose turn was cut (usage limit, API error) and that nobody woke: the same
+            # attempts and give-up as a death, one incident per heartbeat; only while the account has usage
+            stalled_keys = set()
+            if has_usage is True:
+                stalled = stalled_supervisors(args.stalled_after, now)
+                for key, owner, (reason, ts, detail) in stalled:
+                    if reason == 'busy':
+                        lines.append(f'BUSY {owner["session_id"]} {key}: working now, not woken')
+                        continue
+                    if reason == 'human':
+                        # a question to the developer is pending: a message would answer it; the watchdog tells him
+                        lines.append(f'HUMAN {owner["session_id"]} {key}: waits on the developer ({detail}), not woken')
+                        continue
+                    stalled_keys.add(key)
+                    entry = data.get(key) or {}
+                    if (entry.get('kind') != 'stalled' or entry.get('incident') != owner.get('heartbeat')
+                            or entry.get('session') != owner['session_id']):
+                        entry = {'session': owner['session_id'], 'kind': 'stalled', 'incident': owner.get('heartbeat'),
+                                 'attempts': 0}
+                    if entry['attempts'] >= REVIVE_MAX_ATTEMPTS:
+                        lines.append(f'GIVEUP-STALLED {owner["session_id"]} {key} attempts={entry["attempts"]}: the '
+                                     'watchdog tells the developer')
+                    elif now - entry.get('planned_at', 0) < REVIVE_RETRY_S:
+                        lines.append(f'WAIT-STALLED {owner["session_id"]} {key} last_attempt_min='
+                                     f'{int((now - entry["planned_at"]) / 60)}')
+                    else:
+                        entry['attempts'] += 1
+                        entry['planned_at'] = now
+                        entry.pop('delivery', None)
+                        targets.append({'session_id': owner['session_id'], 'project': owner.get('project') or key,
+                                        'key': key, 'reason': 'stalled', 'cause': reason,
+                                        'quiet_since': util.clock(owner.get('heartbeat')), 'attempt': entry['attempts'],
+                                        'message': stalled_text(owner, reason, ts, detail)})
+                        util.hook_log('revive.log', f'PLAN-STALLED {key} {owner["session_id"]} cause={reason} '
+                                               f'attempt={entry["attempts"]}')
+                    data[key] = entry
+                for key in [k for k in data if (data[k] or {}).get('kind') == 'stalled' and k not in stalled_keys]:
+                    del data[key]  # attended again (or busy, on guard, released): the next cut is a new incident
+            else:
+                lines.append('HOLD-STALLED the account usage is unknown: no live supervisor with a cut turn is woken')
+                stalled_keys = {k for k in data if (data[k] or {}).get('kind') == 'stalled'}  # kept as they are
             # a live supervisor that leaves sessions of its project unattended (cloud sessions to check, finished
             # sessions, ...) for UNATTENDED_AFTER_S is woken the same way, with the same marker and gate (the plan
             # names it, fresh)
             live = live_hosts()
-            pending = {k: (o, items) for k, o, items in unattended.unattended_supervisors(now) if k not in dead_keys}
+            pending = {k: (o, items) for k, o, items in unattended.unattended_supervisors(now)
+                       if k not in dead_keys and k not in stalled_keys}  # one wake per supervisor: its F1 census sees them
             for key in [k for k in data if (data[k] or {}).get('kind') == 'unattended' and k not in pending]:
                 del data[key]
             for key, (owner, items) in sorted(pending.items()):
@@ -174,6 +257,10 @@ def cmd_revive(args):
         print(json.dumps({'targets': targets, 'notes': lines}, ensure_ascii=False, indent=1))
         return 0
     for t in targets:
+        if t.get('reason') == 'stalled':
+            print(f'STALLED {t["session_id"]} {t["key"]} cause={t["cause"]} quiet_since={t["quiet_since"]} '
+                  f'attempt={t["attempt"]}/{REVIVE_MAX_ATTEMPTS}')
+            continue
         if t.get('reason') == 'unattended':
             print(f'UNATTENDED {t["session_id"]} {t["key"]} items={t["items"]} attempt={t["attempt"]}')
             continue

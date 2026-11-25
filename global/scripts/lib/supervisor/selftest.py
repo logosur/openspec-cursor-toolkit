@@ -1261,6 +1261,78 @@ def cmd_self_test(args):
     for name in os.listdir(os.path.join(lock_home, 'locks')):
         os.remove(os.path.join(lock_home, 'locks', name))
 
+    # 6b-2. revive: a live, idle supervisor whose turn was cut by the usage limit (its process alive, so never DEAD)
+    # is woken once the account has usage again; on guard, busy, paused, young or waiting on the developer it is not
+    fake_pause = os.path.join(tmp, 'fake-project-pause')
+    with open(fake_pause, 'w') as fh:
+        fh.write("def paused_marker(path):\n    return {'by': 'test'} if str(path).endswith('paused-proj') else None\n")
+    st_env = lambda usage: dict(env, SUPERVISOR_USAGE=usage, PROJECT_PAUSE_BIN=fake_pause)
+    srevive = lambda usage, *a: subprocess.run([sys.executable, runtime.ENTRY, 'revive', *a], capture_output=True,
+                                               text=True, env=st_env(usage))
+    cut_recs = [text_rec(4100), api_rec(4000, 'rate_limit', lim_text)]
+    wd_session('local_sc', 'k-cut', cut_recs, ago=3600)                      # F1, running, silent 1 h, cut by the limit
+    wd_session('local_sg', 'k-guard', cut_recs, ago=3600)
+    put(os.path.join(lock_home, 'locks'), 'k-guard.json',
+        dict(json.load(open(os.path.join(lock_home, 'locks', 'k-guard.json'))), phase='guardia'))
+    wd_session('local_sb', 'k-sbusy', cut_recs, ago=3600)
+    cli('local_sb', sessionId='cli-local_sb', status='busy')                 # the CLI says it is working now
+    wd_session('local_sp', 'k-spaused', cut_recs, ago=3600)
+    put(os.path.join(lock_home, 'locks'), 'k-spaused.json',
+        dict(json.load(open(os.path.join(lock_home, 'locks', 'k-spaused.json'))), checkout=os.path.join(tmp, 'paused-proj')))
+    wd_session('local_sy', 'k-syoung', cut_recs, ago=1200)                   # silent 20 min: within the 45 allowed
+    wd_session('local_sh', 'k-shuman', [text_rec(4100), tool_rec(4000, 'AskUserQuestion', 'qs')], ago=3600)
+    rv_file = os.path.join(lock_home, 'revive.json')
+    if os.path.exists(rv_file):
+        os.remove(rv_file)
+    r = srevive('no')
+    check('revive: a supervisor cut by the limit is not woken while the account has no usage (HOLD)',
+          r.returncode == 0 and r.stdout.startswith('HOLD ') and 'STALLED' not in r.stdout and not os.path.exists(rv_file))
+    r = srevive('unknown')
+    check('revive: with the usage unknown, a live supervisor with a cut turn is not woken either',
+          r.returncode == 0 and 'HOLD-STALLED' in r.stdout and not re.search(r'^STALLED ', r.stdout, re.M))
+    plan = json.loads(srevive('yes', '--json').stdout or '{}')
+    named = sorted(t['session_id'] for t in plan.get('targets') or [])
+    msg = next((t['message'] for t in plan.get('targets') or [] if t['session_id'] == 'local_sc'), '')
+    check('revive: cut by the limit and usage back -> the live, idle supervisor is woken, and only it',
+          named == ['local_sc'] and plan['targets'][0]['reason'] == 'stalled' and plan['targets'][0]['cause'] == 'limit'
+          and plan['targets'][0]['attempt'] == 1)
+    check('revive: its text says the truth (turn cut by the limit, process alive), with the marker and the F1 census',
+          msg.startswith('[reanimar supervisora] ') and 'sigue vivo' in msg and 'límite de uso' in msg
+          and lim_text in msg and 'murió hacia' not in msg and 'censo' in msg and 'supervisor-lock wait' in msg
+          and 'get_usage' in msg and f'se cortó hacia las {hh(4000)}' in msg)
+    rv = json.load(open(rv_file))
+    check('revive: its plan entry lets the cross-project gate pass the marker (session, fresh planned_at)',
+          rv['k-cut']['session'] == 'local_sc' and rv['k-cut']['kind'] == 'stalled' and time.time() - rv['k-cut']['planned_at'] < 60)
+    notes = '\n'.join(plan.get('notes') or [])
+    check('revive: on guard, paused, silent less than 45 min -> not woken; busy and waiting on the developer -> said, not woken',
+          not any(k in rv for k in ('k-guard', 'k-sbusy', 'k-spaused', 'k-syoung', 'k-shuman'))
+          and 'BUSY local_sb k-sbusy' in notes and 'HUMAN local_sh k-shuman' in notes
+          and not any(x in notes for x in ('k-guard', 'k-spaused', 'k-syoung')))
+    r = srevive('yes')
+    check('revive: within REVIVE_RETRY_S the same cut waits', 'WAIT-STALLED local_sc k-cut' in r.stdout
+          and not re.search(r'^STALLED ', r.stdout, re.M))
+    rv = json.load(open(rv_file))
+    rv['k-cut']['planned_at'] -= 3600
+    put(lock_home, 'revive.json', rv)
+    r = srevive('yes')
+    check('revive: after REVIVE_RETRY_S it tries again', re.search(r'^STALLED local_sc k-cut cause=limit .*attempt=2/3$', r.stdout, re.M) is not None)
+    rv = json.load(open(rv_file))
+    rv['k-cut'].update(attempts=3, planned_at=time.time() - 3600)
+    put(lock_home, 'revive.json', rv)
+    r = srevive('yes')
+    check('revive: after 3 attempts it gives up (the watchdog tells the developer)', 'GIVEUP-STALLED local_sc k-cut' in r.stdout
+          and not re.search(r'^STALLED ', r.stdout, re.M))
+    put_lock('k-cut', 'local_sc', 3700)                                      # another stop (another heartbeat): anew
+    r = srevive('yes')
+    check('revive: a new cut starts again at attempt 1', re.search(r'^STALLED local_sc k-cut .*attempt=1/3$', r.stdout, re.M) is not None)
+    put_lock('k-cut', 'local_sc', 10)                                        # it beats again: attended
+    r = srevive('yes')
+    check('revive: a supervisor that beats again leaves the state', 'k-cut' not in json.load(open(rv_file))
+          and not re.search(r'^STALLED ', r.stdout, re.M))
+    for name in os.listdir(os.path.join(lock_home, 'locks')):
+        os.remove(os.path.join(lock_home, 'locks', name))
+    os.remove(rv_file)
+
     # 6c. watchdog --nudge: wakes stopped sessions through session-nudge, independent of the locks
     open(nudge_log, 'w').close()
     with open(nudge_out, 'w') as fh:

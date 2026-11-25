@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Probe revision: 2 (one environment left in the account).
+# Probe revision: 3.
 # Measures whether a Claude Code cloud session can build an Android App Bundle, on a throwaway app made from the public
 # Expo template, so that a cloud build setup is designed on measured facts:
 #   1. the machine (CPUs, memory, disk, KVM);
@@ -124,10 +124,12 @@ if [ -f package.json ] && [ -d "$SDK/platforms" ]; then
     fi
     t=$(now); attempts=0; rc=1
     # A shared exit address makes Maven Central answer 429 now and then: retry, Gradle keeps what it already downloaded.
-    while [ "$attempts" -lt 4 ]; do
+    # A failed plugin or dependency lookup right after a 429 fails again at once: wait and retry those too.
+    while [ "$attempts" -lt 6 ]; do
       attempts=$((attempts + 1))
       left=$(( BUILD_LIMIT - ($(now) - t) )); [ "$left" -lt 60 ] && break
-      timeout "$left" ./gradlew --no-daemon --console=plain :app:bundleRelease >"$WORK/gradle.log" 2>&1
+      timeout "$left" ./gradlew --no-daemon --console=plain --info -Dorg.gradle.internal.repository.max.tentatives=8 \
+        -Dorg.gradle.internal.repository.initial.backoff=3000 :app:bundleRelease >"$WORK/gradle.log" 2>&1
       rc=$?
       note "gradle_attempt=$attempts exit=$rc elapsed=$(( $(now) - t )) http_429=$(grep -c 'status code 429' "$WORK/gradle.log") tasks=$(grep -cE '^> Task ' "$WORK/gradle.log")"
       [ "$rc" -eq 0 ] && break
@@ -136,8 +138,9 @@ if [ -f package.json ] && [ -d "$SDK/platforms" ]; then
         note "gradle_start_failure:"; head -12 "$WORK/gradle.log" | cut -c1-230 | tee -a "$SUMMARY"
         unset JAVA_HOME; export PATH=$host_path; continue
       fi
-      grep -q 'status code 429' "$WORK/gradle.log" || break
-      sleep 90
+      note "gradle_http_statuses=$(grep -oE 'status code [0-9]+' "$WORK/gradle.log" | sort | uniq -c | tr '\n' ' ')"
+      grep -qE 'status code 429|was not found in any of the following sources|Could not resolve' "$WORK/gradle.log" || break
+      sleep 120
     done
     note "gradle_exit=$rc seconds=$(( $(now) - t )) attempts=$attempts (124 = stopped at the limit)"
     aab=$(find app/build/outputs/bundle -name '*.aab' 2>/dev/null | head -1)

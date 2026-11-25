@@ -68,7 +68,7 @@ section "SDK and JDK (android-env.sh prepare)"
 t=$(now)
 if bash "$ENV_SH" prepare >"$WORK/prepare.log" 2>&1; then
   note "prepare=ok seconds=$(( $(now) - t ))"; sed 's/^/  /' "$WORK/prepare.log" | cut -c1-230 | tee -a "$SUMMARY"
-  note "sdk_gb=$(du -s -BG "$SDK" 2>/dev/null | cut -f1) disk_free_gb_after_sdk=$(df -BG --output=avail / | tail -1 | tr -dc 0-9)"
+  note "sdk_gb=$(du -s -BG "$SDK" 2>/dev/null | cut -f1) sdk_ndk=$(ls "$SDK/ndk" 2>/dev/null | tr '\n' ' ')disk_free_gb_after_sdk=$(df -BG --output=avail / | tail -1 | tr -dc 0-9)"
 else
   note "prepare=failed seconds=$(( $(now) - t )) $(tail -2 "$WORK/prepare.log" | tr '\n' ' ' | cut -c1-240)"
 fi

@@ -110,6 +110,8 @@ def build_parser():
     p.add_argument('--notify', action='store_true')
     p.add_argument('--nudge', action='store_true', help='also wake stopped sessions (question unanswered, usage limit renewed)')
     p.add_argument('--dead-after', type=float, default=600)
+    p.add_argument('--stalled-after', type=float, default=revival.STALLED_AFTER_S,
+                   help='wake a live, idle supervisor (running, not on guard) silent this long, when the account has usage')
     p.add_argument('--stale-after', type=float, default=2700)
     p.add_argument('--realert-after', type=float, default=0)
     p = add('revive', revival.cmd_revive, json_out=True, directory=False)
@@ -117,6 +119,8 @@ def build_parser():
     p.add_argument('--sent', metavar='LOCAL_ID', help='record the delivery of a revive message')
     p.add_argument('--delivery', help='delivered | queued | error, with --sent')
     p.add_argument('--dead-after', type=float, default=600)
+    p.add_argument('--stalled-after', type=float, default=revival.STALLED_AFTER_S,
+                   help='wake a live, idle supervisor (running, not on guard) silent this long, when the account has usage')
     add('hook', hook_mod.cmd_hook, directory=False)
     add('self-test', run_self_test)
     return parser

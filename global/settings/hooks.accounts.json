@@ -1,0 +1,14 @@
+{
+  "SessionStart": [
+    {
+      "matcher": "startup|resume",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 ~/.claude/scripts/account-switch hook",
+          "timeout": 10
+        }
+      ]
+    }
+  ]
+}

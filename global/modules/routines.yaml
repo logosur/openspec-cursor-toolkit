@@ -19,7 +19,7 @@ notes:
   - "Opt-in. The installer writes no timer. To run due routines every 5 minutes, add a systemd --user timer and service whose ExecStart is `/usr/bin/python3 %h/.claude/scripts/routines tick` (Type=oneshot, OnBootSec=2min, OnUnitActiveSec=5min), then `systemctl --user enable --now <name>.timer`."
   - "Permission profiles live in the routines config piece (profiles, profile_deny, profile_lift, default_profiles). The piece merges by key, so a machine's own `profiles` replaces the shipped examples as a whole; a profile a routine names and the config does not define adds nothing and the run report says so."
   - "vault_dir, when set, adds a notes step to every run prompt and lets the routine edit that folder's status notes; empty, no notes step and no extra permission."
-  - "`routines import` adopts app scheduled tasks into the registry; import_skip_ids lists the tasks that must stay in the app."
+  - "`routines import` adopts app scheduled tasks into the registry. It never adopts the toolkit's own app tasks (account-switch-resume, reanimar-supervisoras); import_skip_ids lists a machine's own tasks that must stay in the app."
   - "Runtime state (registry, runs, token, locks) lives in ~/.claude/routines/ and is never installed or compared."
 files:
   - {src: global/scripts/routines, dest: scripts/routines, mode: "0755"}

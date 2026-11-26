@@ -62,9 +62,13 @@ CONFIG = _toolkit_config("routines", {
     "vault_dir": "",                  # notes vault: when set, runs read the project's notes and may edit Estado.md
     "time_label": "hora local",       # how the run prompt names the time zone of the scheduled time
     "browser_opener": "",             # executable that opens a URL in the user's own browser (login steps)
-    "import_skip_ids": [],            # app task ids `routines import` leaves in the app on purpose
+    "import_skip_ids": [],            # a machine's own app task ids `routines import` leaves in the app
     "profiles": {}, "profile_deny": {}, "profile_lift": {}, "default_profiles": {},
 })
+# The app tasks the toolkit itself arms: account-switch-resume (module accounts) and reanimar-supervisoras (module
+# supervision). Each lives in the app on purpose, one per account, so `import` never adopts them, whatever the config
+# says: a machine's own `import_skip_ids` replaces the default as a whole and would otherwise drop them.
+TOOLKIT_APP_TASKS = frozenset({"account-switch-resume", "reanimar-supervisoras"})
 APP_SESSIONS = os.path.expanduser(_toolkit_config("supervision", {
     "app_sessions_dir": "~/.config/Claude/claude-code-sessions",
 })["app_sessions_dir"])
@@ -1018,8 +1022,8 @@ def cmd_import(args):
         with open(path) as fh:
             tasks = json.load(fh).get("scheduledTasks", [])
         for t in tasks:
-            # Tasks listed in `import_skip_ids` live in the app on purpose, one per account.
-            if t["id"] in known or t["id"] in CONFIG["import_skip_ids"]:
+            # The toolkit's own app tasks and those listed in `import_skip_ids` live in the app on purpose.
+            if t["id"] in known or t["id"] in TOOLKIT_APP_TASKS or t["id"] in CONFIG["import_skip_ids"]:
                 continue
             r = {"id": t["id"], "enabled": bool(t.get("enabled")), "cwd": t.get("cwd") or HOME,
                  "prompt_file": t.get("filePath") or os.path.join(PROMPTS, t["id"], "SKILL.md"),

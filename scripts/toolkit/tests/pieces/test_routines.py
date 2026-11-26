@@ -806,7 +806,7 @@ class CommandsTest(RoutinesTestCase):
         app = os.path.join(self.tmp, 'app', 'acct-1234567890', 'org')
         os.makedirs(app)
         tasks = []
-        for tid in ('kept-in-app', 'adopted', 'other'):
+        for tid in ('kept-in-app', 'adopted', 'other', 'account-switch-resume', 'reanimar-supervisoras'):
             path = os.path.join(self.tmp, tid + '.md')
             with open(path, 'w') as fh:
                 fh.write('task\n')
@@ -816,6 +816,7 @@ class CommandsTest(RoutinesTestCase):
         with mock.patch.object(R, 'APP_SESSIONS', os.path.join(self.tmp, 'app')), mock.patch('builtins.print'):
             self.assertEqual(R.cmd_import(Namespace()), 0)
         found = {r['id']: r for r in R.load_registry()['routines']}
+        # The two app tasks the toolkit installs stay in the app although this config lists only its own task.
         self.assertEqual(set(found), {'adopted', 'other'})
         self.assertEqual(found['adopted']['profiles'], ['curl'])
         self.assertEqual(found['other']['profiles'], [])

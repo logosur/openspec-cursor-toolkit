@@ -35,7 +35,10 @@ def build_parser():
         if name == 'reclaim':
             p.add_argument('--from', dest='from_id', required=True)
     p = add('beat', lock_mod.cmd_beat, session=True)
-    p.add_argument('--state', choices=['running', 'paused'])
+    p.add_argument('--state', choices=['running', 'paused'],
+                   help='paused only with --third-party, or for the usage limit while the account has no usage; a paused '
+                        'beat without --third-party while the account has usage is refused (exit 9) and the state stays')
+    p.add_argument('--third-party', metavar='WHAT', help='with --state paused: what is left waits on a third party: what and on whom')
     p.add_argument('--phase')
     p.add_argument('--round', type=int)
     p.add_argument('--mailbox', metavar='LOCAL_ID', help='local id of the question mailbox session')

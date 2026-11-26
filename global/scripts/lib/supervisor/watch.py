@@ -48,6 +48,19 @@ def cmd_wait(args):
     return code
 
 
+def usage_back_line(project, owner_id):
+    """USAGE line when `owner_id` holds the project lock, paused for the usage limit (not for a third party), and the
+    account has usage now; else None. The lock is read first: the usage answer may need the network (cached)."""
+    lock = lock_mod.Store().read(project['key'])
+    if lock is None or lock.get('session_id') != owner_id or not lock_mod.paused_for_limit(lock):
+        return None
+    if providers.account_has_usage() is not True:
+        return None
+    return (f'USAGE {project["key"]} (la cuenta tiene uso ahora y tu cerrojo sigue en pausa por el límite de uso: '
+            f'mira get_usage, supervisor-lock beat --session {owner_id} --state running y sigue el ciclo desde F1; si lo '
+            f'único que queda espera a un tercero, --state paused --third-party "<qué espera y de quién>")')
+
+
 def hold_while_paused(project, interval):
     """While the developer keeps the project paused (optional `project-pause`), the watcher neither times out nor
     reports: it holds, so nothing wakes the supervisor. When the pause ends it prints RESUMED and returns True."""
@@ -168,7 +181,17 @@ def wait_events(args):
                 for name in refs}
 
     def skill_line():
-        return lint.skill_changed_line(project, args.owner) if args.owner else None
+        """A state of the owner's own lock to act on: the skill changed, or a pause for the limit outlived it."""
+        if not args.owner:
+            return None
+        line = lint.skill_changed_line(project, args.owner)
+        if line:
+            return line
+        try:
+            return usage_back_line(project, args.owner)
+        except Exception:
+            util.hook_log('wait-errors.log', traceback.format_exc().rstrip())
+            return None
 
     line = skill_line()  # a state to act on: reported at once, not only when it changes
     if line:

@@ -53,6 +53,18 @@ def wait_armed(payload, owner_id):
     return wait_armed_in_proc(owner_id)
 
 
+def paused_limit_block(owner, local):
+    """Stop-hook reason for an owner whose lock is still paused for the usage limit while the account has usage, or ''.
+    Bounded like the other reasons of the chain: one block per turn (stop_hook_active)."""
+    if not lock_mod.paused_for_limit(owner) or providers.account_has_usage() is not True:
+        return ''
+    return (f'Tienes el cerrojo de supervisor de {owner.get("project")} en pausa por el límite de uso, pero la cuenta '
+            f'tiene uso ahora (lo dice el uso real, no la hora del límite). El límite de uso no es motivo de pausa: antes '
+            f'de terminar el turno, mira get_usage, ejecuta supervisor-lock beat --session {local} --state running y '
+            f'sigue el ciclo desde F1. Si lo único que queda espera a un tercero, dilo con --state paused --third-party '
+            f'"<qué espera y de quién>".')
+
+
 def hook_decide(raw):
     """What the hook prints for a payload (a json string): '' or a json document."""
     payload = json.loads(raw)
@@ -155,7 +167,8 @@ def hook_decide(raw):
         if not payload.get('stop_hook_active'):
             try:
                 # the developer's own messages first; a cut is resumed, never closed
-                reason = (developer.developer_block(owner, local, payload) or interrupted.cut_block(owner, local)
+                reason = (developer.developer_block(owner, local, payload) or paused_limit_block(owner, local)
+                          or interrupted.cut_block(owner, local)
                           or ('' if closing.closer_attending(owner) else closable.closable_block(owner, local))
                           or cloud.cloud_block(owner, local)
                           or backlog.guard_block(owner, local) or backlog.idle_block(owner, local, payload)

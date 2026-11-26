@@ -1335,6 +1335,177 @@ def cmd_self_test(args):
         os.remove(os.path.join(lock_home, 'locks', name))
     os.remove(rv_file)
 
+    # 6b-3. a pause for the usage limit lasts only while the account has no usage: `beat` refuses it once usage is back
+    # (exit 9) unless all that is left waits on a third party (`--third-party`); the watcher prints USAGE, `revive` plans
+    # paused-limit (one incident per pause, not per heartbeat) and the Stop hook sends the owner back to work
+    urun = lambda usage, *a: subprocess.run([sys.executable, runtime.ENTRY, *a], capture_output=True, text=True,
+                                            env=st_env(usage))
+    pz_key = p1['key']
+    load_lock = lambda k: json.load(open(os.path.join(lock_home, 'locks', k + '.json')))
+    aside = os.path.join(tmp, 'pause-aside')  # the sessions of the cases above (cut ones among them) are set aside
+    for directory, name in ((sessions_dir, 'cli'), (app_dir, 'app')):
+        os.makedirs(os.path.join(aside, name))
+        for f in os.listdir(directory):
+            os.replace(os.path.join(directory, f), os.path.join(aside, name, f))
+    run('acquire', '--dir', repo, '--session', 'local_pz')
+    save(dict(load(), skill_seen=os.path.getmtime(skill)))  # read: SKILL_CHANGED and its Stop block stay quiet
+    shift_heartbeat(900)
+    r = urun('yes', 'beat', '--dir', repo, '--session', 'local_pz', '--state', 'paused', '--phase', 'F4', '--round', '7')
+    cur = load()
+    check('beat --state paused with usage and no --third-party: refused (exit 9), Spanish reason on stderr, state kept',
+          r.returncode == lock_mod.PAUSE_REFUSED == 9 and f'PAUSE REFUSED {pz_key}: la cuenta tiene uso ahora' in r.stderr
+          and 'no la hora' in r.stderr and 'no es motivo de pausa' in r.stderr and 'F1' in r.stderr
+          and '--third-party' in r.stderr and cur['state'] == 'running' and not set(lock_mod.PAUSE_FIELDS) & set(cur))
+    check('beat refused: the heartbeat, phase and round of the beat still count',
+          util.age_seconds(cur['heartbeat']) < 60 and cur['phase'] == 'F4' and cur['round'] == 7)
+    r = urun('no', 'beat', '--dir', repo, '--session', 'local_pz', '--state', 'paused')
+    cur = load()
+    check('beat --state paused without usage: accepted as a limit pause with paused_at',
+          r.returncode == 0 and cur['state'] == 'paused' and cur.get('pause_cause') == 'limit' and bool(cur.get('paused_at'))
+          and 'pause_why' not in cur and lock_mod.paused_for_limit(cur))
+    save(dict(cur, paused_at=hb_ago(7200)))
+    first_pause = load()['paused_at']
+    r = urun('unknown', 'beat', '--dir', repo, '--session', 'local_pz', '--state', 'paused')
+    check('beat --state paused with the usage unknown: accepted, and paused_at stays across repeated paused beats',
+          r.returncode == 0 and load()['paused_at'] == first_pause and load()['pause_cause'] == 'limit')
+    r = urun('yes', 'beat', '--dir', repo, '--session', 'local_pz', '--state', 'paused')
+    check('beat --state paused with usage on a limit pause: refused, the lock stays paused for the limit (the signals push it)',
+          r.returncode == 9 and load()['state'] == 'paused' and load()['paused_at'] == first_pause)
+    legacy = {k: v for k, v in load().items() if k not in lock_mod.PAUSE_FIELDS}
+    save(legacy)
+    check('a paused lock without pause_cause (older lock) counts as a limit pause', lock_mod.paused_for_limit(load()))
+    urun('no', 'beat', '--dir', repo, '--session', 'local_pz', '--state', 'paused')
+    check('beat paused on an older lock records the cause and when the pause was first seen',
+          load().get('pause_cause') == 'limit' and bool(load().get('paused_at')))
+    r = urun('yes', 'beat', '--dir', repo, '--session', 'local_pz', '--state', 'paused', '--third-party', 'corto')
+    check('beat --third-party needs a real reason (exit 2)', r.returncode == 2 and '--third-party' in r.stderr)
+    r = urun('yes', 'beat', '--dir', repo, '--session', 'local_pz', '--state', 'running', '--third-party', 'la revisión de la tienda de aplicaciones')
+    check('beat --third-party only goes with --state paused (exit 2)', r.returncode == 2 and load()['state'] == 'paused')
+    tp_why = 'la revisión de la tienda de aplicaciones, que hace la propia tienda'
+    r = urun('yes', 'beat', '--dir', repo, '--session', 'local_pz', '--state', 'paused', '--third-party', tp_why)
+    cur = load()
+    check('beat --state paused --third-party with usage: accepted, third-party cause and why recorded',
+          r.returncode == 0 and cur['state'] == 'paused' and cur['pause_cause'] == 'third-party' and cur['pause_why'] == tp_why
+          and not lock_mod.paused_for_limit(cur) and cur['paused_at'] != first_pause)
+
+    def pz_wait(usage, timeout='1.5'):
+        began = time.time()
+        out = subprocess.run([sys.executable, runtime.ENTRY, 'wait', '--dir', repo, '--owner', 'local_pz', '--interval', '0.2',
+                              '--timeout', timeout, '--all-idle-after', '0'], capture_output=True, text=True, env=st_env(usage))
+        return out.stdout.splitlines(), time.time() - began
+
+    lines, _ = pz_wait('yes')
+    check('wait --owner: a pause for a third party is not a USAGE signal', lines == ['TIMEOUT 1.5s'])
+    save(dict(load(), pause_cause='limit', paused_at=first_pause))
+    pz_lines, took = pz_wait('yes', timeout='20')
+    check('wait --owner: a limit pause while the account has usage -> one USAGE line at once, then wait returns',
+          took < 5 and len(pz_lines) == 1 and pz_lines[0].startswith(f'USAGE {pz_key} (la cuenta tiene uso ahora')
+          and 'get_usage' in pz_lines[0] and 'beat --session local_pz --state running' in pz_lines[0]
+          and 'F1' in pz_lines[0] and '--third-party' in pz_lines[0])
+    check('wait --owner: a limit pause without usage, or with the usage unknown, is no signal',
+          pz_wait('no')[0] == ['TIMEOUT 1.5s'] and pz_wait('unknown')[0] == ['TIMEOUT 1.5s'])
+    pz_cli = os.path.join(sessions_dir, 'pz.json')
+    put(sessions_dir, 'pz.json', {'pid': os.getpid(), 'cwd': repo, 'sessionId': 'cli-pz', 'hostSessionId': 'local_pz', 'status': 'idle'})
+    pz_task = {'id': 'bz', 'type': 'shell', 'status': 'running', 'description': 'vigilante',
+               'command': '~/.claude/scripts/supervisor-lock wait --owner local_pz --timeout 600'}
+    pz_stop = lambda usage, **extra: subprocess.run(
+        [sys.executable, runtime.ENTRY, 'hook'], capture_output=True, text=True, env=st_env(usage),
+        input=json.dumps(dict({'hook_event_name': 'Stop', 'session_id': 'cli-pz', 'cwd': repo, 'stop_hook_active': False,
+                               'background_tasks': [pz_task]}, **extra)))
+    out = json.loads(pz_stop('yes').stdout or '{}')
+    check('hook Stop: the owner of a lock paused for the limit, with usage back, may not end the turn (Spanish reason)',
+          out.get('decision') == 'block' and 'en pausa por el límite de uso' in out.get('reason', '')
+          and 'tiene uso ahora' in out['reason'] and 'beat --session local_pz --state running' in out['reason']
+          and 'F1' in out['reason'] and '--third-party' in out['reason'])
+    check('hook Stop: blocked once per turn (stop_hook_active), and not without usage or with the usage unknown',
+          pz_stop('yes', stop_hook_active=True).stdout == '' and pz_stop('no').stdout == '' and pz_stop('unknown').stdout == '')
+    save(dict(load(), pause_cause='third-party', pause_why=tp_why))
+    check('hook Stop: a pause for a third party is not blocked', pz_stop('yes').stdout == '')
+    r = urun('yes', 'beat', '--dir', repo, '--session', 'local_pz', '--state', 'running')
+    check('beat --state running clears pause_cause, pause_why and paused_at',
+          r.returncode == 0 and load()['state'] == 'running' and not set(lock_mod.PAUSE_FIELDS) & set(load()))
+    os.remove(pz_cli)
+    os.remove(lock_file)
+
+    def pl_lock(key, sid, **extra):
+        put(os.path.join(lock_home, 'locks'), key + '.json',
+            dict({'key': key, 'project': 'proj', 'session_id': sid, 'title': 'T ' + key, 'state': 'paused', 'phase': 'F4',
+                  'round': 3, 'heartbeat': hb_ago(60), 'pause_cause': 'limit', 'paused_at': hb_ago(7200)}, **extra))
+
+    pl_clis = ('local_pl', 'local_pt', 'local_pg', 'local_pp', 'local_pb', 'local_pd')
+    for sid in pl_clis:
+        cli(sid, sessionId='cli-' + sid, status='busy' if sid == 'local_pb' else 'idle')
+    pl_lock('k-plim', 'local_pl')                                                 # limit pause, beats every 15 min
+    pl_lock('k-ptp', 'local_pt', pause_cause='third-party', pause_why=tp_why)     # waits on a third party
+    pl_lock('k-plegacy', 'local_pg', pause_cause=None, paused_at=None)            # an older lock: no cause recorded
+    pl_lock('k-pproj', 'local_pp', checkout=os.path.join(tmp, 'paused-proj'))     # the developer paused the project
+    pl_lock('k-pbusy', 'local_pb')                                                # in a turn now
+    pl_lock('k-pguard', 'local_pd', phase='guardia')                              # on guard
+    r = srevive('no')
+    check('revive: a supervisor paused for the limit is not woken while the account has no usage',
+          r.returncode == 0 and r.stdout.startswith('HOLD ') and not re.search(r'^PAUSED ', r.stdout, re.M) and not os.path.exists(rv_file))
+    r = srevive('unknown')
+    check('revive: nor while the usage is unknown (HOLD-PAUSED)',
+          'HOLD-PAUSED' in r.stdout and not re.search(r'^PAUSED ', r.stdout, re.M))
+    plan = json.loads(srevive('yes', '--json').stdout or '{}')
+    paused_t = {t['session_id']: t for t in plan.get('targets') or [] if t.get('reason') == 'paused-limit'}
+    msg = (paused_t.get('local_pl') or {}).get('message', '')
+    check('revive: with usage, live supervisors paused for the limit (older locks too) are planned as paused-limit',
+          sorted(paused_t) == ['local_pg', 'local_pl'] and paused_t['local_pl']['attempt'] == 1
+          and paused_t['local_pl']['cause'] == 'limit')
+    check('revive: the paused-limit text (marker, usage now, get_usage, beat running, F1 census, watcher, third party)',
+          msg.startswith('[reanimar supervisora] La cuenta tiene uso ahora') and 'en pausa por el límite de uso' in msg
+          and 'no es motivo de pausa' in msg and 'get_usage' in msg and 'beat --session local_pl --state running' in msg
+          and 'censo de F1' in msg and 'supervisor-lock wait' in msg and '--third-party' in msg
+          and f'desde las {hh(7200)}' in msg)
+    rv = json.load(open(rv_file))
+    notes = '\n'.join(plan.get('notes') or [])
+    check('revive: the paused-limit entry lets the cross-project gate pass the marker (session, fresh planned_at)',
+          rv['k-plim']['session'] == 'local_pl' and rv['k-plim']['kind'] == 'paused-limit'
+          and time.time() - rv['k-plim']['planned_at'] < 60 and rv['k-plim']['incident'] == load_lock('k-plim')['paused_at'])
+    check('revive: third-party pauses, paused projects and guards are not planned; a busy one is said, kept, not woken',
+          not any(k in rv for k in ('k-ptp', 'k-pproj', 'k-pguard')) and 'BUSY local_pb k-pbusy' in notes
+          and rv['k-pbusy']['attempts'] == 0 and 'local_pb' not in paused_t)
+    check('revive: PLAN-PAUSED is logged with its cause',
+          'PLAN-PAUSED k-plim local_pl cause=limit attempt=1' in open(os.path.join(lock_home, 'revive.log')).read())
+    legacy_incident = rv['k-plegacy']['incident']
+    pl_lock('k-plim', 'local_pl', paused_at=load_lock('k-plim')['paused_at'])   # it beats again, still paused
+    pl_lock('k-plegacy', 'local_pg', pause_cause=None, paused_at=None)
+    r = srevive('yes')
+    check('revive: a paused supervisor that beats again waits (the incident is the pause, not the heartbeat)',
+          'WAIT-PAUSED local_pl k-plim' in r.stdout and 'WAIT-PAUSED local_pg k-plegacy' in r.stdout
+          and not re.search(r'^PAUSED ', r.stdout, re.M) and json.load(open(rv_file))['k-plegacy']['incident'] == legacy_incident)
+    rv = json.load(open(rv_file))
+    rv['k-plim']['planned_at'] -= 3600
+    put(lock_home, 'revive.json', rv)
+    pl_lock('k-plim', 'local_pl', paused_at=load_lock('k-plim')['paused_at'])
+    r = srevive('yes')
+    check('revive: after REVIVE_RETRY_S the same pause is tried again (attempt 2)',
+          re.search(r'^PAUSED local_pl k-plim cause=limit .*attempt=2/3$', r.stdout, re.M) is not None)
+    rv = json.load(open(rv_file))
+    rv['k-plim'].update(attempts=3, planned_at=time.time() - 3600)
+    put(lock_home, 'revive.json', rv)
+    pl_lock('k-plim', 'local_pl', paused_at=load_lock('k-plim')['paused_at'])
+    r = srevive('yes')
+    check('revive: after 3 attempts on the same pause it gives up, whatever the heartbeat',
+          'GIVEUP-PAUSED local_pl k-plim' in r.stdout and not re.search(r'^PAUSED local_pl ', r.stdout, re.M))
+    pl_lock('k-plim', 'local_pl', paused_at=hb_ago(30))                           # a new pause: a new incident
+    r = srevive('yes')
+    check('revive: a new pause starts again at attempt 1',
+          re.search(r'^PAUSED local_pl k-plim .*attempt=1/3$', r.stdout, re.M) is not None)
+    pl_lock('k-plim', 'local_pl', state='running', pause_cause=None, paused_at=None)
+    srevive('yes')
+    check('revive: a supervisor running again leaves the state', 'k-plim' not in json.load(open(rv_file)))
+    for name in os.listdir(os.path.join(lock_home, 'locks')):
+        os.remove(os.path.join(lock_home, 'locks', name))
+    for sid in pl_clis:
+        os.remove(os.path.join(sessions_dir, sid + '.json'))
+    os.remove(rv_file)
+    for directory, name in ((sessions_dir, 'cli'), (app_dir, 'app')):
+        for f in os.listdir(os.path.join(aside, name)):
+            os.replace(os.path.join(aside, name, f), os.path.join(directory, f))
+    shutil.rmtree(aside)
+
     # 6c. watchdog --nudge: wakes stopped sessions through session-nudge, independent of the locks
     open(nudge_log, 'w').close()
     with open(nudge_out, 'w') as fh:

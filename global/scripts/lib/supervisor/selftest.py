@@ -1276,7 +1276,7 @@ def cmd_self_test(args):
     wd_session('local_sg', 'k-guard', cut_recs, ago=3600)
     put(os.path.join(lock_home, 'locks'), 'k-guard.json',
         dict(json.load(open(os.path.join(lock_home, 'locks', 'k-guard.json'))), phase='guardia'))
-    wd_session('local_sb', 'k-sbusy', cut_recs, ago=3600)
+    wd_session('local_sb', 'k-sbusy', [text_rec(4100), tool_rec(4000, 'Bash', 'sb')], ago=3600)  # busy, not cut
     cli('local_sb', sessionId='cli-local_sb', status='busy')                 # the CLI says it is working now
     wd_session('local_sp', 'k-spaused', cut_recs, ago=3600)
     put(os.path.join(lock_home, 'locks'), 'k-spaused.json',
@@ -1285,6 +1285,9 @@ def cmd_self_test(args):
     young_cut = [text_rec(1300), api_rec(1200, 'rate_limit', lim_text)]
     wd_session('local_sl', 'k-slimit', young_cut, age=1200, ago=1200)         # cut by the limit 20 min ago: no 45 min wait
     wd_session('local_sn', 'k-snew', young_cut, age=120, ago=120)             # cut 2 min ago: within LIMIT_CUT_AFTER_S
+    wd_session('local_sw', 'k-swork', young_cut, age=1200, ago=1200)         # cut, but its subagents work on:
+    cli('local_sw', sessionId='cli-local_sw', status='busy')                 # the CLI says busy and a subagent
+    write_jsonl(spath('cli-local_sw', 'agent-w.jsonl'), [text_rec(5)], age=5)  # transcript moves: still cut
     wd_session('local_sh', 'k-shuman', [text_rec(4100), tool_rec(4000, 'AskUserQuestion', 'qs')], ago=3600)
     rv_file = os.path.join(lock_home, 'revive.json')
     if os.path.exists(rv_file):
@@ -1298,8 +1301,8 @@ def cmd_self_test(args):
     plan = json.loads(srevive('yes', '--json').stdout or '{}')
     named = sorted(t['session_id'] for t in plan.get('targets') or [])
     msg = next((t['message'] for t in plan.get('targets') or [] if t['session_id'] == 'local_sc'), '')
-    check('revive: cut by the limit and usage back -> the live, idle supervisors are woken, also one cut 20 min ago',
-          named == ['local_sc', 'local_sl'] and all(t['reason'] == 'stalled' and t['cause'] == 'limit' and t['attempt'] == 1
+    check('revive: cut by the limit and usage back -> woken, also one cut 20 min ago and one whose subagents still work',
+          named == ['local_sc', 'local_sl', 'local_sw'] and all(t['reason'] == 'stalled' and t['cause'] == 'limit' and t['attempt'] == 1
                                                     for t in plan['targets']))
     check('revive: its text says the truth (turn cut by the limit, process alive), with the marker and the F1 census',
           msg.startswith('[reanimar supervisora] ') and 'sigue vivo' in msg and 'límite de uso' in msg

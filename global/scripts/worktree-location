@@ -39,7 +39,10 @@ under <repo>/.claude/worktrees/, so this script does it too: gitignored, untrack
 
 <root> comes from the toolkit config piece `worktree-location` (key `root`, default
 ~/worktrees). CLAUDE_WORKTREES_ROOT and CLAUDE_WORKTREES_STATE override the root and the state
-folder; they exist for tests.
+folder; they exist for tests. The same piece's key `no_worktrees` (a list of repository paths,
+default empty) names repositories where no worktree is ever created: `add` and the hooks refuse
+there, so an isolated subagent launched while the shell sits in one (a notes vault) fails at once
+instead of branching that repository.
 """
 
 import argparse
@@ -62,6 +65,9 @@ except ImportError:  # the script copied without the toolkit lib still works wit
 
 CONFIG = _load_config('worktree-location', {'root': '~/worktrees'})
 ROOT = os.environ.get('CLAUDE_WORKTREES_ROOT') or os.path.expanduser(CONFIG['root'])
+NO_WORKTREES = [os.path.realpath(os.path.expanduser(p)) for p in
+                (CONFIG.get('no_worktrees') if isinstance(CONFIG.get('no_worktrees'), list) else [])
+                if isinstance(p, str) and p.strip()]
 STATE = os.environ.get('CLAUDE_WORKTREES_STATE', os.path.expanduser('~/.claude/state/worktree-location'))
 REGISTRY = os.path.join(STATE, 'registry.jsonl')
 IN_PROJECT = os.path.join('.claude', 'worktrees')
@@ -266,6 +272,9 @@ def add(repo, branch, base='HEAD'):
         raise Refused('"%s" is not a valid branch name' % branch)
 
     main = main_checkout(repo)
+    if os.path.realpath(main) in NO_WORKTREES:
+        raise Refused('%s is listed in no_worktrees: no worktree is created in it. If an isolated subagent was being '
+                      'launched, cd back to the project and launch it again' % main)
     parent, ddev = worktrees_dir(main)
     lock_name = '%s-%s.lock' % (project_name(main), hashlib.sha1(main.encode()).hexdigest()[:8])
     os.makedirs(STATE, exist_ok=True)

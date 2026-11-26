@@ -23,7 +23,8 @@ DEAD_ALERT_GRACE_S = 50 * 60  # a DEAD supervisor reaches the developer only aft
 # A supervisor whose turn was cut (the account's usage limit, an API error) keeps its process alive and idle: it is not
 # dead, and nothing wakes it once the account has usage again. `revive` wakes a live, idle supervisor whose lock is
 # running in a working phase (not `guardia`, where a still heartbeat is normal) and whose heartbeat is older than
-# STALLED_AFTER_S, the 45 min the skill allows without attending; only while the account has usage.
+# STALLED_AFTER_S, the 45 min the skill allows without attending; only while the account has usage. A turn cut by the
+# usage limit (its newest record is the limit's error) counts after LIMIT_CUT_AFTER_S instead.
 STALLED_AFTER_S = 45 * 60
 
 
@@ -103,12 +104,30 @@ def stalled_supervisors(stalled_after, now=None):
         key = os.path.basename(path)[:-5]
         owner = store.read(key)
         rec = live.get((owner or {}).get('session_id'))
+        short = min(LIMIT_CUT_AFTER_S, stalled_after)
         if (not owner or not rec or owner.get('state') != 'running' or backlog.on_guard(owner)
-                or util.age_seconds(owner.get('heartbeat')) <= stalled_after or providers.pause_of(owner.get('checkout'))):
+                or util.age_seconds(owner.get('heartbeat')) <= short or providers.pause_of(owner.get('checkout'))):
             continue
-        verdict = None if rec.get('status') == 'busy' else watchdog.stale_reason(rec, now, stalled_after)
+        late = util.age_seconds(owner.get('heartbeat')) > stalled_after
+        if rec.get('status') == 'busy':
+            if late:
+                out.append((key, owner, ('busy', None, '')))
+            continue
+        # a turn cut by the usage limit shows at once (its newest record is the limit's error), so it needs no 45 min
+        # of silence: a cut shortly before the window renews, or a watcher that fires and is cut again just before
+        # it, would otherwise keep the supervisor still for up to 45 min after the account has usage again
+        cut = watchdog.stale_reason(rec, now, short)
+        if cut and cut[0] == 'limit':
+            out.append((key, owner, cut))
+            continue
+        if not late:
+            continue
+        verdict = watchdog.stale_reason(rec, now, stalled_after)
         out.append((key, owner, verdict or ('busy', None, '')))
     return out
+
+
+LIMIT_CUT_AFTER_S = 5 * 60  # quiet time after which a turn cut by the usage limit counts as stalled
 
 
 def stalled_text(owner, reason, ts, detail):

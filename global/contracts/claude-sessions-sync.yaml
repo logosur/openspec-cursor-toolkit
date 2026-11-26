@@ -1,0 +1,21 @@
+piece: claude-sessions-sync
+dest: scripts/claude-sessions-sync
+kind: cli
+probes:
+  - name: self-test passes from the installed copy
+    args: [self-test]
+    exit: [0]
+    stdout: any
+    contains: " 0 failures"
+    timeout: 60
+  - name: status of a machine without the app's sessions folder
+    args: [status]
+    env: {CLAUDE_SESSIONS_ROOT: probe-root, CLAUDE_SESSIONS_SYNC_STATE: probe-state}
+    exit: [0]
+    stdout: any
+    contains: "deleted (not copied again): 0"
+  - name: a dry pass without the app's sessions folder changes nothing
+    args: [once, --dry-run]
+    env: {CLAUDE_SESSIONS_ROOT: probe-root, CLAUDE_SESSIONS_SYNC_STATE: probe-state}
+    exit: [0]
+    stdout: any

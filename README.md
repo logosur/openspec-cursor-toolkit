@@ -58,9 +58,10 @@ What the installer guarantees:
 
 ## Modules
 
-`openspec`, `core` and `devtools` are installed by default. `sessions`, `supervision` and `heavy-jobs` are opt-in,
-because they change what sessions do unattended (`sessions` makes started sessions run without
-permission prompts): choose them with `--modules openspec,core,devtools,sessions,supervision,heavy-jobs` or in
+`openspec`, `core` and `devtools` are installed by default. `sessions`, `supervision`, `heavy-jobs` and `accounts` are
+opt-in, because they change what sessions do unattended (`sessions` makes started sessions run without
+permission prompts) or what runs on the machine: choose them with
+`--modules openspec,core,devtools,sessions,supervision,heavy-jobs,accounts` or in
 the override's `modules`. A later `install` without `--modules` keeps the modules of the last install; to drop
 one, name the ones you want.
 
@@ -72,6 +73,7 @@ one, name the ones you want.
 | `sessions` | for the Claude desktop app: `start-session-bypass-gate` (sessions started to work now are born in bypassPermissions: one approval card for the caller instead of one per session) and `spawn-task-duplicate-gate` (denies a proposal card that repeats one already offered for the same project) |
 | `supervision` | the `supervisa-sesiones` skill and command (one supervisor per project: census, write turns, watcher, decisions, closing; it integrates, deploys or archives only with written authorisation) with the rules it relies on, `ask-queue` (decisions left for the developer) with the hook that shows each one in the session that queued it, and `cross-project-message-gate` (a session only messages sessions of its own project; every exception is off until configured) |
 | `heavy-jobs` | `heavy-job` (one semaphore for the machine's suites, builds, installs, emulators and models; set `default_slots` for the machine) and `heavy-job-gate`, which denies a heavy command launched outside it |
+| `accounts` | for several Claude accounts on one machine: `claude-sessions-sync` copies the desktop app's Code-tab session records between every account and organisation, so after a switch the sidebar lists the same sessions. The installer writes no service: `python3 ~/.claude/scripts/claude-sessions-sync install` starts it as a `systemd --user` unit |
 
 Manifests are in `global/modules/<name>.yaml`; the files they install are in `global/` (and, for
 `openspec`, in `.claude/`). The rule texts of `core` and `devtools` are written in Spanish, like the

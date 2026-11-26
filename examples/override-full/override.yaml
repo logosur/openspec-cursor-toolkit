@@ -1,7 +1,7 @@
 schema: 1
 # Every module the toolkit ships, so an install from zero can try all of it. sessions, supervision and heavy-jobs
 # change what sessions do unattended: read README.md (next to this file) before copying it to ~/.config/claude-toolkit.
-modules: [openspec, core, devtools, sessions, supervision, heavy-jobs]
+modules: [openspec, core, devtools, sessions, supervision, heavy-jobs, accounts]
 
 # Toolkit files you do not want at all; their hooks go too. Empty here: everything is installed.
 remove: []

@@ -40,13 +40,14 @@ cp -r examples/override-full ~/.config/claude-toolkit      # or merge it into th
 Read what the opt-in modules change before you do: `sessions` makes the sessions you start from the desktop app
 run without permission prompts, `supervision` lets one supervisor session per project order the others and
 answers their questions with a decision panel, and `heavy-jobs` denies heavy commands (suites, builds, installs,
-emulators) that are not launched through its semaphore. The [main README](../../README.md#modules) has the table.
+emulators) that are not launched through its semaphore. `accounts` installs the session sync between Claude
+accounts; it only runs once you start its service. The [main README](../../README.md#modules) has the table.
 
 ## What each file turns on
 
 | Path | Effect |
 |---|---|
-| `override.yaml` | all six modules: `openspec`, `core`, `devtools`, `sessions`, `supervision`, `heavy-jobs` |
+| `override.yaml` | all seven modules: `openspec`, `core`, `devtools`, `sessions`, `supervision`, `heavy-jobs`, `accounts` |
 | `config/supervision.json` | the four message exceptions (`account_switch`, `project_resume`, `skill_reload`, `supervisor_revive`), and `~/.claude` as the folder whose sessions may send a skill reload or a revive |
 | `config/heavy-job.json` | two slots for compiling and tests; set what your machine can take |
 | `config/worktree-location.json`, `config/test-account.json` | the worktree root and the notes folder test users must never be written to |

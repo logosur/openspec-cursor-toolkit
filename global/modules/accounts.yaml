@@ -1,0 +1,22 @@
+name: accounts
+summary: >-
+  Several Claude accounts on one machine: claude-sessions-sync copies the Claude desktop app's Code-tab
+  session records between the folders of every account and organisation, so after switching account the
+  sidebar lists the same sessions, which continue the same conversations.
+requires:
+  python: "3.10"
+  os: linux
+  binaries: [python3]
+optional:
+  binaries:
+    systemctl: "`claude-sessions-sync install` runs it as a systemd --user service; without it, run `once` by hand"
+    notify-send: desktop notice when sessions from other accounts arrive (libnotify)
+notes:
+  - "Opt-in. The installer writes no service: start it once with `python3 ~/.claude/scripts/claude-sessions-sync install` (systemd --user); `uninstall` stops it and leaves the session folders as they are."
+  - "Its first pass backs up the whole sessions folder to ~/backups/. The app reads the list when it starts or switches account, so new sessions show after a restart of the app."
+  - account-switch is not part of the toolkit; without it the sync only copies records.
+# Named by claude-sessions-sync and not installed by this module; it works without it.
+project_provided:
+  - scripts/account-switch
+files:
+  - {src: global/scripts/claude-sessions-sync, dest: scripts/claude-sessions-sync, mode: "0755"}

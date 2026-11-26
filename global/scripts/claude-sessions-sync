@@ -1,0 +1,523 @@
+#!/usr/bin/env python3
+"""claude-sessions-sync: one Code-tab session list for every Claude account on this machine.
+
+The desktop app keeps the sidebar list per account and organization, one record per session:
+    ~/.config/Claude/claude-code-sessions/<account>/<org>/local_<id>.json
+The conversation itself lives in ~/.claude/projects/ and is shared by every account already.
+This copies each record to the folders of all the other accounts, so after switching account
+the sidebar shows the same sessions, continuing the same conversations.
+
+    claude-sessions-sync run        keep syncing (the user service claude-sessions-sync.service)
+    claude-sessions-sync once       one pass; add --dry-run to only print what it would do
+    claude-sessions-sync status     folders, sessions per folder, deleted sessions
+    claude-sessions-sync install    write the user unit for this copy and start it (once per machine)
+    claude-sessions-sync uninstall  stop it and remove the unit; the session folders stay as they are
+    claude-sessions-sync self-test  check the sync rules on throwaway folders; touches nothing real
+
+The toolkit's `accounts` module installs it at ~/.claude/scripts/claude-sessions-sync; `install`, run
+from that copy, points the unit at it. When the open account or organisation changes, it tells
+~/.claude/scripts/account-switch (`detect`), if that script exists; without it, it only copies records.
+
+Rules:
+- Copies are real files (the app refuses hard links and symlinks): temp file, then rename.
+- The newest copy of a record wins; copies keep its mtime, so nothing bounces back.
+- A record that disappears from a folder where it was seen was deleted in the app: the other
+  copies go to the trash under the state folder, and the id is never copied again.
+- Only local_*.json is synced. Archive hints, scheduled tasks and waiting-input stay per account.
+- First run backs up the whole sessions folder to ~/backups/.
+"""
+
+import argparse
+import datetime as dt
+import fcntl
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import time
+from pathlib import Path
+
+HOME = Path.home()
+DEFAULT_ROOT = HOME / ".config/Claude/claude-code-sessions"
+DEFAULT_STATE = HOME / ".claude/state/claude-sessions-sync"
+BACKUPS = HOME / "backups"
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+RECORD_RE = re.compile(r"^local_[0-9a-f-]{36}\.json$")
+TMP_PREFIX = ".claude-sessions-sync."
+ACCOUNT_SWITCH = HOME / ".claude/scripts/account-switch"
+POLL_SECONDS = 2.0
+MISSING_RECHECK_SECONDS = 0.5
+
+
+def log(msg):
+    print(f"{dt.datetime.now().isoformat(timespec='seconds')} {msg}", flush=True)
+
+
+def notify(summary, body):
+    try:
+        subprocess.run(["notify-send", "-a", "Claude", summary, body], timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+class Syncer:
+    def __init__(self, root, state_dir, backup_dir=BACKUPS, dry_run=False, account_switch=ACCOUNT_SWITCH,
+                 notifier=notify):
+        self.root = Path(root)
+        self.backup_dir = Path(backup_dir)
+        self.state_dir = Path(state_dir)
+        self.state_file = self.state_dir / "state.json"
+        self.dry_run = dry_run
+        self.account_switch = Path(account_switch)
+        self.notify = notifier
+        self.state = self._load_state()
+        self.active_folder = None      # account/org folder the app last wrote a record to
+        self.reported_active = None    # (account, org) last handed to account-switch
+
+    def _load_state(self):
+        try:
+            data = json.loads(self.state_file.read_text())
+        except (OSError, ValueError):
+            return {"dirs": {}, "tombstones": {}}
+        data.setdefault("dirs", {})
+        data.setdefault("tombstones", {})
+        return data
+
+    def _save_state(self):
+        if self.dry_run:
+            return
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        tmp = self.state_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self.state, indent=1, sort_keys=True))
+        os.replace(tmp, self.state_file)
+
+    def first_run_backup(self):
+        """Tarball of the whole sessions folder, once, before the first change."""
+        if self.state_file.exists() or self.dry_run or not self.root.is_dir():
+            return
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = dt.datetime.now().strftime("%Y-%m-%d-%H%M%S")
+        dest = self.backup_dir / f"claude-code-sessions-{stamp}.tar.gz"
+        with tarfile.open(dest, "w:gz") as tar:
+            tar.add(self.root, arcname=self.root.name)
+        log(f"backup: {dest}")
+
+    def account_dirs(self):
+        """Real <account>/<org> folders; symlinks and non-uuid names are left alone."""
+        found = {}
+        if not self.root.is_dir():
+            return found
+        for acct in sorted(self.root.iterdir()):
+            if acct.is_symlink() or not acct.is_dir() or not UUID_RE.match(acct.name):
+                continue
+            for org in sorted(acct.iterdir()):
+                if org.is_symlink() or not org.is_dir() or not UUID_RE.match(org.name):
+                    continue
+                found[f"{acct.name}/{org.name}"] = org
+        return found
+
+    @staticmethod
+    def records(folder):
+        """{name: mtime_ns} of the session records that are plain, single-link files."""
+        out = {}
+        try:
+            entries = list(os.scandir(folder))
+        except OSError:
+            return out
+        for e in entries:
+            if not RECORD_RE.match(e.name):
+                continue
+            try:
+                st = e.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if e.is_symlink() or not e.is_file(follow_symlinks=False) or st.st_nlink != 1:
+                continue
+            out[e.name] = st.st_mtime_ns
+        return out
+
+    @staticmethod
+    def valid_record(path):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return False
+        return isinstance(data, dict) and f"{data.get('sessionId')}.json" == path.name
+
+    def copy(self, src, dst_dir, name):
+        dst = dst_dir / name
+        if self.dry_run:
+            log(f"would copy {name}: {src.parent.parent.name[:8]}/{src.parent.name[:8]} -> "
+                f"{dst_dir.parent.name[:8]}/{dst_dir.name[:8]}")
+            return True
+        st = src.stat()
+        tmp = dst_dir / f"{TMP_PREFIX}{name}.{os.getpid()}.part"
+        try:
+            shutil.copyfile(src, tmp)
+            os.chmod(tmp, 0o600)
+            with open(tmp, "rb") as fh:
+                os.fsync(fh.fileno())
+            os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
+            os.replace(tmp, dst)
+        except OSError as exc:
+            log(f"copy failed {name} -> {dst_dir}: {exc}")
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            return False
+        log(f"copied {name}: {src.parent.parent.name[:8]}/{src.parent.name[:8]} -> "
+            f"{dst_dir.parent.name[:8]}/{dst_dir.name[:8]}")
+        return True
+
+    def trash(self, path, key):
+        if self.dry_run:
+            log(f"would move to trash {key}/{path.name}")
+            return
+        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        dest = self.state_dir / "trash" / stamp / key / path.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.move(str(path), dest)
+            log(f"deleted elsewhere, moved to trash: {key}/{path.name}")
+        except OSError as exc:
+            log(f"trash failed {path}: {exc}")
+
+    def active_account(self):
+        """Account the app has open, from its config.json (None if unknown)."""
+        try:
+            return json.loads((self.root.parent / "config.json").read_text()).get("lastKnownAccountUuid")
+        except (OSError, ValueError):
+            return None
+
+    def report_account_switch(self):
+        """Tell account-switch which account/org the app has open, each time it changes (2026-11-04: switching
+        account must be transparent: it opens the logins and hands the stopped sessions to a session)."""
+        account = self.active_account()
+        if not account or self.dry_run:
+            return
+        org = None
+        if self.active_folder and self.active_folder.split("/")[0] == account:
+            org = self.active_folder.split("/")[1]
+        if (account, org) == self.reported_active:
+            return
+        self.reported_active = (account, org)
+        if not self.account_switch.exists():
+            return
+        cmd = [sys.executable, str(self.account_switch), "detect", "--account", account] + (["--org", org] if org else [])
+        try:
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as exc:
+            log(f"account-switch not started: {exc!r}")
+
+    def sweep_temp_files(self, dirs):
+        """Leftovers of a pass that was killed between copy and rename."""
+        for folder in dirs.values():
+            for p in folder.glob(f"{TMP_PREFIX}*.part"):
+                if time.time() - p.stat().st_mtime > 60 and not self.dry_run:
+                    p.unlink(missing_ok=True)
+
+    def one_pass(self):
+        dirs = self.account_dirs()
+        current = {key: self.records(folder) for key, folder in dirs.items()}
+        seen = self.state["dirs"]
+        tombstones = self.state["tombstones"]
+        changed = False
+        added_to_active = 0
+
+        # A tombstoned id that comes back newer than its deletion was recreated: sync it again.
+        for name, info in list(tombstones.items()):
+            newest = max((recs[name] for recs in current.values() if name in recs), default=None)
+            if newest is not None and newest > info["mtime_ns"]:
+                del tombstones[name]
+                changed = True
+                log(f"recreated after deletion, syncing again: {name}")
+
+        # Deletions: seen in a folder before, gone now (checked twice, a rename is not a delete).
+        for key, names in seen.items():
+            if key not in current:
+                continue
+            for name in names:
+                if name in current[key] or name in tombstones:
+                    continue
+                time.sleep(MISSING_RECHECK_SECONDS)
+                if (dirs[key] / name).exists():
+                    continue
+                newest = max((recs[name] for recs in current.values() if name in recs), default=0)
+                tombstones[name] = {
+                    "deleted_in": key,
+                    "at": dt.datetime.now().isoformat(timespec="seconds"),
+                    "mtime_ns": max(newest, names[name]),
+                }
+                changed = True
+                for other, recs in current.items():
+                    if name in recs:
+                        self.trash(dirs[other] / name, other)
+                        del recs[name]
+
+        # The app saves a record in its active folder; until it is copied, that folder alone has the newest copy.
+        all_names = {n for recs in current.values() for n in recs} - set(tombstones)
+        latest = None
+        for name in all_names:
+            mtimes = [(recs[name], key) for key, recs in current.items() if name in recs]
+            top = max(mtimes)[0]
+            origin = [key for m, key in mtimes if m == top]
+            if len(origin) == 1 and len(mtimes) > 1 and (latest is None or top > latest[0]):
+                latest = (top, origin[0])
+        if latest:
+            self.active_folder = latest[1]
+        self.report_account_switch()
+
+        # Copies: newest record wins, missing or older copies are replaced.
+        for name in sorted(all_names):
+            newest_mtime, src_key = max((recs[name], key) for key, recs in current.items() if name in recs)
+            targets = [key for key, recs in current.items() if recs.get(name, -1) < newest_mtime]
+            src = dirs[src_key] / name
+            if not targets or not self.valid_record(src):
+                continue
+            for key in targets:
+                recs = current[key]
+                was_missing = name not in recs
+                if self.copy(src, dirs[key], name):
+                    recs[name] = newest_mtime
+                    changed = True
+                    if was_missing and key.split("/")[0] == self.active_account():
+                        added_to_active += 1
+
+        # The app reads the list when it starts or switches account, not while it runs.
+        if added_to_active and not self.dry_run:
+            self.notify("Claude: sesiones de tus otras cuentas",
+                   f"{added_to_active} sesiones nuevas en la cuenta abierta. Reinicia Claude para verlas.")
+
+        new_seen = {key: dict(recs) for key, recs in current.items()}
+        if new_seen != seen:
+            self.state["dirs"] = new_seen
+            changed = True
+        if changed:
+            self.state["last_change"] = dt.datetime.now().isoformat(timespec="seconds")
+            self._save_state()
+        self.sweep_temp_files(dirs)
+        return changed
+
+
+def with_lock(state_dir, fn):
+    state_dir.mkdir(parents=True, exist_ok=True)
+    with open(state_dir / "lock", "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            log("another claude-sessions-sync is running; waiting for it")
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        return fn()
+
+
+def cmd_status(syncer):
+    dirs = syncer.account_dirs()
+    print(f"root: {syncer.root}")
+    for key, folder in dirs.items():
+        print(f"  {key}  {len(syncer.records(folder))} sessions")
+    tombs = syncer.state.get("tombstones", {})
+    print(f"deleted (not copied again): {len(tombs)}")
+    for name, info in sorted(tombs.items(), key=lambda kv: kv[1]["at"]):
+        print(f"  {name}  {info['at']}  in {info['deleted_in']}")
+    print(f"last change: {syncer.state.get('last_change', 'never')}")
+
+
+UNIT_NAME = "claude-sessions-sync.service"
+UNIT_TEMPLATE = """[Unit]
+Description=Share the Claude desktop Code-tab session list across every account on this machine
+Documentation=file://{script}
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -I {script} run
+Restart=on-failure
+RestartSec=10
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def systemctl(*args):
+    subprocess.run(["systemctl", "--user", *args], check=True)
+
+
+def cmd_install():
+    script = Path(__file__).resolve()
+    installed = HOME / ".claude/scripts/claude-sessions-sync"
+    if script != installed.resolve():
+        print(f"note: the unit will run {script}, not the installed copy {installed}")
+    unit = HOME / ".config/systemd/user" / UNIT_NAME
+    unit.parent.mkdir(parents=True, exist_ok=True)
+    unit.write_text(UNIT_TEMPLATE.format(script=script))
+    systemctl("daemon-reload")
+    systemctl("enable", UNIT_NAME)
+    systemctl("restart", UNIT_NAME)
+    print(f"installed {unit} -> {script}")
+
+
+def cmd_uninstall():
+    unit = HOME / ".config/systemd/user" / UNIT_NAME
+    subprocess.run(["systemctl", "--user", "disable", "--now", UNIT_NAME], check=False)
+    unit.unlink(missing_ok=True)
+    systemctl("daemon-reload")
+    print(f"removed {unit}; session folders left as they are")
+
+
+def cmd_self_test():
+    """The sync rules on throwaway folders: a fake app root, a stub account-switch, notifications recorded."""
+    import tempfile
+    import uuid
+
+    results = []
+
+    def check(label, ok):
+        results.append(ok)
+        print(f"{'ok' if ok else 'FAIL'}: {label}", flush=True)
+
+    def record(folder, sid=None, mtime_ns=None, session_id=None):
+        sid = sid or str(uuid.uuid4())
+        path = folder / f"local_{sid}.json"
+        path.write_text(json.dumps({"sessionId": session_id or f"local_{sid}", "title": sid[:8]}))
+        if mtime_ns:
+            os.utime(path, ns=(mtime_ns, mtime_ns))
+        return path.name
+
+    def mtime(path):
+        return path.stat().st_mtime_ns
+
+    with tempfile.TemporaryDirectory(prefix="claude-sessions-sync-test-") as tmp:
+        tmp = Path(tmp)
+        root = tmp / "claude-code-sessions"
+        acct_a, org_a, acct_b, org_b = (str(uuid.uuid4()) for _ in range(4))
+        a, b = root / acct_a / org_a, root / acct_b / org_b
+        a.mkdir(parents=True)
+        b.mkdir(parents=True)
+        (root / "not-an-account").mkdir()
+        (root.parent / "config.json").write_text(json.dumps({"lastKnownAccountUuid": acct_a}))
+        calls = tmp / "account-switch.calls"
+        stub = tmp / "account-switch"
+        stub.write_text(f"import sys\nopen({str(calls)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n")
+        notes = []
+        now = time.time_ns()
+        syncer = Syncer(root, tmp / "state", tmp / "backups", account_switch=stub,
+                        notifier=lambda summary, body: notes.append(body))
+
+        r1 = record(a, mtime_ns=now - 10**10)
+        r2 = record(b, mtime_ns=now - 9 * 10**9)
+        bad = record(a, session_id="local_other")
+        linked_src = record(tmp)
+        os.symlink(tmp / linked_src, a / linked_src)
+        hard = record(a)
+        os.link(a / hard, tmp / "hardlink")
+        stray = record(root / "not-an-account")
+
+        syncer.first_run_backup()
+        syncer.one_pass()
+        check("first run backs up the sessions folder", len(list((tmp / "backups").glob("*.tar.gz"))) == 1)
+        check("a record is copied to the other account", (b / r1).is_file() and mtime(b / r1) == mtime(a / r1))
+        check("the copy is a private regular file", (b / r1).stat().st_mode & 0o777 == 0o600
+              and not (b / r1).is_symlink())
+        check("both ways", (a / r2).is_file())
+        check("a record whose id does not match its name is not copied", not (b / bad).exists())
+        check("symlinked and hard-linked records are left alone", not (b / linked_src).exists() and not (b / hard).exists())
+        check("folders that are not account/org ids are ignored",
+              not (b / stray).exists() and sorted(p.name for p in (root / "not-an-account").iterdir()) == [stray])
+        check("a session new to the open account is notified", len(notes) == 1 and notes[0].startswith("1 "))
+        deadline = time.time() + 5
+        while not calls.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        check("account-switch hears the open account", calls.exists()
+              and calls.read_text().startswith(f"detect --account {acct_a}"))
+
+        (b / r1).write_text(json.dumps({"sessionId": r1[:-5], "title": "renamed"}))
+        os.utime(b / r1, ns=(now, now))
+        syncer.one_pass()
+        check("the newest copy wins and keeps its mtime", json.loads((a / r1).read_text())["title"] == "renamed"
+              and mtime(a / r1) == now)
+        before = mtime(a / r1)
+        syncer.one_pass()
+        check("nothing bounces back on the next pass", mtime(a / r1) == before == mtime(b / r1))
+
+        (a / r1).unlink()
+        syncer.one_pass()
+        check("a deletion reaches the other folders", not (b / r1).exists())
+        check("deleted copies go to the trash", any((tmp / "state" / "trash").rglob(r1)))
+        check("the deleted id is tombstoned", r1 in syncer.state["tombstones"])
+        syncer.one_pass()
+        check("a tombstoned id is not copied again", not (a / r1).exists() and not (b / r1).exists())
+
+        record(b, sid=r1[6:-5], mtime_ns=now + 10**10)
+        syncer.one_pass()
+        check("a record recreated after its deletion syncs again", (a / r1).is_file() and r1 not in syncer.state["tombstones"])
+
+        r3 = record(b)
+        saved = (tmp / "state" / "state.json").read_text()
+        Syncer(root, tmp / "state", tmp / "backups", dry_run=True, account_switch=stub,
+               notifier=lambda *_: notes.append("dry")).one_pass()
+        check("--dry-run copies nothing and keeps the state", not (a / r3).exists()
+              and (tmp / "state" / "state.json").read_text() == saved and notes[-1] != "dry")
+
+    failures = results.count(False)
+    print(f"self-test: {len(results)} checks, {failures} failures")
+    return 1 if failures else 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("command", choices=["run", "once", "status", "install", "uninstall", "self-test"])
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--root", default=os.environ.get("CLAUDE_SESSIONS_ROOT", DEFAULT_ROOT))
+    ap.add_argument("--state-dir", default=os.environ.get("CLAUDE_SESSIONS_SYNC_STATE", DEFAULT_STATE))
+    ap.add_argument("--backup-dir", default=BACKUPS)
+    ap.add_argument("--interval", type=float, default=POLL_SECONDS)
+    args = ap.parse_args()
+    if args.command == "self-test":
+        return cmd_self_test()
+    if args.command == "install":
+        cmd_install()
+        return 0
+    if args.command == "uninstall":
+        cmd_uninstall()
+        return 0
+
+    syncer = Syncer(args.root, args.state_dir, args.backup_dir, dry_run=args.dry_run)
+    if args.command == "status":
+        cmd_status(syncer)
+        return 0
+
+    def once():
+        syncer.first_run_backup()
+        syncer.one_pass()
+
+    if args.command == "once":
+        with_lock(Path(args.state_dir), once)
+        return 0
+
+    def loop():
+        syncer.first_run_backup()
+        log(f"watching {syncer.root} every {args.interval:g}s")
+        failures = 0
+        while True:
+            try:
+                syncer.one_pass()
+                failures = 0
+            except Exception as exc:  # keep the service alive across a bad pass
+                failures += 1
+                log(f"pass failed: {exc!r}")
+                if failures == 5:
+                    notify("Claude: sync de sesiones con fallos", f"{exc!r}; mira journalctl --user -u claude-sessions-sync")
+            time.sleep(args.interval)
+
+    with_lock(Path(args.state_dir), loop)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

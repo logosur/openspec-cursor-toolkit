@@ -41,7 +41,8 @@ Read what the opt-in modules change before you do: `sessions` makes the sessions
 run without permission prompts, `supervision` lets one supervisor session per project order the others and
 answers their questions with a decision panel, and `heavy-jobs` denies heavy commands (suites, builds, installs,
 emulators) that are not launched through its semaphore. `accounts` installs the session sync between Claude
-accounts; it only runs once you start its service. The [main README](../../README.md#modules) has the table.
+accounts and `account-switch`, which resumes the sessions a switch left stopped; they only run once you start
+the sync's service. The [main README](../../README.md#modules) has the table.
 
 ## What each file turns on
 
@@ -77,7 +78,7 @@ and the pieces say so instead of failing:
 
 | Option | Needs | Without it |
 |---|---|---|
-| `account_switch` message exception | an `account-switch` script that records account changes | the marker is plain text |
+| `account_switch` message exception | the `accounts` module, with the `claude-sessions-sync` service started (it tells `account-switch` about each switch) | the marker is plain text |
 | `project_resume` message exception, project pauses in heavy-job | a `project-pause` script | the marker is plain text; nothing is paused |
 | `supervisor_revive` message exception | something that runs `supervisor-lock revive --plan` and sends the texts it prints (a scheduled task of the desktop app) | run the plan by hand; the gate lets the marker through only for a supervisor the plan named |
 | supervisor-lock `cloud` commands, heavy-job's cloud guard (exit 76) | a `cloud-tests` script | `CLOUD-UNAVAILABLE`; heavy-job runs everything locally |

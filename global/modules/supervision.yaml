@@ -12,13 +12,13 @@ requires:
 notes:
   - Opt-in, never a default. It is built for unattended work in the Claude desktop app.
   - No message exception is on until the supervision config piece lists it (message_exceptions).
-  - account-switch and project-pause are not part of the toolkit; without them their exceptions and pauses do nothing.
+  - account-switch comes with the accounts module and project-pause is not part of the toolkit; without them their exceptions and pauses do nothing.
   - >-
     supervisor-lock works without its optional pieces (cloud-tests, session-nudge, handoff-guard, routines notify):
     cloud actions say the provider is unavailable, and alerts, nudges and handoff checks do nothing.
   - "Deploys are never pre-authorised by default: only deploy_preauthorised in the supervision config says so."
-# Named by these pieces and not installed by this module or its dependencies: absent from the toolkit, or (heavy-job)
-# installed by another module. Every caller works without them.
+# Named by these pieces and not installed by this module or its dependencies: absent from the toolkit, or (heavy-job,
+# account-switch) installed by another module. Every caller works without them.
 project_provided:
   - scripts/account-switch
   - scripts/project-pause

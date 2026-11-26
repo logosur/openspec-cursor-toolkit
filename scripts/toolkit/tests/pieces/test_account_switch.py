@@ -27,6 +27,7 @@ from unittest import mock
 from scripts.toolkit.paths import REPO_ROOT
 
 SCRIPT = os.environ.get('ACCOUNT_SWITCH_SCRIPT') or str(REPO_ROOT / 'global/scripts/account-switch')
+ROUTINES_SCRIPT = os.environ.get('ROUTINES_SCRIPT') or str(REPO_ROOT / 'global/scripts/routines')
 LIMIT = "You've hit your weekly limit · resets Nov 5, 2am (Europe/Madrid)"
 
 
@@ -679,6 +680,16 @@ class ModuleTest(unittest.TestCase):
                      % (self.called, (time.time() + 8 * 3600) * 1000, self.credentials))
         os.chmod(script, 0o755)
         self.mod.CLI_PATH = bindir
+
+    def test_routines_import_leaves_the_app_tasks_of_this_piece_in_the_app(self):
+        """Both app tasks this piece arms are in the set `routines import` never adopts, whatever its config says."""
+        env = {'HOME': self.tmp, 'CLAUDE_TOOLKIT_CONFIG_DIR': self.mkdir('config')}
+        with mock.patch.dict(os.environ, env):
+            loader = importlib.machinery.SourceFileLoader('routines_for_account_switch', ROUTINES_SCRIPT)
+            spec = importlib.util.spec_from_loader(loader.name, loader)
+            routines = importlib.util.module_from_spec(spec)
+            loader.exec_module(routines)
+        self.assertLessEqual({self.mod.TASK_ID, self.mod.REVIVE_TASK_ID}, set(routines.TOOLKIT_APP_TASKS))
 
     # --- the toolkit's version -------------------------------------------------------------------------------------
 

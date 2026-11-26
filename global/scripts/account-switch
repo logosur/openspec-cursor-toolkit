@@ -1,0 +1,1243 @@
+#!/usr/bin/env python3
+"""account-switch: make switching the Claude account (or organization) in the desktop app transparent.
+
+When an account runs out of usage and the developer switches to another one in the app, the sessions the old account
+stopped stay stopped, and the CLI and the routines stay logged into the old organization. This script notices the
+switch, asks for the logins that are needed and hands the stopped sessions to one session that resumes them.
+Machine values (the resume task's title and the folder it runs in) come from the config piece `account-switch`; the resume marker
+and its time windows come from the `supervision` piece, so they always equal the cross-project-message-gate's.
+
+What happens on a switch (claude-sessions-sync calls `detect` on every pass; it costs no tokens):
+  1. `detect` sees the app's account/organization change and writes an event with the sessions that the old
+     account left stopped: ~/.claude/state/account-switch/event.json.
+  2. `on-switch` (started by `detect`) checks the CLI login and the routines token against the new
+     organization. If either is elsewhere, a terminal opens by itself with `account-switch login`: he only
+     authorizes in his Chrome and pastes the code.
+  3. The first Claude session that starts afterwards (SessionStart hook `account-switch hook`) claims the
+     event and resumes the sessions with SendMessage. cross-project-message-gate lets exactly those messages
+     through (marker + recipient in the event).
+  4. A session whose last turn died on a hard limit error ("hard") refused the resume message three times
+     (CLI refused/undelivered input) while the sending session was in auto mode, and took it at once when the
+     sender was in Bypass permissions (2026-11-04; the developer's diagnosis, consistent with the log). So the
+     session that resumes them must run in Bypass permissions; if it does not, it says so to the developer.
+  5. Nothing starts a session by itself after a switch, so `arm` leaves the app's own scheduled task
+     `account-switch-resume` ready in the scheduled-tasks.json of every account/org folder except the active one:
+     one-shot, enabled, never run, fireAt already past, saved in Bypass permissions. The app loads the new
+     account's tasks when it switches, and its scheduler dispatches an enabled one-shot with `!lastRunAt &&
+     fireAt <= now` on the next tick (read in app.asar 2026-11-04). That run calls `brief` and resumes the list.
+     It is meant to live in the app, one per account (rules/cambio-de-cuenta.md).
+  6. If the new account is itself out of usage (`account_limit`: the usage endpoint for the CLI's account, the
+     sessions' refused turns otherwise), the event records `not_before` and `on-switch` schedules a systemd timer for
+     `after-reset`: until then no session claims the event (the one-shot task is consumed by its refused first turn),
+     and its age counts from `not_before`. `after-reset` re-checks, then resumes or tells him what to do.
+     A recorded `not_before` is only a forecast: a plan upgrade or a renewal can lift the limit at once (2026-11-14:
+     the new account's plan was upgraded and `status` kept reporting the old reset time for hours). So
+     `recheck_limit` asks the usage endpoint again (throttled to once a minute, forced by `status`), the SessionStart
+     hook calls it before it claims, and `note_limit` also schedules an early check every 5 minutes (`after-reset
+     --early`) until the reset is near. The usage endpoint is the only proof of recovery, and it answers only for
+     the CLI's own account, so with the CLI logged into another organization the check says «unknown».
+
+  account-switch detect --account A [--org O]   called by claude-sessions-sync
+  account-switch on-switch                      credentials check, login terminal, re-arm (started by detect)
+  account-switch after-reset --event ID [--early]  when a limited new account has usage again: resume or tell him
+                                                (a timer that on-switch schedules; never run by hand).
+                                                --early: the 5-minute poll; acts only if the limit was lifted early
+  account-switch login                          the logins that are needed, in his Chrome
+  account-switch arm                            the resume task in every inactive account folder
+  account-switch brief                          what the scheduled task runs: claim the event, print the steps
+  account-switch hook                           SessionStart hook: hand the event to one session
+  account-switch status                         last event, its sessions and who claimed it
+  account-switch doctor                         check every piece without switching account
+  account-switch mine                           is the event still mine, and which sessions are left to resume
+  account-switch done [--force]                 the claiming session marks the event finished (only the claimant)
+  account-switch release                        the claimant gives the event back so another session takes it
+"""
+import argparse
+import calendar
+import datetime
+import fcntl
+import glob
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+HOME = os.path.expanduser("~")
+
+
+def _toolkit_config(piece, defaults):
+    """The toolkit's config piece ~/.claude/toolkit/config/<piece>.json over `defaults`, keeping a default wherever the
+    file has a value of the wrong shape. Never raises: supervisor-lock, session-nudge and cloud-tests import this file
+    as a module for its usage helpers, and a broken config must not take those down."""
+    try:
+        lib = os.path.join(os.path.dirname(os.path.realpath(__file__)), "lib")
+        if lib not in sys.path:
+            sys.path.insert(0, lib)
+        from toolkit_config import load_checked as checked
+        return checked(piece, defaults)
+    except Exception:
+        return dict(defaults)
+
+
+# The resume marker and its windows must equal cross-project-message-gate's, so both read the supervision piece.
+_SWITCH = _toolkit_config("supervision", {"account_switch_marker": "[cambio de cuenta]", "account_switch_ttl_s": 6 * 3600,
+                                          "account_switch_claim_window_s": 30 * 60, "message_exceptions": []})
+_MACHINE = _toolkit_config("account-switch", {"task_cwd": "~", "task_name": "Reanudar las sesiones tras un cambio de cuenta"})
+APP_SESSIONS = os.environ.get("ACCOUNT_SWITCH_APP_SESSIONS") or os.path.join(HOME, ".config", "Claude",
+                                                                             "claude-code-sessions")
+TASK_ID = "account-switch-resume"
+TASK_FILE = os.environ.get("ACCOUNT_SWITCH_TASK_FILE") or os.path.join(HOME, ".claude", "scheduled-tasks", TASK_ID,
+                                                                         "SKILL.md")
+TASK_NAME = _MACHINE["task_name"]   # the app's title for the task and for its runs
+TASK_CWD = os.path.expanduser(_MACHINE["task_cwd"])   # the folder the resume task's session runs in
+TOKEN_MARGIN = 2 * 60   # a CLI token expiring within this is refreshed before it is used
+ARM_DELAY = 15   # seconds after a switch before writing the old account's file: the app may still save it
+# Connectors (claude.ai) live on Anthropic's side, one set per account, each with its own OAuth: they cannot be
+# copied, only connected once per account by the developer. The inventory is the union of every account's set;
+# after a switch the missing ones are offered with Connect buttons.
+BUILTIN_CONNECTORS = ("https://api.anthropic.com/", "https://sandbox.claudemcpcontent.com/")
+WATCHDOG = 4 * 60   # after this, an event nobody took is reported to the developer
+PROJECTS = os.environ.get("ACCOUNT_SWITCH_PROJECTS") or os.path.join(HOME, ".claude", "projects")
+STATE_DIR = os.environ.get("ACCOUNT_SWITCH_STATE") or os.path.join(HOME, ".claude", "state", "account-switch")
+STATE = os.path.join(STATE_DIR, "state.json")
+EVENT = os.path.join(STATE_DIR, "event.json")
+LOCK = os.path.join(STATE_DIR, ".lock")
+CONNECTORS = os.path.join(STATE_DIR, "connectors.json")
+USAGE_CACHE = os.path.join(STATE_DIR, "usage-cache.json")   # usage() answers shared by every caller, see usage()
+SELF = os.path.abspath(__file__)
+ROUTINES = os.path.join(HOME, ".claude", "scripts", "routines")
+ROUTINE_TOKEN = os.path.join(HOME, ".claude", "routines", "oauth-token.json")
+CLI_CREDENTIALS = os.environ.get("ACCOUNT_SWITCH_CLI_CREDENTIALS") or os.path.join(HOME, ".claude", ".credentials.json")
+CHROME_OPENER = os.path.join(HOME, ".claude", "scripts", "open-in-developer-chrome")
+CLI_PATH = HOME + "/.local/bin:/usr/local/bin:/usr/bin:/bin"
+API = "https://api.anthropic.com"
+
+MARKER = _SWITCH["account_switch_marker"]   # cross-project-message-gate lets a resume message with it through
+LOOKBACK = 6 * 3600            # a session counts as stopped by the old account if it moved this recently
+EVENT_TTL = _SWITCH["account_switch_ttl_s"]   # after this an unclaimed event is stale and no session is asked to act
+CLAIM_TTL = 15 * 60            # a claim not finished in this time can be taken by another session
+CLAIM_WINDOW = _SWITCH["account_switch_claim_window_s"]   # the gate refuses the resume messages after this; steps() prints it
+LIMIT_RECHECK = 60             # recheck_limit asks the usage endpoint at most this often (unless forced)
+USAGE_FRESH = 60               # usage() reuses an answer this young without asking the endpoint
+USAGE_STALE = 10 * 60          # while the endpoint fails (429 storms, 2026-11-26), an answer this young still serves
+USAGE_BACKOFF = 30             # after a 429 nobody asks again for max(retry-after, this) seconds
+EARLY_CHECK = 5 * 60           # note_limit schedules `after-reset --early` this far ahead, and again while the reset is far
+EARLY_STOP = 6 * 60            # no more early checks when `not_before` is this close: the at-reset timer takes over
+BYPASS_WAIT = 3 * 60           # sessions cut by a limit error take the resume only from a Bypass-permissions sender
+LIMIT_TEXT = re.compile(r"hit your (weekly|session|usage|daily)? ?limit|usage limit|rate limit|límite de uso|"
+                        r"se ha alcanzado tu límite|se alcanzó el límite|Usage limit reached", re.I)
+
+
+def now():
+    return time.time()
+
+
+def hhmm(ts):
+    return time.strftime("%H:%M", time.localtime(ts))
+
+
+def load(path, default):
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return default
+
+
+def save(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+
+
+class locked:
+    def __enter__(self):
+        os.makedirs(STATE_DIR, exist_ok=True)
+        self.fh = open(LOCK, "w")
+        fcntl.flock(self.fh, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        fcntl.flock(self.fh, fcntl.LOCK_UN)
+        self.fh.close()
+
+
+def desktop_env():
+    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
+    env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path=/run/user/{os.getuid()}/bus")
+    env.setdefault("DISPLAY", ":0")
+    env["PATH"] = CLI_PATH + ":" + env.get("PATH", "")
+    return env
+
+
+def notify(title, text, urgency="normal"):
+    if shutil.which("notify-send"):
+        subprocess.run(["notify-send", "-u", urgency, "-a", "Claude", title, text],
+                       env=desktop_env(), check=False, timeout=10)
+
+
+# ------------------------------------------------------------------ sessions the old account left stopped
+
+def transcript_age(cli_session_id):
+    paths = glob.glob(os.path.join(PROJECTS, "*", f"{cli_session_id}.jsonl"))
+    return now() - os.path.getmtime(paths[0]) if paths else None
+
+
+def transcript_tail(cli_session_id):
+    paths = glob.glob(os.path.join(PROJECTS, "*", f"{cli_session_id}.jsonl"))
+    if not paths:
+        return []
+    entries = []
+    with open(paths[0], errors="replace") as fh:
+        for line in fh:
+            if '"type":"user"' not in line and '"type":"assistant"' not in line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except ValueError:
+                continue
+    return entries[-40:]
+
+
+def entry_text(entry):
+    content = (entry.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(x.get("text", "") for x in content if isinstance(x, dict) and x.get("type") == "text")
+    return ""
+
+
+def _iso_epoch(ts):
+    """Epoch seconds of a transcript timestamp like 2026-11-04T16:04:26.788Z, or None."""
+    try:
+        return calendar.timegm(time.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")) + float("0" + ts[19:].rstrip("Z"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _delivered_text(entry):
+    """The text of a resume as it lands in a RECIPIENT's transcript, in the three shapes Claude Code writes, or ""."""
+    if entry.get("type") == "user" and entry.get("isMeta"):   # idle recipient: the peer message itself
+        origin = entry.get("origin") or {}
+        return origin.get("body") or "" if origin.get("kind") == "peer" else ""
+    if entry.get("type") == "queue-operation" and entry.get("operation") == "enqueue":   # busy: queued
+        return entry.get("content") or ""
+    attachment = entry.get("attachment") or {}
+    return attachment.get("prompt") or "" if attachment.get("type") == "queued_command" else ""
+
+
+def delivered_at(cli_session_id, since):
+    """Epoch of the first resume that reached this session's transcript at or after `since`, or None. Decided from
+    the recipient's side because a refused or undelivered send never lands there, so a retry stays possible. Only
+    the delivery shapes count: a tool result or an answer that quotes the marker is not a delivery.
+    Same rule as delivered_at() in ~/.claude/hooks/cross-project-message-gate."""
+    for path in glob.glob(os.path.join(PROJECTS, "*", f"{cli_session_id}.jsonl")):
+        try:
+            with open(path, errors="replace") as fh:
+                for line in fh:
+                    if MARKER not in line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except ValueError:
+                        continue
+                    at = _iso_epoch(entry.get("timestamp") or "")
+                    text = _delivered_text(entry)
+                    if at is not None and at >= since and isinstance(text, str) and MARKER in text:
+                        return at
+        except OSError:  # the session was deleted between glob and open
+            continue
+    return None
+
+
+def event_start(event):
+    """When the event's work can begin: its switch, or later when the new account has no usage until `not_before`."""
+    return max(event["at"], event.get("not_before") or 0)
+
+
+def event_expired(event):
+    """The event is stale: older than EVENT_TTL counted from event_start(), or dated in the future."""
+    return not event["at"] <= now() or now() - event_start(event) >= EVENT_TTL
+
+
+CLAIM_NOBODY = ("nadie lo ha reclamado todavía (lo reclama la tarea de la app o la primera sesión que arranque con la "
+                "cuenta con uso)")   # same text in ~/.claude/hooks/cross-project-message-gate
+
+
+def claim_problem(event, sid):
+    """Why `sid` may not act on this event, or "" when it holds the current, fresh claim.
+    Same rule as account_switch_resume() in ~/.claude/hooks/cross-project-message-gate."""
+    if not event:
+        return "no hay ningún cambio de cuenta pendiente"
+    if event.get("done") or event_expired(event):
+        return "el cambio de cuenta ya terminó"
+    if not event.get("claimed_by"):
+        return CLAIM_NOBODY
+    if not sid or event.get("claimed_by") not in (sid, "scheduled-task:" + sid):
+        return "lo reclamó otra sesión"
+    claimed_at = event.get("claimed_at") or 0
+    if not 0 <= now() - claimed_at < CLAIM_WINDOW:
+        return "tu reclamación caducó a las " + hhmm(claimed_at + CLAIM_WINDOW)
+    return ""
+
+
+def stop_kind(entries):
+    """hard: the last answer is a limit error (the app then refuses messages from other sessions until the
+    developer writes); soft: it stopped on the limit with a normal answer, or was cut in the middle of a turn."""
+    answers = [e for e in entries if e.get("type") == "assistant"]
+    if not answers:
+        return None
+    last = answers[-1]
+    if last.get("isApiErrorMessage"):
+        return "hard" if LIMIT_TEXT.search(entry_text(last)) else "soft"
+    if LIMIT_TEXT.search(entry_text(last)):
+        return "soft"
+    after = entries[entries.index(last) + 1:]
+    if any(e.get("type") == "user" for e in after):
+        return "soft"   # tool results or notifications nobody answered: the turn was cut
+    return None
+
+
+_PAUSE = []
+
+
+def paused_project(cwd):
+    """True when `cwd` belongs to a project the developer paused (~/.claude/scripts/project-pause). Never raises."""
+    if not cwd:
+        return False
+    try:
+        if not _PAUSE:
+            import importlib.machinery
+            import importlib.util
+            bin_path = os.path.expanduser(os.environ.get("PROJECT_PAUSE_BIN", "~/.claude/scripts/project-pause"))
+            loader = importlib.machinery.SourceFileLoader("project_pause_for_switch", bin_path)
+            spec = importlib.util.spec_from_loader(loader.name, loader)
+            module = importlib.util.module_from_spec(spec)
+            loader.exec_module(module)
+            _PAUSE.append(module)
+        return bool(_PAUSE[0].paused_marker(cwd))
+    except Exception:
+        return False
+
+
+def stopped_sessions(folder, own_session=None):
+    out = []
+    for path in glob.glob(os.path.join(folder, "local_*.json")):
+        rec = load(path, {})
+        if rec.get("isArchived") or rec.get("sessionId") == own_session or not rec.get("cliSessionId"):
+            continue
+        if rec.get("scheduledTaskId") == TASK_ID:
+            continue  # 2026-11-14: a run of the resume task cut by the limit is not work; the next run does its job
+        if now() - (rec.get("lastActivityAt") or 0) / 1000 > LOOKBACK:
+            continue
+        if paused_project(rec.get("cwd")):
+            continue  # 2026-11-13: a project the developer paused is resumed only by his order (project-pause)
+        kind = stop_kind(transcript_tail(rec["cliSessionId"]))
+        if kind:
+            out.append({"sessionId": rec["sessionId"], "cliSessionId": rec["cliSessionId"],
+                        "title": rec.get("title") or "?", "cwd": rec.get("cwd"), "kind": kind})
+    return sorted(out, key=lambda s: (s["kind"], s["title"]))
+
+
+# ------------------------------------------------------------------ detect
+
+def cmd_detect(args):
+    with locked():
+        state = load(STATE, {})
+        prev = state.get("account"), state.get("org")
+        org = args.org or (prev[1] if args.account == prev[0] else None)
+        if org is None:
+            orgs = [os.path.basename(p) for p in glob.glob(os.path.join(APP_SESSIONS, args.account, "*"))
+                    if os.path.isdir(p)]
+            org = orgs[0] if len(orgs) == 1 else None
+        if (args.account, org) == prev or org is None:
+            return 0
+        state.update(account=args.account, org=org, since=now())
+        save(STATE, state)
+        if prev == (None, None):
+            cmd_arm(args)   # first run: nothing to compare with, but the other accounts get their task
+            return 0
+        folder = os.path.join(APP_SESSIONS, args.account, org)
+        event = {"id": f"{int(now())}", "at": now(), "from": list(prev), "to": [args.account, org],
+                 "sessions": stopped_sessions(folder), "claimed_by": None, "claimed_at": None, "done": False}
+        save(EVENT, event)
+    subprocess.Popen(["systemd-run", "--user", "--collect", "--quiet", "--unit=account-switch-" + event["id"],
+                      *systemd_setenv(), sys.executable, SELF, "on-switch"],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return 0
+
+
+def systemd_setenv():
+    return ["--setenv=HOME=" + HOME, "--setenv=PATH=" + CLI_PATH, "--setenv=ACCOUNT_SWITCH_STATE=" + STATE_DIR]
+
+
+# ------------------------------------------------------------------ credentials
+
+def http_json(url, token, data=None, beta="oauth-2025-04-20"):
+    headers = {"Authorization": "Bearer " + token, "anthropic-beta": beta, "anthropic-version": "2023-06-01",
+               "Content-Type": "application/json"}
+    req = urllib.request.Request(url, data=json.dumps(data).encode() if data else None, headers=headers)
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return resp.headers, json.load(resp)
+
+
+def cli_token():
+    """The CLI's access token, or None. It lasts ~8 h and only the CLI refreshes it, so one that is expired (or about
+    to be) is renewed by running `claude auth status`, which rewrites the credentials file as a side effect."""
+    def read():
+        oauth = (load(CLI_CREDENTIALS, {}).get("claudeAiOauth")) or {}
+        return oauth.get("accessToken"), oauth.get("expiresAt")
+
+    token, expires_at = read()
+    if token and expires_at and expires_at / 1000 - now() < TOKEN_MARGIN:
+        try:
+            subprocess.run(["claude", "auth", "status", "--json"], env=desktop_env(), stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, check=False, timeout=40)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        token = read()[0] or token
+    return token
+
+
+def cli_profile():
+    """Organization of the CLI's own login and its plan, asked to Claude (the cached profile in ~/.claude.json can
+    lie): ({uuid, organization_type, ...}, email) or (None, None)."""
+    token = cli_token()
+    if not token:
+        return None, None
+    try:
+        data = http_json(API + "/api/oauth/profile", token)[1]
+        return data["organization"], data["account"].get("email_address") or data["account"].get("email")
+    except (urllib.error.URLError, KeyError, ValueError, OSError):
+        return None, None
+
+
+def cli_org():
+    return (cli_profile()[0] or {}).get("uuid")
+
+
+def usage():
+    """The usage windows of the CLI's account (GET /api/oauth/usage), or None when they cannot be asked.
+    Every caller (this script, session-nudge, cloud-tests, the supervision tool) shares USAGE_CACHE: an answer younger
+    than USAGE_FRESH is reused without the network; a 429 stops everyone asking for max(retry-after, USAGE_BACKOFF) s;
+    and while the endpoint fails the last good answer still serves if younger than USAGE_STALE. The cache is keyed by a
+    hash of the token (never the token), so after a switch of account the old account's answer is never served."""
+    token = cli_token()
+    if not token:
+        return None
+    key = hashlib.sha256(token.encode()).hexdigest()[:16]
+    cache = _usage_cache(key)
+    age = now() - (cache.get("at") or 0)
+    last = cache.get("data") if isinstance(cache.get("data"), dict) and 0 <= age < USAGE_STALE else None
+    if last is not None and age < USAGE_FRESH:
+        return last
+    if now() < (cache.get("not_before") or 0):
+        return last
+    try:
+        data = http_json(API + "/api/oauth/usage", token)[1]
+    except urllib.error.HTTPError as exc:
+        if exc.code == 429:
+            try:
+                wait = float((exc.headers or {}).get("retry-after") or 0)
+            except (TypeError, ValueError):
+                wait = 0
+            late = _usage_cache(key)   # another caller may have stored a good answer meanwhile
+            late["not_before"] = now() + max(wait, USAGE_BACKOFF)
+            _save_usage_cache(late)
+        return last
+    except (urllib.error.URLError, ValueError, OSError):
+        return last
+    if not isinstance(data, dict):
+        return last
+    _save_usage_cache({"key": key, "at": now(), "data": data})
+    return data
+
+
+def _usage_cache(key):
+    cache = load(USAGE_CACHE, {})
+    return cache if isinstance(cache, dict) and cache.get("key") == key else {"key": key}
+
+
+def _save_usage_cache(cache):
+    """Atomic and never fatal: a cache that cannot be written only means the next caller asks the endpoint."""
+    tmp = f"{USAGE_CACHE}.{os.getpid()}.tmp"
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(tmp, "w") as fh:
+            json.dump(cache, fh)
+        os.replace(tmp, USAGE_CACHE)
+    except (OSError, TypeError, ValueError):
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _offset_epoch(ts):
+    """Epoch seconds of an ISO timestamp with an offset like 2026-11-04T19:30:00.157231+00:00, or None."""
+    try:
+        return datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except (ValueError, AttributeError):
+        return None
+
+
+def usage_limit(data):
+    """{until, what} of the exhausted windows in a usage answer, or None. An account with extra usage on and its
+    spend limit not reached keeps answering, so it is not limited."""
+    extra = data.get("extra_usage") or {}
+    if extra.get("is_enabled") and not extra.get("spend_limit_reached"):
+        return None
+    found = []
+    for what in ("five_hour", "seven_day"):
+        window = data.get(what) or {}
+        resets = _offset_epoch(window.get("resets_at") or "")
+        if (window.get("utilization") or 0) >= 100 and resets and resets > now():
+            found.append((resets, what))
+    if not found:
+        return None
+    until, what = max(found)
+    return {"until": until, "what": what}
+
+
+def transcript_limit(since):
+    """{until, what} from the desktop-app turns refused with usage_limit_reached at or after `since` whose reset is
+    still ahead, or None."""
+    found = []
+    for path in glob.glob(os.path.join(PROJECTS, "*", "*.jsonl")):
+        try:
+            if os.path.getmtime(path) < since:
+                continue
+            with open(path, errors="replace") as fh:
+                for line in fh:
+                    if "usage_limit_reached" not in line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except ValueError:
+                        continue
+                    info = ((entry.get("apiErrorParams") or {}).get("rate_limit_info")) or {}
+                    at = _iso_epoch(entry.get("timestamp") or "")
+                    resets = info.get("resetsAt")
+                    if (entry.get("entrypoint") == "claude-desktop" and entry.get("apiError") == "usage_limit_reached"
+                            and at is not None and at >= since and isinstance(resets, (int, float)) and resets > now()):
+                        found.append((resets, info.get("rateLimitType") or "five_hour"))
+        except OSError:
+            continue
+    if not found:
+        return None
+    until, what = max(found)
+    return {"until": until, "what": what}
+
+
+def account_limit(org, since):
+    """Is the account of `org` out of usage? None, or {until: epoch, what: "five_hour"|"seven_day", source: "usage"|
+    "transcripts"}. The usage endpoint answers only for the CLI's own account, and its answer is final; otherwise (or
+    if it fails) the sessions' own refused turns since `since` say it."""
+    if cli_org() == org:
+        data = usage()
+        if data is not None:
+            limit = usage_limit(data)
+            return dict(limit, source="usage") if limit else None
+    limit = transcript_limit(since)
+    return dict(limit, source="transcripts") if limit else None
+
+
+def plan_warning():
+    """2026-11-04: a Pro plan took 85 % of its 5-hour window in minutes with three resumed sessions."""
+    org, email = cli_profile()
+    kind = (org or {}).get("organization_type") or ""
+    if "pro" in kind and "max" not in kind:
+        return (f"Ojo: {email or 'esta cuenta'} es plan Pro. Da poco: las sesiones grandes en Opus pueden agotar su "
+                "límite de 5 horas en minutos. Es un aviso para vigilar el uso con get_usage, no una razón para dejar "
+                "sesiones paradas: se reanudan todas.")
+    return ""
+
+
+def has_routines():
+    """The routines engine (~/.claude/scripts/routines) is optional; without it there is no routines token to move."""
+    return os.access(ROUTINES, os.X_OK)
+
+
+def routines_org():
+    """Organization of the routines' one-year token: a token count is free and names it in a header."""
+    token = load(ROUTINE_TOKEN, {}).get("token")
+    if not token:
+        return None
+    body = {"model": "claude-haiku-5-5", "messages": [{"role": "user", "content": "hi"}]}
+    try:
+        return http_json(API + "/v1/messages/count_tokens", token, body)[0].get("anthropic-organization-id")
+    except (urllib.error.URLError, ValueError, OSError):
+        return None
+
+
+def account_connectors():
+    """The connectors of the CLI's account ({url: {name, url, directory}}), or None if it cannot be asked."""
+    token = cli_token()
+    if not token:
+        return None
+    try:
+        data = http_json(API + "/v1/mcp_servers?limit=1000&include_additional_installs=true", token,
+                         beta="mcp-servers-2025-12-04")[1]
+    except (urllib.error.URLError, ValueError, OSError):
+        return None
+    return {s["url"]: {"name": s.get("display_name") or s["url"], "url": s["url"],
+                       "directory": s.get("directory_entry_id")}
+            for s in data.get("data", []) if s.get("url") and not s["url"].startswith(BUILTIN_CONNECTORS)}
+
+
+def missing_connectors(org):
+    """Inventory connectors the account of `org` lacks, after adding its own to the inventory; None when the CLI is
+    not logged into that organization yet (the answer would be about another account)."""
+    if not org or cli_org() != org:
+        return None
+    found = account_connectors()
+    if found is None:
+        return None
+    with locked():
+        inventory = load(CONNECTORS, {})
+        for url, c in found.items():
+            known = inventory.get(url, {})
+            inventory[url] = {**known, **{k: v for k, v in c.items() if v}}
+        save(CONNECTORS, inventory)
+    return [c for url, c in sorted(inventory.items(), key=lambda kv: kv[1]["name"]) if url not in found]
+
+
+def connectors_line(missing):
+    if not missing:
+        return ""
+    return (f"Faltan conectores en esta cuenta: {', '.join(c['name'] for c in missing)}. Se conectan una vez por cuenta: "
+            f"la sesión «{TASK_NAME}» te deja los botones de Conectar.")
+
+
+def needed_logins(org):
+    need = []
+    if cli_org() != org:
+        need.append("cli")
+    if has_routines() and routines_org() != org:
+        need.append("routines")
+    return need
+
+
+def until_text(ts):
+    """'las HH:MM' when `ts` is today, otherwise 'el DD-MM a las HH:MM'."""
+    if time.strftime("%Y%m%d", time.localtime(ts)) == time.strftime("%Y%m%d", time.localtime(now())):
+        return "las " + hhmm(ts)
+    return time.strftime("el %d-%m a las %H:%M", time.localtime(ts))
+
+
+def limit_text(what):
+    return "límite de 5 horas" if what == "five_hour" else "límite semanal"
+
+
+def schedule_after_reset(event_id, until):
+    """A transient systemd timer that runs `after-reset` a minute after the usage comes back. The unit carries the
+    reset time too, so a rescheduling never meets the unit of the previous timer."""
+    when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(until + 60))
+    try:
+        subprocess.run(["systemd-run", "--user", "--collect", "--quiet", f"--unit=account-switch-{event_id}-reset-{int(until)}",
+                        "--on-calendar=" + when, "--timer-property=AccuracySec=15s", *systemd_setenv(),
+                        sys.executable, SELF, "after-reset", "--event", event_id],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def schedule_early_check(event_id):
+    """A transient timer that runs `after-reset --event ID --early` in EARLY_CHECK seconds. The unit name carries the
+    current time, so each link of the chain gets its own unit."""
+    try:
+        subprocess.run(["systemd-run", "--user", "--collect", "--quiet", f"--unit=account-switch-{event_id}-early-{int(now())}",
+                        f"--on-active={EARLY_CHECK}", "--timer-property=AccuracySec=15s", *systemd_setenv(),
+                        sys.executable, SELF, "after-reset", "--event", event_id, "--early"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def recheck_limit(event_id, force=False):
+    """Re-validate the `not_before` recorded in the event: the usage endpoint can say the limit is gone (a plan upgrade
+    or a renewal) long before the forecast. Returns "lifted" (not_before cleared), "limited" (not_before moved to the
+    limit that holds now), "unknown" (not asked: throttled, or the CLI is logged into another organization, or the
+    endpoint did not answer) or "none" (the event is another one, or has no `not_before` ahead).
+    Only the usage endpoint proves recovery, and it answers for the CLI's own account; the transcripts cannot."""
+    event = load(EVENT, None) or {}
+    if event.get("id") != event_id or (event.get("not_before") or 0) <= now():
+        return "none"
+    if not force and now() - (event.get("limit_checked_at") or 0) < LIMIT_RECHECK:
+        return "unknown"
+    result, limit = "unknown", None
+    try:
+        if cli_org() == event["to"][1]:
+            data = usage()
+            if data is not None:
+                limit = usage_limit(data)
+                result = "limited" if limit else "lifted"
+    except Exception:   # the check must never break status, the hook or the timer
+        result, limit = "unknown", None
+    with locked():
+        late = load(EVENT, {})
+        if late.get("id") != event_id:
+            return "none"
+        late["limit_checked_at"] = now()
+        if result == "lifted":
+            late["not_before"], late["limit_lifted_at"] = None, now()
+        elif result == "limited":
+            late["not_before"], late["limit_what"] = limit["until"], limit["what"]
+        save(EVENT, late)
+    return result
+
+
+def note_limit(event_id, limit):
+    """Record in the event that the new account has no usage until limit["until"], and schedule the check for then,
+    plus the early checks while that is far away. False when the event is no longer that one."""
+    with locked():
+        late = load(EVENT, {})
+        if late.get("id") != event_id:
+            return False
+        late["not_before"], late["limit_what"] = limit["until"], limit["what"]
+        save(EVENT, late)
+    schedule_after_reset(event_id, limit["until"])
+    if limit["until"] - now() > EARLY_STOP:
+        schedule_early_check(event_id)
+    return True
+
+
+def cmd_on_switch(args):
+    event = load(EVENT, None)
+    if not event:
+        return 0
+    org = event["to"][1]
+    need = needed_logins(org)
+    limit = None if need else account_limit(org, event["at"])
+    if limit and not note_limit(event["id"], limit):
+        limit = None
+    hard = [s for s in event["sessions"] if s["kind"] == "hard"]
+    soft = [s for s in event["sessions"] if s["kind"] == "soft"]
+    lines = []
+    if limit:
+        lines.append(f"La cuenta nueva también está sin uso ({limit_text(limit['what'])}) hasta {until_text(limit['until'])}: "
+                     "ninguna sesión puede continuar hasta entonces. Si otra cuenta tiene uso, cambiar a ella es el "
+                     "camino; si no, te aviso a esa hora.")
+    if need:
+        lines.append("Se abre una terminal para iniciar sesión en la cuenta nueva: autoriza en Chrome y pega el código.")
+    if (soft or hard) and not limit:
+        lines.append(f"{len(soft) + len(hard)} sesiones paradas se reanudarán solas en cuanto arranque cualquier "
+                     "sesión de la app; si en unos minutos no ves movimiento, abre una sesión nueva y escribe cualquier cosa.")
+    if hard:
+        lines.append(f"{len(hard)} se cortaron con el error del límite: las reanuda una sesión en Bypass permissions.")
+    if not need:
+        lines.append(plan_warning())
+        missing = missing_connectors(org)
+        if missing is not None:
+            with locked():
+                late = load(EVENT, {})
+                if late.get("id") == event["id"]:
+                    late["connectors_missing"] = missing
+                    save(EVENT, late)
+            lines.append(connectors_line(missing))
+    lines = [line for line in lines if line]
+    if lines:
+        notify("Claude: cambio de cuenta", "\n".join(lines), "critical" if hard or need or limit else "normal")
+    if need and shutil.which("gnome-terminal"):
+        subprocess.run(["gnome-terminal", "--geometry=160x40", "--title=Claude: iniciar sesión en la cuenta nueva",
+                        "--", sys.executable, SELF, "login", "--org", org], env=desktop_env(), check=False, timeout=30)
+    time.sleep(ARM_DELAY)
+    cmd_arm(args)
+    # If nothing took the event (the task did not fire, no session started), say so instead of staying silent.
+    time.sleep(max(0, event["at"] + WATCHDOG - now()))
+    late = load(EVENT, {})
+    if late.get("id") == event["id"] and not late.get("done") and not late.get("claimed_by"):
+        if (late.get("not_before") or 0) > now():
+            return 0   # he was told when the usage comes back
+        # The task's own refused turn is in the transcripts by now: that is how the new account's limit shows up.
+        limit = None if late.get("not_before") else account_limit(org, event["at"])
+        if limit and note_limit(event["id"], limit):
+            notify("Claude: la cuenta nueva no tiene uso",
+                   f"La tarea que reanuda las sesiones se cortó porque la cuenta nueva está sin uso "
+                   f"({limit_text(limit['what'])}) hasta {until_text(limit['until'])}. Te aviso a esa hora; "
+                   "si otra cuenta tiene uso, cambiar a ella es el camino.", "critical")
+            return 0
+        notify("Claude: el cambio de cuenta no se ha completado solo",
+               f"{len(late.get('sessions', []))} sesiones siguen paradas y no ha arrancado la tarea que las reanuda. "
+               "Abre una sesión nueva en la app (mejor en Bypass permissions) y escribe cualquier cosa: al arrancar "
+               "recibe la lista y las reanuda ella sola. "
+               "Diagnóstico: ~/.claude/scripts/account-switch doctor", "critical")
+    return 0
+
+
+def cmd_after_reset(args):
+    """Started by the timer that on-switch scheduled for when the new account's usage comes back, or (`--early`) by the
+    5-minute poll that looks for a limit lifted before that. Its own checks make a stray or late run harmless: it
+    touches only the event it was scheduled for, and only while the app is still on that account."""
+    early = getattr(args, "early", False)
+    event = load(EVENT, None)
+    if not event or event.get("id") != args.event or event.get("done"):
+        return 0
+    if event.get("claimed_by") and now() - (event.get("claimed_at") or 0) < CLAIM_TTL:
+        return 0
+    state = load(STATE, {})
+    if [state.get("account"), state.get("org")] != event["to"]:
+        return 0   # a later switch has its own event
+    org = event["to"][1]
+    before = event.get("not_before") or event["at"]
+    if early:
+        if recheck_limit(event["id"], force=True) != "lifted":
+            late = load(EVENT, {})
+            if late.get("id") == event["id"] and not late.get("done") and (late.get("not_before") or 0) - now() > EARLY_STOP:
+                schedule_early_check(event["id"])
+            return 0
+        limit = None
+        came_back = "El límite de la cuenta nueva se levantó antes de tiempo (cambio de plan o renovación)"
+    else:
+        limit = account_limit(org, before)
+        came_back = f"El uso de la cuenta ha vuelto (se renovó a las {hhmm(before)})"
+    if limit:   # limited again, for instance by the weekly window behind the 5-hour one
+        note_limit(event["id"], limit)
+        if abs(limit["until"] - before) > 60:
+            notify("Claude: la cuenta sigue sin uso",
+                   f"La cuenta nueva sigue sin uso ({limit_text(limit['what'])}) hasta {until_text(limit['until'])}. "
+                   "Te aviso a esa hora.", "critical")
+        return 0
+    left = pending_sessions(event)
+    if not left:
+        with locked():
+            late = load(EVENT, {})
+            if late.get("id") == event["id"]:
+                late["done"] = True
+                save(EVENT, late)
+        return 0
+    notify("Claude: la cuenta ya tiene uso",
+           f"{came_back} y {len(left)} sesiones siguen paradas. "
+           "Abre una sesión nueva en la app (mejor en Bypass permissions) y escribe cualquier cosa: al arrancar "
+           "recibe la lista y las reanuda ella sola.", "critical")
+    return 0
+
+
+# ------------------------------------------------------------------ the app's own task, ready in the other accounts
+
+def task_record():
+    ms = int(now() * 1000)
+    return {"id": TASK_ID, "displayName": TASK_NAME, "fireAt": ms - 60_000,
+            "enabled": True, "filePath": TASK_FILE, "createdAt": ms - 120_000, "cwd": TASK_CWD,
+            "permissionMode": "bypassPermissions", "permissionModeCarried": True}
+
+
+REVIVE_TASK_ID = "reanimar-supervisoras"
+REVIVE_TASK_FILE = os.environ.get("ACCOUNT_SWITCH_REVIVE_TASK_FILE") or os.path.join(HOME, ".claude", "scheduled-tasks",
+                                                                                       REVIVE_TASK_ID, "SKILL.md")
+
+
+def revive_task_record():
+    """2026-11-20: the app task that wakes supervisors whose process died (supervisor-lock revive). Like the resume task
+    it lives in the app on purpose, one per account: only the app can start a session that has no process."""
+    return {"id": REVIVE_TASK_ID, "displayName": "Reanimar supervisoras", "cronExpression": "*/15 * * * *",
+            "enabled": True, "filePath": REVIVE_TASK_FILE, "createdAt": int(now() * 1000),
+            "cwd": os.path.join(HOME, ".claude"), "permissionMode": "bypassPermissions", "permissionModeCarried": True}
+
+
+def cmd_arm(args):
+    """Write the resume task into every account/org folder except the one the app has open. The active folder is
+    the app's to write; when its account is known but not its organization, none of that account's folders is
+    touched."""
+    state = load(STATE, {})
+    account, org = state.get("account"), state.get("org")
+    if not account or not os.path.exists(TASK_FILE):
+        return 1
+    armed = []
+    for folder in sorted(glob.glob(os.path.join(APP_SESSIONS, "*", "*"))):
+        acc, folder_org = folder.split(os.sep)[-2:]
+        if not os.path.isdir(folder) or acc == account and (org is None or folder_org == org):
+            continue
+        path = os.path.join(folder, "scheduled-tasks.json")
+        doc = load(path, None)
+        if doc is None and os.path.exists(path):
+            continue   # unreadable: never overwrite what the app may need
+        doc = doc or {"scheduledTasks": [], "recordedSkips": {}}
+        doc["scheduledTasks"] = [t for t in doc.get("scheduledTasks", []) if t.get("id") != TASK_ID] + [task_record()]
+        if os.path.exists(REVIVE_TASK_FILE) and not any(t.get("id") == REVIVE_TASK_ID for t in doc["scheduledTasks"]):
+            doc["scheduledTasks"].append(revive_task_record())  # kept as it is when there: he may have paused it
+        save(path, doc)
+        armed.append(f"{acc[:8]}/{folder_org[:8]}")
+    if getattr(args, "verbose", False):
+        print("Tarea preparada en: " + (", ".join(armed) or "ninguna carpeta"))
+    return 0
+
+
+def cmd_login(args):
+    org = args.org or (load(EVENT, {}).get("to") or [None, None])[1]
+    env = desktop_env()
+    if os.access(CHROME_OPENER, os.X_OK):
+        env["BROWSER"] = CHROME_OPENER
+    ok = True
+    if not org or cli_org() != org:
+        print("1/2 · CLI de Claude (terminal, Cursor, VS Code): se abre tu Chrome. Autoriza la cuenta nueva y pega "
+              "aquí el código.\n")
+        subprocess.run(["claude", "auth", "login"], env=env, check=False)
+        ok = not org or cli_org() == org
+        print("\nCLI: " + ("bien, en la organización nueva." if ok else "sigue en otra organización."))
+    if has_routines() and (not org or routines_org() != org):
+        print("\n2/2 · Rutinas: token de un año.\n")
+        subprocess.run([ROUTINES, "login"], env=env, check=False)
+        good = not org or routines_org() == org
+        ok = ok and good
+        print("\nRutinas: " + ("bien, en la organización nueva." if good else "el token sigue en otra organización."))
+    print("\nHecho." if ok else "\nAlgo no ha quedado en la cuenta nueva: vuelve a lanzar ~/.claude/scripts/account-switch login")
+    warning = plan_warning()
+    if warning:
+        print(warning)
+    missing = missing_connectors(org) if ok else None
+    if missing:
+        print(connectors_line(missing))
+        with locked():
+            event = load(EVENT, None)
+            if event and (event.get("to") or [None, None])[1] == org:
+                event["connectors_missing"] = missing
+                save(EVENT, event)
+    if sys.stdin.isatty():
+        input("Pulsa Intro para cerrar esta ventana.")
+    return 0 if ok else 1
+
+
+# ------------------------------------------------------------------ the session that resumes the others
+
+def resume_text():
+    return (f"{MARKER} La cuenta de Claude que usabas se quedó sin uso y el desarrollador ya ha cambiado de cuenta; "
+            "los límites que viste ya no cuentan. Sigue exactamente donde lo dejaste, sin repetir lo hecho y sin "
+            "preguntar si continuar.")
+
+
+def pending_sessions(event):
+    """The sessions of the event still stopped now: a second claimer must not resume twice what the first one did,
+    a session that wrote to its transcript in the last two minutes is working, not cut mid-turn, and one that
+    already holds the resume in its transcript got it from an earlier claimer or a send before a compaction."""
+    return [dict(s, kind=k) for s in event["sessions"]
+            for k in [stop_kind(transcript_tail(s["cliSessionId"]))]
+            if k and not (k == "soft" and (transcript_age(s["cliSessionId"]) or 1e9) < 120)
+            and delivered_at(s["cliSessionId"], event["at"]) is None
+            and not leave_alone(s["sessionId"])]
+
+
+def leave_alone(session_id):
+    """2026-11-14: archived after the switch (its supervisor closed it, finished), or a run of the resume task itself
+    (events written before stopped_sessions skipped those): a resume would only wake what nobody needs."""
+    for path in glob.glob(os.path.join(APP_SESSIONS, "*", "*", f"{session_id}.json")):
+        rec = load(path, {})
+        if rec.get("isArchived") or rec.get("scheduledTaskId") == TASK_ID:
+            return True
+    return False
+
+
+def claim(sid, mode=None, force=False):
+    """Hand the current event to one session, or None. The scheduled task runs in Bypass permissions and takes
+    it with force; a session's SessionStart hook leaves it to the task (or to a session in Bypass permissions)
+    for the first BYPASS_WAIT, then any desktop session takes it, so nothing waits on the developer. While the new
+    account has no usage (`not_before`) only the task can take it: a session started now would die on the limit."""
+    with locked():
+        event = load(EVENT, None)
+        if not event or event.get("done") or event_expired(event):
+            return None
+        # A stopped session may be started only to be told about a background task, and then run no turn.
+        if any(s.get("cliSessionId") == sid for s in event["sessions"]):
+            return None
+        if force:
+            event["not_before"] = None   # the account is answering: the limit that was recorded is over
+        else:
+            if now() < (event.get("not_before") or 0):
+                return None   # a session started now would die on the limit; after-reset tells him when
+            if event.get("claimed_by") and now() - (event.get("claimed_at") or 0) < CLAIM_TTL:
+                return None
+            if mode != "bypassPermissions" and now() - event["at"] < BYPASS_WAIT:
+                return None
+        event["sessions"] = pending_sessions(event)
+        if not event["sessions"]:
+            event["done"] = True
+            save(EVENT, event)
+            return None
+        event.update(claimed_by=sid, claimed_at=now())
+        save(EVENT, event)
+    return event
+
+
+def connectors_step(missing):
+    with_buttons = [c for c in missing if c.get("directory")]
+    if not with_buttons:
+        return ""
+    return ("Conectores: en esta cuenta faltan " + ", ".join(c["name"] for c in missing) + ". Llama a "
+            "mcp__mcp-registry__suggest_connectors con uuids=" + json.dumps([c["directory"] for c in with_buttons])
+            + " y keywords=[\"email\"], para que el desarrollador tenga los botones de Conectar. No conectes nada tú: "
+            "la autorización es suya. Díselo en una línea.")
+
+
+def steps(event):
+    deadline = hhmm((event.get("claimed_at") or now()) + CLAIM_WINDOW)
+    lines = [f"CAMBIO DE CUENTA (account-switch, {hhmm(event['at'])}): el desarrollador ha cambiado de cuenta en la "
+             "app y quiere que sea transparente para él. Te toca a ti, antes de seguir con lo tuyo:",
+             f"Vale hasta las {deadline}. Si lo lees más tarde —por ejemplo, porque tu turno se cortó y te han "
+             "retomado después—, no envíes nada ni preguntes: otra sesión se encarga, y cross-project-message-gate "
+             "lo rechazaría.",
+             "Esto es tuyo aunque esas sesiones sean de otros proyectos o tu encargo sea otro: es orden del "
+             "desarrollador (rules/cambio-de-cuenta.md) y cross-project-message-gate deja pasar exactamente estos "
+             "mensajes; si de verdad no puedes enviarlos, ejecuta `~/.claude/scripts/account-switch release` para que "
+             "los envíe otra sesión y sigue con tu tarea.",
+             "1. Envía con mcp__ccd_session_mgmt__send_message, a cada una de estas sesiones, exactamente este texto "
+             "(antes de enviar, y de nuevo si tu turno se corta o se compacta, ejecuta "
+             "`~/.claude/scripts/account-switch mine`: si dice «No», no envíes nada; si dice «Sí», envía solo a las "
+             f"que liste, porque una sesión no recibe el aviso dos veces): «{resume_text()}»"]
+    lines += [f"   - {s['sessionId']} · {s['title']}"
+              + (" (se cortó con el error del límite)" if s["kind"] == "hard" else "") for s in event["sessions"]]
+    lines.append("2. Las que se cortaron con el error del límite rechazan el mensaje («refused» o «undelivered») si tu "
+                 "sesión no está en Bypass permissions (comprobado el 2026-11-04). Si te pasa, reinténtalo una vez "
+                 "pasado un minuto; si sigue igual, dile al desarrollador en una línea que ponga esta sesión en Bypass "
+                 "permissions y vuelve a enviarlas. No las des por perdidas.")
+    step = connectors_step(event.get("connectors_missing") or [])
+    if step:
+        lines.append("3. " + step)
+    lines.append(f"{4 if step else 3}. Al terminar, ejecuta `~/.claude/scripts/account-switch done` y sigue con tu tarea.")
+    return "\n".join(lines)
+
+
+def cmd_hook(args):
+    try:
+        payload = json.load(sys.stdin)
+    except ValueError:
+        payload = {}
+    # Only a desktop-app session has the session tools; a routine (`claude -p`) or the terminal does not.
+    if os.environ.get("CLAUDE_CODE_ENTRYPOINT") != "claude-desktop":
+        return 0
+    current = load(EVENT, None)
+    if current and (current.get("not_before") or 0) > now():
+        recheck_limit(current["id"])   # throttled: a limit lifted early (plan upgrade) must not keep this session out
+    event = claim(payload.get("session_id") or "", payload.get("permission_mode"))
+    if event:
+        json.dump({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": steps(event)}},
+                  sys.stdout, ensure_ascii=False)
+    return 0
+
+
+def cmd_brief(args):
+    """What the scheduled task runs. It may start a few seconds before `detect` has written the event."""
+    deadline = now() + args.wait
+    while True:
+        event = load(EVENT, None)
+        if event and not event.get("done") and not event_expired(event):
+            break
+        if now() >= deadline:
+            print("Nada que hacer: no hay ningún cambio de cuenta pendiente. Termina con una línea.")
+            return 0
+        time.sleep(3)
+    org = (event.get("to") or [None, None])[1]
+    if "connectors_missing" not in event:
+        missing = missing_connectors(org)
+        if missing is not None:
+            with locked():
+                late = load(EVENT, {})
+                late["connectors_missing"] = event["connectors_missing"] = missing
+                save(EVENT, late)
+    claimed = claim("scheduled-task:" + (os.environ.get("CLAUDE_CODE_SESSION_ID") or "?"), "bypassPermissions",
+                    force=True)
+    if claimed:
+        print(steps(claimed))
+        return 0
+    step = connectors_step(event.get("connectors_missing") or [])
+    if step:
+        print(step + " Después termina con una línea.")
+    elif "connectors_missing" not in event:
+        print("Ninguna sesión sigue parada. Los conectores se comprobarán cuando el desarrollador inicie sesión con el "
+              "CLI en la cuenta nueva (te avisará la terminal). Termina con una línea.")
+    else:
+        print("Nada que hacer: ninguna sesión sigue parada y no falta ningún conector. Termina con una línea.")
+    return 0
+
+
+def caller_id(args):
+    return getattr(args, "session", None) or os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
+
+
+def cmd_mine(args):
+    """Read-only: is the event still this session's, and which listed sessions have not received the resume?"""
+    event = load(EVENT, None)
+    problem = claim_problem(event, caller_id(args))
+    if problem:
+        print(f"No: {problem}. No envíes nada, no preguntes al desarrollador y sigue con tu tarea.")
+        return 1
+    head = f"Sí: el aviso es tuyo hasta las {hhmm(event['claimed_at'] + CLAIM_WINDOW)}."
+    left = [s for s in event["sessions"] if delivered_at(s["cliSessionId"], event["at"]) is None]
+    if not left:
+        print(head + " No falta ninguna: ejecuta `~/.claude/scripts/account-switch done`.")
+        return 0
+    print(head + " Faltan:")
+    for s in left:
+        print(f"   - {s['sessionId']} · {s['title']}")
+    return 0
+
+
+def cmd_done(args):
+    """Only the claimant closes the event: a stale session reading old steps must not end what another handles.
+    No session id (the developer in a terminal) or --force closes it as before."""
+    caller = caller_id(args)
+    with locked():
+        event = load(EVENT, None)
+        if event:
+            owner = event.get("claimed_by")
+            if owner and caller and not args.force and owner not in (caller, "scheduled-task:" + caller):
+                print("No: este aviso de cambio de cuenta es de otra sesión; no hace falta que hagas nada. "
+                      "Sigue con tu tarea.")
+                return 1
+            event["done"] = True
+            save(EVENT, event)
+    return 0
+
+
+def cmd_release(args):
+    """The claimant gives the event back, so the next session can take it: for a session whose own assignment keeps
+    it from messaging the others. Only the claimant (the same rule as `done`, but without the no-session exception:
+    the developer has `done --force`)."""
+    caller = caller_id(args)
+    with locked():
+        event = load(EVENT, None)
+        if not event or not caller or event.get("claimed_by") not in (caller, "scheduled-task:" + caller):
+            print("No: este aviso de cambio de cuenta no es tuyo; no hace falta que hagas nada. Sigue con tu tarea.")
+            return 1
+        event.update(claimed_by=None, claimed_at=None)
+        save(EVENT, event)
+    print("Hecho: el aviso queda libre para otra sesión. Sigue con tu tarea.")
+    return 0
+
+
+def cmd_status(args):
+    state, event = load(STATE, {}), load(EVENT, None)
+    print(f"App: cuenta {state.get('account')} · organización {state.get('org')}")
+    if not event:
+        print("Ningún cambio registrado.")
+        return 0
+    print(f"Último cambio: {time.strftime('%d-%m %H:%M', time.localtime(event['at']))}, de {'/'.join(map(str, event['from']))}"
+          f" a {'/'.join(event['to'])}")
+    print(f"Reclamado por: {event.get('claimed_by') or 'nadie'} · terminado: {'sí' if event.get('done') else 'no'}")
+    if (event.get("not_before") or 0) > now():
+        outcome = recheck_limit(event["id"], force=True)
+        event = load(EVENT, None) or event
+        if outcome == "lifted":
+            print("Cuenta nueva: el límite anotado ya no rige; el uso real de la cuenta tiene margen (comprobado ahora)")
+        elif outcome == "limited":
+            print(f"Cuenta nueva sin uso hasta {until_text(event['not_before'])} ({limit_text(event.get('limit_what'))})"
+                  " (comprobado ahora con el uso real)")
+        elif outcome == "unknown":
+            print(f"Cuenta nueva sin uso hasta {until_text(event['not_before'])} según lo anotado; sin comprobar: mira "
+                  "get_usage antes de darlo por vigente")
+    for s in event["sessions"]:
+        print(f"  {s['kind']:4}  {s['sessionId']}  {s['title']}")
+    return 0
+
+
+def cmd_connectors(args):
+    """The inventory and what the active account lacks (asked to Claude with the CLI's login)."""
+    org = load(STATE, {}).get("org")
+    missing = missing_connectors(org)
+    inventory = load(CONNECTORS, {})
+    print("Inventario de conectores (todas las cuentas):")
+    for c in sorted(inventory.values(), key=lambda c: c["name"]):
+        print(f"  {c['name']:18} {c['url']}  directorio={c.get('directory') or '?'}")
+    if missing is None:
+        print("No se puede comprobar la cuenta activa: el CLI no tiene sesión en esa organización.")
+        return 1
+    print("Faltan en la cuenta activa: " + (", ".join(c["name"] for c in missing) or "ninguno"))
+    return 0
+
+
+def cmd_doctor(args):
+    """Every piece of the switch, checked without switching account."""
+    checks = []
+
+    def check(ok, text):
+        checks.append(ok)
+        print(("  ok  " if ok else "  MAL ") + text)
+
+    state = load(STATE, {})
+    app_account = load(os.path.join(os.path.dirname(APP_SESSIONS), "config.json"), {}).get("lastKnownAccountUuid")
+    active = subprocess.run(["systemctl", "--user", "is-active", "--quiet", "claude-sessions-sync.service"]).returncode
+    check(active == 0, "claude-sessions-sync en marcha (detecta el cambio de cuenta)")
+    check(state.get("account") == app_account and bool(state.get("org")),
+          f"cuenta y organización activas registradas: {str(state.get('account'))[:8]}/{str(state.get('org'))[:8]}")
+    settings = load(os.path.join(HOME, ".claude", "settings.json"), {})
+    hooks = json.dumps((settings.get("hooks") or {}).get("SessionStart") or [])
+    check("account-switch hook" in hooks, "hook SessionStart registrado en ~/.claude/settings.json")
+    try:
+        gate = open(os.path.join(HOME, ".claude", "hooks", "cross-project-message-gate")).read()
+    except OSError:
+        gate = ""
+    check("account_switch_resume(" in gate and MARKER in gate, f"excepción «{MARKER}» en cross-project-message-gate")
+    check("account_switch" in _SWITCH["message_exceptions"],
+          "excepción account_switch activada en la configuración de supervision (message_exceptions)")
+    check(os.path.exists(TASK_FILE), f"prompt de la tarea: {TASK_FILE}")
+    for folder in sorted(glob.glob(os.path.join(APP_SESSIONS, "*", "*"))):
+        acc, org = folder.split(os.sep)[-2:]
+        label = f"{acc[:8]}/{org[:8]}"
+        if acc == state.get("account") and org == state.get("org"):
+            print(f"  --  {label}: cuenta activa, la tarea se prepara al salir de ella")
+            continue
+        task = next((t for t in load(os.path.join(folder, "scheduled-tasks.json"), {}).get("scheduledTasks", [])
+                     if t.get("id") == TASK_ID), None)
+        ready = bool(task and task.get("enabled") and not task.get("lastRunAt") and task.get("fireAt", 1e18) <= now() * 1000
+                     and task.get("permissionMode") == "bypassPermissions" and os.path.isdir(task.get("cwd", "")))
+        check(ready, f"{label}: tarea lista para lanzarse al cambiar a esa cuenta")
+    org = state.get("org")
+    check(cli_org() == org, "inicio de sesión del CLI en la organización activa")
+    if has_routines():
+        check(routines_org() == org, "token de las rutinas en la organización activa")
+    else:
+        print("  --  sin el motor de rutinas (scripts/routines): no hay token de rutinas que cambiar")
+    check(bool(shutil.which("gnome-terminal")) and bool(shutil.which("notify-send")), "gnome-terminal y notify-send")
+    try:
+        routines_src = open(ROUTINES).read()
+    except OSError:
+        routines_src = ""
+    if has_routines():
+        check(TASK_ID in routines_src, "`routines import` no adopta la tarea del cambio de cuenta")
+    inventory = load(CONNECTORS, {})
+    check(bool(inventory) and all(c.get("directory") for c in inventory.values()),
+          f"inventario de conectores con su botón de Conectar: {', '.join(c['name'] for c in inventory.values()) or 'vacío'}")
+    missing = missing_connectors(org)
+    if missing:
+        print(f"  --  faltan en la cuenta activa (los conecta él, una vez): {', '.join(c['name'] for c in missing)}")
+    print("Todo listo." if all(checks) else "Hay piezas que fallan: mira las líneas MAL.")
+    return 0 if all(checks) else 1
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="account-switch", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("detect")
+    p.add_argument("--account", required=True)
+    p.add_argument("--org")
+    sub.add_parser("on-switch")
+    p = sub.add_parser("after-reset")
+    p.add_argument("--event", required=True)
+    p.add_argument("--early", action="store_true")
+    sub.add_parser("login").add_argument("--org")
+    sub.add_parser("arm").add_argument("--verbose", action="store_true")
+    sub.add_parser("brief").add_argument("--wait", type=float, default=90)
+    p = sub.add_parser("done")
+    p.add_argument("--session")
+    p.add_argument("--force", action="store_true")
+    sub.add_parser("mine").add_argument("--session")
+    sub.add_parser("release").add_argument("--session")
+    for name in ("hook", "status", "doctor", "connectors"):
+        sub.add_parser(name)
+    args = ap.parse_args()
+    return {"detect": cmd_detect, "on-switch": cmd_on_switch, "after-reset": cmd_after_reset, "login": cmd_login, "arm": cmd_arm,
+            "brief": cmd_brief, "hook": cmd_hook, "done": cmd_done, "release": cmd_release, "mine": cmd_mine, "status": cmd_status,
+            "doctor": cmd_doctor, "connectors": cmd_connectors}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

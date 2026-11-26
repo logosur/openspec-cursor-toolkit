@@ -2,7 +2,9 @@ name: accounts
 summary: >-
   Several Claude accounts on one machine: claude-sessions-sync copies the Claude desktop app's Code-tab
   session records between the folders of every account and organisation, so after switching account the
-  sidebar lists the same sessions, which continue the same conversations.
+  sidebar lists the same sessions, which continue the same conversations; and account-switch makes the
+  switch transparent: it notices it, asks for the CLI and routines logins that are needed and hands the
+  sessions the old account left stopped to one session that resumes them.
 requires:
   python: "3.10"
   os: linux
@@ -10,13 +12,28 @@ requires:
 optional:
   binaries:
     systemctl: "`claude-sessions-sync install` runs it as a systemd --user service; without it, run `once` by hand"
-    notify-send: desktop notice when sessions from other accounts arrive (libnotify)
+    systemd-run: account-switch runs its after-switch checks and its reset timers as transient user units
+    notify-send: desktop notices when sessions from other accounts arrive or an account switch needs something (libnotify)
+    gnome-terminal: the terminal account-switch opens for the logins after a switch; without it, run `account-switch login`
+    claude: account-switch checks and renews the CLI login with it
 notes:
-  - "Opt-in. The installer writes no service: start it once with `python3 ~/.claude/scripts/claude-sessions-sync install` (systemd --user); `uninstall` stops it and leaves the session folders as they are."
+  - "Opt-in. The installer writes no service: start the sync once with `python3 ~/.claude/scripts/claude-sessions-sync install` (systemd --user); `uninstall` stops it and leaves the session folders as they are."
   - "Its first pass backs up the whole sessions folder to ~/backups/. The app reads the list when it starts or switches account, so new sessions show after a restart of the app."
-  - account-switch is not part of the toolkit; without it the sync only copies records.
-# Named by claude-sessions-sync and not installed by this module; it works without it.
+  - "account-switch learns of a switch from claude-sessions-sync. Its resume messages to sessions of other projects pass cross-project-message-gate (module supervision) only with account_switch in that piece's message_exceptions."
+  - "In the account-switch config piece, task_cwd is the folder the resume task's session runs in (default: your home) and task_name its title in the app."
+  - "account-switch reads the CLI's own login (~/.claude/.credentials.json) to ask Claude for the account's organisation, usage and connectors; it never writes it."
+  - "The routines engine and project pauses are optional: without scripts/routines no routines login is asked, and without scripts/project-pause no project counts as paused."
+# Named by these pieces and not installed by this module: optional, or (cross-project-message-gate) installed by supervision.
 project_provided:
-  - scripts/account-switch
+  - scripts/routines
+  - scripts/project-pause
+  - scripts/open-in-developer-chrome
+  - hooks/cross-project-message-gate
 files:
   - {src: global/scripts/claude-sessions-sync, dest: scripts/claude-sessions-sync, mode: "0755"}
+  - {src: global/scripts/account-switch, dest: scripts/account-switch, mode: "0755"}
+  - {src: global/rules/cambio-de-cuenta.md, dest: rules/cambio-de-cuenta.md}
+  - {src: global/scheduled-tasks/account-switch-resume/SKILL.md, dest: scheduled-tasks/account-switch-resume/SKILL.md}
+hooks:
+  - global/settings/hooks.accounts.json
+config: [account-switch]

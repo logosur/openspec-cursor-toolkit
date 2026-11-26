@@ -1,0 +1,38 @@
+piece: account-switch
+dest: scripts/account-switch
+kind: cli
+probes:
+  - name: help exits 0
+    args: [--help]
+    exit: [0]
+    stdout: any
+  - name: status with no switch recorded
+    args: [status]
+    env: {ACCOUNT_SWITCH_STATE: probe-state}
+    exit: [0]
+    stdout: any
+    contains: "Ningún cambio registrado."
+  - name: mine with no switch pending says no
+    args: [mine]
+    env: {ACCOUNT_SWITCH_STATE: probe-state}
+    exit: [1]
+    stdout: any
+    contains: "No: no hay ningún cambio de cuenta pendiente"
+  - name: the SessionStart hook outside the desktop app adds nothing
+    args: [hook]
+    stdin: {session_id: probe, source: startup}
+    env: {ACCOUNT_SWITCH_STATE: probe-state, CLAUDE_CODE_ENTRYPOINT: cli}
+    exit: [0]
+    stdout: empty
+  - name: the SessionStart hook in the desktop app with no switch pending adds nothing
+    args: [hook]
+    stdin: {session_id: probe, source: startup}
+    env: {ACCOUNT_SWITCH_STATE: probe-state, CLAUDE_CODE_ENTRYPOINT: claude-desktop}
+    exit: [0]
+    stdout: empty
+  - name: a corrupt config does not crash
+    args: [status]
+    corrupt_config: true
+    env: {ACCOUNT_SWITCH_STATE: probe-state}
+    exit: [0]
+    stdout: any

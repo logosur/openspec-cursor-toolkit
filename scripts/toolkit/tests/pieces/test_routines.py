@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from argparse import Namespace
 from datetime import timedelta
@@ -80,6 +81,24 @@ def load_module(config=CONFIG, raw_config=None):
 R = load_module()
 REAL_NOTIFY = R.notify   # RoutinesTestCase replaces R.notify with a mock
 SCHEDULED = '2026-11-04T10:00:00+01:00'
+
+# The script works in the machine's local time, and the times these tests expect are written in UTC+1. While this
+# module runs, the process zone is pinned to a fixed UTC+1 (a POSIX rule, so no tz database is needed), so the
+# results are the same on any machine, CI runners in UTC included; tearDownModule puts the original zone back.
+_SAVED_TZ = os.environ.get('TZ')
+
+
+def setUpModule():
+    os.environ['TZ'] = 'CET-1'
+    time.tzset()
+
+
+def tearDownModule():
+    if _SAVED_TZ is None:
+        os.environ.pop('TZ', None)
+    else:
+        os.environ['TZ'] = _SAVED_TZ
+    time.tzset()
 
 
 class RoutinesTestCase(unittest.TestCase):
@@ -562,7 +581,9 @@ class UsagePauseTickTest(ClockTestCase):
 
 
 class UsageResetsAtTest(unittest.TestCase):
-    NOW = R.parse_iso('2026-11-05T05:00:00+01:00')
+    @classmethod
+    def setUpClass(cls):
+        cls.NOW = R.parse_iso('2026-11-05T05:00:00+01:00')   # after setUpModule pinned the zone
 
     def at(self, text):
         found = R.usage_resets_at(text, self.NOW)

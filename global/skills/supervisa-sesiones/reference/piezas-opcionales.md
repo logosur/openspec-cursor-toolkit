@@ -13,7 +13,7 @@ falta, la función que da no existe: se dice así en el parte o en el informe y 
 | Módulo `openspec` | Changes, `tasks.md` y la orden `/cierra-sesion` | El trabajo sale de las reglas y de lo que cada sesión tiene entre manos |
 | Módulo `devtools` | Herramientas de desarrollo de la máquina | Las del proyecto |
 | Vigía externo | Avisa al desarrollador si el proceso de la supervisora muere | Lo descubre el desarrollador al abrirla |
-| Tarea programada de reanimación | Despierta una supervisora sin proceso, y una viva cuyo turno se cortó (límite de uso, error de la API) y lleva 45 min sin latido fuera de la guardia, en cuanto la cuenta vuelve a tener uso | Igual que la anterior |
+| Tarea programada de reanimación | Despierta una supervisora sin proceso, y una viva cuyo turno se cortó (límite de uso, error de la API) y lleva 45 min sin latido fuera de la guardia, y una viva cuyo cerrojo sigue en pausa por el límite de uso, en cuanto la cuenta vuelve a tener uso | Igual que la anterior |
 | Detector de devoluciones de trabajo | Reconoce textos que dejan trabajo al desarrollador (`HANDOFF`) | `IDLE` en guardia y la lectura del último mensaje |
 | Corredor de pruebas en la nube | Lanza suites fuera de la máquina | Se corren en local |
 | Lector de sesiones en la nube | `$L cloud` y señales `CLOUD` | Esas sesiones no se ven; se dice |

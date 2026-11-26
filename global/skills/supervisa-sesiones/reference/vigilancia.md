@@ -95,6 +95,7 @@ empiezo la escalera.
 | `WAITING`, `AWAITING` | Espera a una persona: una pregunta o un permiso. `WAITING` no salta mientras el desarrollador la lleva (`--away-after`, 20 min) | «Permisos y preguntas». Con `AWAITING`, miras antes si el desarrollador le escribió hace poco |
 | `CRASH` | Error de la API o caída del turno | Mensaje de reanudación desde la última micro-tarea verificada |
 | `CUT <id> limit\|api` | Cortada por el límite de uso o por la API, y ya puede seguir | Un mensaje a cada sesión cortada para que retome su encargo. Nunca se cierra por eso |
+| `USAGE <clave>` | Tu cerrojo sigue en pausa por el límite de uso y la cuenta ya tiene uso | `get_usage`, `$L beat --session <id> --state running` y seguir el ciclo desde F1. Solo justifica la pausa lo que espera a un tercero, con `--third-party` |
 | `GONE` | Murió su proceso con trabajo sin terminar | Mensaje de reanudación; si no vuelve, relevo |
 | `SUBAGENT_SILENT` | Un subagente tuyo calla a mitad de trabajo | Escalera, columna de subagente |
 | `REF` | Se movió una rama de integración | Verificar lo integrado y seguir con lo autorizado de F7 |

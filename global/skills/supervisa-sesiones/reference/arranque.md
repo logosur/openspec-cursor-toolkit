@@ -85,8 +85,8 @@ $L beat --session <id> --skill-seen   # tras cargar la skill (Skill o /supervisa
 - **Relevo:** por defecto sigue la que está. Solo si el desarrollador lo pide: le pides que se retire, esperas su
   confirmación o que caduque su latido, reclamas y reanudas su registro.
 - El cerrojo se toma solo con el script, que escribe dueño y cerrojo en la misma operación.
-- **Latido:** `$L beat --session <id> --phase <F> --round <n>`; `--state paused` solo si todo lo que queda espera a
-  otro.
+- **Latido:** `$L beat --session <id> --phase <F> --round <n>`; `--state paused --third-party "<qué y de quién>"` solo
+  si todo lo que queda espera a otro. El límite de uso no es motivo de pausa: con uso en la cuenta, `beat` la rechaza (9).
 
 ## F0b: argumentos y registro
 

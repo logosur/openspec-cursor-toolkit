@@ -8,7 +8,7 @@ import sys
 import time
 from datetime import datetime
 
-from . import backlog, census, lint, projects, session_roles, settings, util, workmode
+from . import backlog, census, lint, projects, providers, session_roles, settings, util, workmode
 
 
 TTL = {'running': 1800, 'paused': 7200}
@@ -122,6 +122,7 @@ def cmd_acquire(args):
             return 0
         if owner.get('session_id') == args.session:
             owner.update(state='running', heartbeat=util.now_iso())
+            clear_pause(owner)
             if args.title:
                 owner['title'] = args.title
             if args.registry:
@@ -152,6 +153,53 @@ def not_owner(key):
 
 
 SKILL_NOT_LOADED = 8   # `beat --skill-seen` without a load of the skill in the session's transcript
+PAUSE_REFUSED = 9      # `beat --state paused` without --third-party while the account has usage
+
+
+# ---------------------------------------------------------------- why a lock is paused
+# A supervisor may pause only when all that is left waits on a third party (`--third-party`). A pause for the usage
+# limit is recorded as such and lasts only while the account has no usage: `beat` refuses it once usage is back, and
+# the watcher (USAGE), `revive` (paused-limit) and the Stop hook push a limit pause back to work.
+PAUSE_THIRD_PARTY = 'third-party'
+PAUSE_LIMIT = 'limit'
+PAUSE_FIELDS = ('pause_cause', 'pause_why', 'paused_at')
+
+
+def pause_cause(owner):
+    """'third-party' or 'limit' for a paused lock, None for any other state. A paused lock without a cause (written
+    before the field existed) counts as a limit pause."""
+    if (owner or {}).get('state') != 'paused':
+        return None
+    return PAUSE_THIRD_PARTY if owner.get('pause_cause') == PAUSE_THIRD_PARTY else PAUSE_LIMIT
+
+
+def paused_for_limit(owner):
+    return pause_cause(owner) == PAUSE_LIMIT
+
+
+def clear_pause(owner):
+    for field in PAUSE_FIELDS:
+        owner.pop(field, None)
+
+
+def apply_pause(owner, cause, why=None):
+    """Record a pause with its cause; `paused_at` is set when a pause of that cause starts and kept while it lasts."""
+    same = pause_cause(owner) == cause and owner.get('paused_at')
+    owner['state'] = 'paused'
+    owner['pause_cause'] = cause
+    if not same:
+        owner['paused_at'] = util.now_iso()
+    if why:
+        owner['pause_why'] = why
+    else:
+        owner.pop('pause_why', None)
+
+
+def pause_refusal(key, owner):
+    return (f'PAUSE REFUSED {key}: la cuenta tiene uso ahora (lo dice el uso real de la cuenta, no la hora a la que se '
+            f'agotó el límite), así que el cerrojo sigue en «{owner.get("state")}». El límite de uso no es motivo de '
+            f'pausa: sigue el ciclo desde F1. Si lo único que queda espera a un tercero, dilo con '
+            f'--state paused --third-party "<qué espera y de quién>".')
 
 
 def skill_seen_refusal(key, session, floor):
@@ -164,8 +212,16 @@ def skill_seen_refusal(key, session, floor):
 
 def cmd_beat(args):
     project = projects.resolve(args.dir)
+    third_party = ' '.join((getattr(args, 'third_party', None) or '').split())
+    if getattr(args, 'third_party', None) is not None and (args.state != 'paused' or len(third_party) < backlog.BACKLOG_WHY_MIN):
+        print(f'USAGE: --state paused --third-party "<qué espera y de quién; {backlog.BACKLOG_WHY_MIN} caracteres o más>"',
+              file=sys.stderr)
+        return 2
     # before the flock: the transcript scan reads a file of up to hundreds of MB, and it does not need the lock
     proof = lint.skill_load_proof(args.session) if args.skill_seen and lint.skill_mtime() is not None else None
+    # also before the flock: the usage answer may come from the network (cached for a couple of minutes)
+    has_usage = providers.account_has_usage() if args.state == 'paused' and not third_party else None
+    refused_pause = False
     with Store() as store:
         owner = store.read(project['key'])
         if owner is None or owner.get('session_id') != args.session:
@@ -188,8 +244,15 @@ def cmd_beat(args):
                 store.write(project['key'], owner)  # the heartbeat (and a --no-work) still count
                 print(f'GUARD REFUSED {project["key"]}: {refusal}.', file=sys.stderr)
                 return 7
-        if args.state:
-            owner['state'] = args.state
+        if args.state == 'running':
+            owner['state'] = 'running'
+            clear_pause(owner)
+        elif args.state == 'paused' and third_party:
+            apply_pause(owner, PAUSE_THIRD_PARTY, third_party)
+        elif args.state == 'paused' and has_usage is True:
+            refused_pause = True  # the state stays as it is; the heartbeat and the other fields of this beat still count
+        elif args.state == 'paused':
+            apply_pause(owner, PAUSE_LIMIT)
         if args.phase is not None:
             owner['phase'] = args.phase
         if args.round is not None:
@@ -204,6 +267,8 @@ def cmd_beat(args):
                 # the marker is the proof the message gate and the Stop hook trust: only a load in the session's own
                 # transcript sets it. The heartbeat and the other fields of this beat still count.
                 store.write(project['key'], owner)
+                if refused_pause:
+                    print(pause_refusal(project['key'], owner), file=sys.stderr)
                 print(skill_seen_refusal(project['key'], args.session, when), file=sys.stderr)
                 return SKILL_NOT_LOADED
             mtime = lint.skill_mtime()
@@ -220,6 +285,10 @@ def cmd_beat(args):
                           f'se anota sin comprobar que la skill se cargó.', file=sys.stderr)
         store.write(project['key'], owner)
         print(f'BEAT {project["key"]}')
+    if refused_pause:
+        util.hook_log('hook.log', f'{project["key"]} {args.session} paused beat refused: the account has usage')
+        print(pause_refusal(project['key'], owner), file=sys.stderr)  # stdout goes to /dev/null
+        return PAUSE_REFUSED
     hint = no_mailbox_hint(project, owner)
     if hint:
         print(hint, file=sys.stderr)  # supervisors call `beat … >/dev/null`: stdout never reaches them

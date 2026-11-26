@@ -42,13 +42,14 @@ run without permission prompts, `supervision` lets one supervisor session per pr
 answers their questions with a decision panel, and `heavy-jobs` denies heavy commands (suites, builds, installs,
 emulators) that are not launched through its semaphore. `accounts` installs the session sync between Claude
 accounts and `account-switch`, which resumes the sessions a switch left stopped; they only run once you start
-the sync's service. The [main README](../../README.md#modules) has the table.
+the sync's service. `routines` installs the machine's own routine engine, which runs nothing until you add
+its timer. The [main README](../../README.md#modules) has the table.
 
 ## What each file turns on
 
 | Path | Effect |
 |---|---|
-| `override.yaml` | all seven modules: `openspec`, `core`, `devtools`, `sessions`, `supervision`, `heavy-jobs`, `accounts` |
+| `override.yaml` | all eight modules: `openspec`, `core`, `devtools`, `sessions`, `supervision`, `heavy-jobs`, `accounts`, `routines` |
 | `config/supervision.json` | the four message exceptions (`account_switch`, `project_resume`, `skill_reload`, `supervisor_revive`), and `~/.claude` as the folder whose sessions may send a skill reload or a revive |
 | `config/heavy-job.json` | two slots for compiling and tests; set what your machine can take |
 | `config/worktree-location.json`, `config/test-account.json` | the worktree root and the notes folder test users must never be written to |
@@ -72,17 +73,17 @@ authorised, so `try.sh` covers both anyway. To grant them on your machine, add t
 
 ## Where "everything" ends
 
-Some options act together with pieces the toolkit does not ship, because they belong to one machine or one app
-(the module manifests list them under `project_provided`). Without them those options are installed but do nothing,
-and the pieces say so instead of failing:
+Some options act together with pieces of other modules, of the desktop app or of the machine (the module manifests
+list them under `project_provided`). Without them those options are installed but do nothing, and the pieces say so
+instead of failing:
 
 | Option | Needs | Without it |
 |---|---|---|
 | `account_switch` message exception | the `accounts` module, with the `claude-sessions-sync` service started (it tells `account-switch` about each switch) | the marker is plain text |
-| `project_resume` message exception, project pauses in heavy-job | a `project-pause` script | the marker is plain text; nothing is paused |
-| `supervisor_revive` message exception | something that runs `supervisor-lock revive --plan` and sends the texts it prints (a scheduled task of the desktop app) | run the plan by hand; the gate lets the marker through only for a supervisor the plan named |
-| supervisor-lock `cloud` commands, heavy-job's cloud guard (exit 76) | a `cloud-tests` script | `CLOUD-UNAVAILABLE`; heavy-job runs everything locally |
-| notifications and nudges of the supervisor watchdog, the second step of `supervisor-stop-gate` | `routines`, `session-nudge`, `handoff-guard` | skipped |
+| `project_resume` message exception, project pauses in heavy-job | `project-pause` (module `supervision`) | the marker is plain text; nothing is paused |
+| `supervisor_revive` message exception | a scheduled task of the desktop app with the prompt `scheduled-tasks/reanimar-supervisoras/SKILL.md` (module `supervision`), which runs `supervisor-lock revive` and sends the texts it prints | run the plan by hand; the gate lets the marker through only for a supervisor the plan named |
+| supervisor-lock `cloud` commands, heavy-job's cloud guard (exit 76) | `cloud-tests` (module `heavy-jobs`) and a project's `.claude/cloud-tests.json` | `CLOUD-UNAVAILABLE`; heavy-job runs everything locally |
+| notifications and nudges of the supervisor watchdog, the second step of `supervisor-stop-gate` | `routines` (module `routines`), `session-nudge` and `handoff-guard` (module `supervision`) | skipped |
 | the `sessions` gates | the Claude desktop app's session tools | they never fire |
 
 `skill_reload` needs nothing more: a session started in `~/.claude` can tell every supervisor that has not read the

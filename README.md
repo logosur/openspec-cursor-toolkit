@@ -58,10 +58,10 @@ What the installer guarantees:
 
 ## Modules
 
-`openspec`, `core` and `devtools` are installed by default. `sessions`, `supervision`, `heavy-jobs` and `accounts` are
-opt-in, because they change what sessions do unattended (`sessions` makes started sessions run without
+`openspec`, `core` and `devtools` are installed by default. `sessions`, `supervision`, `heavy-jobs`, `accounts` and
+`routines` are opt-in, because they change what sessions do unattended (`sessions` makes started sessions run without
 permission prompts) or what runs on the machine: choose them with
-`--modules openspec,core,devtools,sessions,supervision,heavy-jobs,accounts` or in
+`--modules openspec,core,devtools,sessions,supervision,heavy-jobs,accounts,routines` or in
 the override's `modules`. A later `install` without `--modules` keeps the modules of the last install; to drop
 one, name the ones you want.
 
@@ -71,9 +71,10 @@ one, name the ones you want.
 | `core` | `commit-authorship-gate`, `process-kill-gate`, `worktree-location-gate` + `worktree-location`, the config helper, the rules that explain them, the `panel-de-decision` skill and the global `CLAUDE.md` block |
 | `devtools` | `port-lease` (a fixed block of local ports per project) and `test-account` (private store of the test users sessions create), with their rules |
 | `sessions` | for the Claude desktop app: `start-session-bypass-gate` (sessions started to work now are born in bypassPermissions: one approval card for the caller instead of one per session) and `spawn-task-duplicate-gate` (denies a proposal card that repeats one already offered for the same project) |
-| `supervision` | the `supervisa-sesiones` skill and command (one supervisor per project: census, write turns, watcher, decisions, closing; it integrates, deploys or archives only with written authorisation) with the rules it relies on, `ask-queue` (decisions left for the developer) with the hook that shows each one in the session that queued it, and `cross-project-message-gate` (a session only messages sessions of its own project; every exception is off until configured) |
-| `heavy-jobs` | `heavy-job` (one semaphore for the machine's suites, builds, installs, emulators and models; set `default_slots` for the machine) and `heavy-job-gate`, which denies a heavy command launched outside it |
+| `supervision` | the `supervisa-sesiones` skill and command (one supervisor per project: census, write turns, watcher, decisions, closing; it integrates, deploys or archives only with written authorisation) with the rules it relies on, `ask-queue` (decisions left for the developer) with the hook that shows each one in the session that queued it, `cross-project-message-gate` (a session only messages sessions of its own project; every exception is off until configured), `project-pause` (keeps every local session of a paused project still until the developer resumes it), `session-nudge` (wakes sessions that are stuck or that handed their work back), `handoff-guard` (stops a session that ends or asks while it still has work it can do) and the prompt of the app task `reanimar-supervisoras`, which revives supervisors whose process died or whose turn the usage limit cut |
+| `heavy-jobs` | `heavy-job` (one semaphore for the machine's suites, builds, installs, emulators and models; set `default_slots` for the machine) `heavy-job-gate`, which denies a heavy command launched outside it, and `cloud-tests`, which runs the suites a project declares in `.claude/cloud-tests.json` in a Claude Code cloud session instead of the local slots |
 | `accounts` | for several Claude accounts on one machine: `claude-sessions-sync` copies the desktop app's Code-tab session records between every account and organisation, so after a switch the sidebar lists the same sessions; `account-switch` (with its `SessionStart` hook, its rule and the app task `account-switch-resume`) notices the switch, asks for the CLI and routines logins that are needed and hands the sessions the old account stopped to one session that resumes them. The installer writes no service: `python3 ~/.claude/scripts/claude-sessions-sync install` starts the sync as a `systemd --user` unit |
+| `routines` | scheduled routines that belong to the machine, not to an account: a registry of prompts with a cron schedule, run by the Claude Code CLI under `dontAsk` with only the permission profiles each routine declares (profiles live in its config piece), `routines notify` for desktop notices, and a login with the CLI's own long-lived token. The installer writes no timer: a `systemd --user` timer that runs `routines tick` every 5 minutes starts them |
 
 Manifests are in `global/modules/<name>.yaml`; the files they install are in `global/` (and, for
 `openspec`, in `.claude/`). The rule texts of `core` and `devtools` are written in Spanish, like the
@@ -142,11 +143,9 @@ python3 scripts/privacy-check.py --range origin/main..HEAD       # a branch's co
 
 ## What is not in the toolkit, and why
 
-- **Account switching, session nudging, a cloud test runner, project pauses, a handoff guard and a
-  routines engine**: the first three handle session tokens, an app socket or OAuth credentials, the
-  others belong to one machine's way of working. The pieces that name them treat them as optional and
-  work without them.
-- Pieces that still carry machine values (a job semaphore, deploy gates, scheduled routines): listed one by one, with what each needs to enter, in
+- **One machine's routines and app tasks** (their prompts and schedules) and its own browser launcher: personal by
+  nature. The `routines` module ships the engine that runs routines, with no routine in it.
+- Pieces that still carry machine values (deploy gates, a desktop engine guard): listed one by one, with what each needs to enter, in
   `openspec/changes/global-claude-toolkit/evidence/core-scope.md`.
 - **Third-party skills** are never redistributed; install them from their own source.
 

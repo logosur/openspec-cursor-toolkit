@@ -1,0 +1,27 @@
+name: routines
+summary: >-
+  Scheduled routines that belong to the machine, not to a Claude account: a registry of prompts with a cron
+  schedule, run by the Claude Code CLI under `dontAsk` with only the permissions of the profiles each routine
+  declares, a desktop notice for what needs the developer, and the CLI's own long-lived token, so a switch of
+  account in the desktop app does not stop them.
+depends: [core]
+requires:
+  python: "3.10"
+  os: linux
+  binaries: [python3]
+optional:
+  binaries:
+    claude: runs each routine; without it `tick` records the run as failed
+    systemd-run: each due routine and each login alert runs as a transient user unit; without it nothing is started
+    notify-send: desktop notices (`routines notify`) and the login alert button (libnotify)
+    gnome-terminal: the terminal `routines login` opens from the alert; without it, run `routines login` by hand
+notes:
+  - "Opt-in. The installer writes no timer. To run due routines every 5 minutes, add a systemd --user timer and service whose ExecStart is `/usr/bin/python3 %h/.claude/scripts/routines tick` (Type=oneshot, OnBootSec=2min, OnUnitActiveSec=5min), then `systemctl --user enable --now <name>.timer`."
+  - "Permission profiles live in the routines config piece (profiles, profile_deny, profile_lift, default_profiles). The piece merges by key, so a machine's own `profiles` replaces the shipped examples as a whole; a profile a routine names and the config does not define adds nothing and the run report says so."
+  - "vault_dir, when set, adds a notes step to every run prompt and lets the routine edit that folder's status notes; empty, no notes step and no extra permission."
+  - "`routines import` adopts app scheduled tasks into the registry; import_skip_ids lists the tasks that must stay in the app."
+  - "Runtime state (registry, runs, token, locks) lives in ~/.claude/routines/ and is never installed or compared."
+files:
+  - {src: global/scripts/routines, dest: scripts/routines, mode: "0755"}
+  - {src: global/rules/rutinas-globales.md, dest: rules/rutinas-globales.md}
+config: [routines]

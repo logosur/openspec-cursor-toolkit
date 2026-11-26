@@ -1,0 +1,902 @@
+#!/usr/bin/env python3
+"""session-nudge: wake a desktop-app Claude session that stopped, from outside the app.
+
+Why: a session stops when it waits on a question nobody answers or when a usage limit kills its turn, and nothing
+restarts it. The in-session SendMessage tool can only be used by another session. This script does the same thing
+from a plain process, so a systemd timer (through `supervisor-lock watchdog --nudge`) can do it.
+
+How (read from the bundled claude binary 2.1.309, then proved on one session on 2026-11-08):
+  * Every live session registers ~/.claude/sessions/<pid>.json and a key file <pid>.<hash>.key with its peerToken,
+    and listens on a unix socket (messagingSocketPath in the registry entry).
+  * Protocol, newline-delimited json: line 1 {"type":"auth","token":<peerToken>}, line 2
+    {"type":"user","message":{"role":"user","content":TEXT},"priority":"next","msg_id":ID}. The server sends no
+    reply, so delivery is only visible in the recipient transcript (`send --verify` polls it).
+  * A recipient in bypassPermissions HOLDS (for the developer's approval) a message whose sender is not itself in
+    bypass mode. This script is not a session and never claims a mode (no from-mode attribute): forging it would
+    defeat that app guard. So a bypass recipient keeps the nudge for the developer, by design.
+  * Because the socket sends no reply, `stuck --send` verifies every nudge in the recipient transcript (marker +
+    `tail_has`, up to VERIFY_S s, $SESSION_NUDGE_VERIFY_S overrides). Three outcomes, in nudges.log and the output:
+    SENT (seen in the transcript), HELD (the socket took it but the transcript never showed it: a bypass recipient
+    holds it for the developer, so nobody was woken) and FAILED (socket error: retried next run). A HELD key is
+    recorded in the state like a sent one, plus an `H:<key>` marker, so that event is never re-sent (the held
+    message is still pending in the app; re-sending only piles up duplicates, not even a question's 2 h repeat).
+    A HELD attempt uses --max budget, does not count in `nudged`, and the run lasts at most --max x VERIFY_S s.
+  * A sender that is a descendant of the recipient counts as "self", so a test from inside the target proves nothing.
+  * A session whose process died has no socket: it cannot be nudged (only reopened in the app).
+
+  session-nudge send TARGET --text T [--verify S] [--dry-run]
+        TARGET is a local_ id (app), a CLI session id (uuid) or a pid. Prints SENT or the reason it was not.
+  session-nudge stuck [--min-minutes 15] [--send] [--max 6] [--json]
+        List live sessions that stopped: QUESTION (an AskUserQuestion nobody answered for >= min minutes), LIMIT
+        (the turn died on a usage limit and either the reset time it named has passed or the account already has
+        usage left again: Claude can renew a window before the time the error named, as on 2026-11-11, so the
+        account's usage is asked with the optional account-switch piece's helpers, only when the CLI and the app are
+        in the same organization), APIERR (the turn died on another API error:
+        retried after 10 min, at most 3 times in a row), HANDOFF (the turn ended handing work back to the
+        developer, judged by the optional sibling `handoff-guard match`) and OPEN_DIALOG (the same open AskUserQuestion as
+        QUESTION: its questions are copied to `ask-queue`, never answered). With --send, act on the due ones: a
+        question nudge at most once per session per 2 h, a limit nudge once per limit event, a handoff nudge once
+        per final message, an APIERR nudge once per error, an open dialog is queued once (in the optional
+        `ask-queue`), at most --max nudges per run. Output: one line per candidate (`SENT`, `HELD`, `DUE` or `WAIT` first) and, last,
+        `nudged N session(s), M held`. --json adds `"sent"` and `"held"` per candidate.
+        A last message that looks like a cut but fits no kind is logged to unclassified.log (with --send).
+  session-nudge scan [--min-minutes 15] [--json]
+        Same detection as `stuck`, but prints what a `stuck --send` would do now and writes nothing at all.
+
+Configuration (checked, a missing or wrong value keeps the default; see global/config/):
+  piece `supervision`: `questions_session_titles` (sessions with such a title are never nudged: a supervisor's
+  question mailbox waits for the developer by design), `app_sessions_dir` (where the app keeps its session records)
+  and `deploy_rule` (the rule file named in the handoff nudge).
+  piece `session-nudge`: `handoff_text` (the handoff nudge; `{what}` is what was handed back, `{rule}` the path of the
+  deploy rule).
+Optional siblings (absent: that part is skipped, nothing crashes): handoff-guard, ask-queue, account-switch,
+project-pause.
+
+Environment overrides (tests): SESSION_NUDGE_HOME, SESSION_NUDGE_SESSIONS_DIR, SESSION_NUDGE_APP_GLOB,
+SESSION_NUDGE_PROJECTS_DIR, SESSION_NUDGE_HANDOFF_GUARD, SESSION_NUDGE_ASK_QUEUE, SESSION_NUDGE_VERIFY_S,
+SESSION_NUDGE_ACCOUNT_SWITCH, PROJECT_PAUSE_BIN.
+Exit codes: 0 ok, 1 not delivered (send), 2 usage / unknown target.
+"""
+import argparse
+import contextlib
+import fcntl
+import glob
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+import unicodedata
+import uuid
+from datetime import datetime, timedelta, timezone
+
+QUESTION_EVERY = 7200       # s between question nudges to the same session
+LIMIT_GRACE = 60            # s after the reset time before the limit nudge
+LIMIT_MAX_AGE = 3 * 86400   # a limit stop older than this is not nudged any more
+TAIL_BYTES = 262144
+APIERR_COOLDOWN = 600       # s after another API error before the retry nudge
+APIERR_MAX_STREAK = 3       # retry nudges in a row (no progress between them) before giving up on a session
+OPEN_DIALOG_AGE = 900       # s an AskUserQuestion stays open before its questions are copied to ask-queue
+ASK_QUEUE_TIMEOUT = 30      # s for one `ask-queue add`
+CUT_LIKE = re.compile(r'\blimit\b|\b429\b|\bresets\b', re.I)
+CUT_LIKE_MAX_CHARS = 300    # a longer final message is a report that happens to say «limit», not a cut
+HANDOFF_GUARD_TIMEOUT = 10  # s for one `handoff-guard match`
+VERIFY_S = 8                # s `stuck --send` polls the recipient transcript for a nudge before calling it HELD
+DELIVERED = 'delivered (seen in the transcript)'
+
+QUESTION_TEXT = (
+    '[session-nudge] Tu pregunta al desarrollador lleva {minutes} min sin respuesta. Si la respuesta sale de lo ya '
+    'documentado (decisiones del proyecto, reglas, configuracion), decidela anotando la fuente. Si no, sigue con lo '
+    'que no dependa de ella y deja la pregunta anotada. Este aviso no autoriza commit, push, merge ni despliegue.')
+# Neutral defaults of the toolkit config pieces this script reads (the user's override sets the machine's values).
+SUPERVISION_DEFAULTS = {
+    'questions_session_titles': ['sesión de preguntas', 'preguntas de la supervisión', 'buzón de preguntas'],
+    'app_sessions_dir': '~/.config/Claude/claude-code-sessions',
+    'deploy_rule': 'despliegue-y-limites-duros.md',
+}
+NUDGE_DEFAULTS = {
+    'handoff_text': (
+        '[session-nudge] Tu ultimo mensaje devuelve trabajo al desarrollador ({what}). No es suyo: hazlo tu con los '
+        'medios de prueba del proyecto (usuario de seed o e2e, navegador, emulador lanzado con heavy-job), segun la '
+        'regla de despliegue y limites duros del proyecto ({rule}). Solo un limite duro va a '
+        '~/.claude/scripts/ask-queue add, y aun asi sigues con lo que no dependa de el. Este aviso no autoriza '
+        'commit, push, merge ni despliegue.'),
+}
+APIERR_TEXT = (
+    '[session-nudge] Tu turno se corto por un error de la API ({detail}), no por tu trabajo: continua donde lo '
+    'dejaste. Este aviso no autoriza commit, push, merge ni despliegue.')
+LIMIT_TEXT = (
+    '[session-nudge] Se renovo el uso. Tu turno se corto por el limite de uso: retoma lo que estabas haciendo '
+    'donde lo dejaste. Este aviso no autoriza commit, push, merge ni despliegue.')
+
+
+def _toolkit_config(piece, defaults):
+    """The checked config piece (a wrong value keeps the default, a broken file never raises)."""
+    try:
+        lib = os.path.join(os.path.dirname(os.path.realpath(__file__)), "lib")
+        if lib not in sys.path:
+            sys.path.insert(0, lib)
+        from toolkit_config import load_checked as checked
+        return checked(piece, defaults)
+    except Exception:
+        return dict(defaults)
+
+
+def supervision_config():
+    return _toolkit_config('supervision', SUPERVISION_DEFAULTS)
+
+
+def fold_text(text):
+    """Lower case without accents, to compare titles the way the supervisor does."""
+    decomposed = unicodedata.normalize('NFKD', str(text or ''))
+    return ''.join(c for c in decomposed if not unicodedata.combining(c)).lower()
+
+
+def is_questions_session(name):
+    """True when a session title names a supervisor's question mailbox (config `questions_session_titles`): it waits
+    for the developer by design, so waking it up does nothing useful."""
+    title = fold_text(name)
+    return any(fold_text(mark) in title for mark in supervision_config()['questions_session_titles'])
+
+
+def handoff_text(what):
+    """The handoff nudge: config `handoff_text` with `{what}` and `{rule}` filled in (plain replace: a stray brace in
+    the user's text can never raise)."""
+    rule = '~/.claude/rules/' + supervision_config()['deploy_rule']
+    text = _toolkit_config('session-nudge', NUDGE_DEFAULTS)['handoff_text']
+    return text.replace('{what}', what).replace('{rule}', rule)
+
+
+def home():
+    return os.path.expanduser(os.environ.get('SESSION_NUDGE_HOME', '~/.claude/state/session-nudge'))
+
+
+def sessions_dir():
+    return os.path.expanduser(os.environ.get('SESSION_NUDGE_SESSIONS_DIR', '~/.claude/sessions'))
+
+
+def app_glob():
+    return os.path.expanduser(os.environ.get(
+        'SESSION_NUDGE_APP_GLOB',
+        os.path.join(supervision_config()['app_sessions_dir'], '*', '*', 'local_*.json')))
+
+
+def verify_s():
+    """Verify window of `stuck --send`: $SESSION_NUDGE_VERIFY_S (tests) or VERIFY_S; never below 0.1 s, since 0 would
+    mean «no verification» and make every held nudge look sent."""
+    try:
+        return max(0.1, float(os.environ.get('SESSION_NUDGE_VERIFY_S', VERIFY_S)))
+    except ValueError:
+        return float(VERIFY_S)
+
+
+def projects_dir():
+    return os.path.expanduser(os.environ.get('SESSION_NUDGE_PROJECTS_DIR', '~/.claude/projects'))
+
+
+def load_json(path):
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def pid_alive(pid):
+    return isinstance(pid, int) and os.path.exists(f'/proc/{pid}')
+
+
+# ---------------------------------------------------------------- registry
+
+def live_sessions():
+    """Registry entries (dict) of sessions whose process is alive, with `_pid_file` set."""
+    rows = []
+    for path in sorted(glob.glob(os.path.join(sessions_dir(), '*.json'))):
+        reg = load_json(path)
+        if reg and pid_alive(reg.get('pid')) and reg.get('sessionId'):
+            reg['_path'] = path
+            rows.append(reg)
+    return rows
+
+
+def app_records():
+    """local_ id -> app record (the same session may sit under several account folders: the newest wins)."""
+    out = {}
+    for path in glob.glob(app_glob()):
+        rec = load_json(path)
+        if rec and rec.get('sessionId'):
+            old = out.get(rec['sessionId'])
+            if old is None or (rec.get('lastActivityAt') or 0) >= (old.get('lastActivityAt') or 0):
+                out[rec['sessionId']] = rec
+    return out
+
+
+def find_target(target, rows):
+    for reg in rows:
+        if target in (reg.get('sessionId'), reg.get('hostSessionId'), str(reg.get('pid'))):
+            return reg
+    return None
+
+
+def peer_token(reg):
+    """The peerToken of this very process (a pid reused by another process has another procStart)."""
+    base = os.path.splitext(reg['_path'])[0]
+    for key_path in sorted(glob.glob(base + '.*.key')):
+        key = load_json(key_path)
+        if key and key.get('peerToken') and key.get('procStart') == reg.get('procStart'):
+            return key['peerToken']
+    return None
+
+
+# ---------------------------------------------------------------- sending
+
+def envelope(text, mode_bypass=False):
+    """The cross-session envelope. It never asserts a from-mode: claiming bypass would forge the app's sender check.
+    mode_bypass is kept only for callers and is ignored."""
+    text = text.replace('</cross-session-message>', '')
+    return f'<cross-session-message from-name="session-nudge">\n{text}\n</cross-session-message>'
+
+
+def transcript_path(reg):
+    cli = reg['sessionId']
+    slug = re.sub(r'[^A-Za-z0-9-]', '-', reg.get('cwd') or '')
+    path = os.path.join(projects_dir(), slug, cli + '.jsonl')
+    if os.path.isfile(path):
+        return path
+    found = sorted(glob.glob(os.path.join(glob.escape(projects_dir()), '*', glob.escape(cli) + '.jsonl')))
+    return found[0] if found else None
+
+
+def tail_has(path, needle, since_size):
+    try:
+        with open(path, 'rb') as fh:
+            fh.seek(max(0, since_size))
+            return needle.encode() in fh.read()
+    except OSError:
+        return False
+
+
+def deliver(reg, text, bypass, verify=0):
+    """Send over the session socket. Returns (ok, detail). ok=True means the bytes were accepted by the socket;
+    detail says whether the transcript confirmed it when verify > 0."""
+    token = peer_token(reg)
+    sock_path = reg.get('messagingSocketPath')
+    if not token:
+        return False, 'no peer token for this process'
+    if not sock_path or not os.path.exists(sock_path):
+        return False, 'no messaging socket'
+    marker = uuid.uuid4().hex[:12]
+    text = f'{text} [{marker}]' if verify else text
+    msg = {'type': 'user', 'message': {'role': 'user', 'content': envelope(text, bypass)},
+           'priority': 'next', 'msg_id': 'nudge-' + marker}
+    transcript = transcript_path(reg) if verify else None
+    size = os.path.getsize(transcript) if transcript and os.path.exists(transcript) else 0
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(5)
+    try:
+        sock.connect(sock_path)
+        sock.sendall((json.dumps({'type': 'auth', 'token': token}) + '\n').encode())
+        sock.sendall((json.dumps(msg) + '\n').encode())
+    except OSError as err:
+        return False, f'socket error: {err}'
+    finally:
+        sock.close()
+    if not verify:
+        return True, 'sent'
+    deadline = time.time() + verify
+    while time.time() < deadline:
+        if transcript and tail_has(transcript, marker, size):
+            return True, DELIVERED
+        time.sleep(0.5)
+    return True, 'sent, not seen in the transcript yet'
+
+
+def cmd_send(args):
+    rows = live_sessions()
+    reg = find_target(args.target, rows)
+    if not reg:
+        print(f'NOT-SENT {args.target}: no live session with that id', file=sys.stderr)
+        return 2
+    rec = app_records().get(reg.get('hostSessionId')) or {}
+    bypass = rec.get('permissionMode') == 'bypassPermissions'
+    if args.dry_run:
+        print(f'DRY-RUN {reg["sessionId"]} pid={reg["pid"]} bypass={bypass}\n{envelope(args.text, bypass)}')
+        return 0
+    ok, detail = deliver(reg, args.text, bypass, args.verify)
+    print(f'{"SENT" if ok else "NOT-SENT"} {reg["sessionId"]} {detail}')
+    return 0 if ok else 1
+
+
+# ---------------------------------------------------------------- transcripts
+
+def parse_ts(stamp):
+    try:
+        return datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp()
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def tail_records(path):
+    """assistant/user records of the last 256 KB of a transcript (grown up to 64x when one record is bigger)."""
+    try:
+        size = os.stat(path).st_size
+    except OSError:
+        return []
+    recs = []
+    for factor in (1, 4, 16, 64):
+        start = max(0, size - TAIL_BYTES * factor)
+        try:
+            with open(path, 'rb') as fh:
+                fh.seek(start)
+                lines = fh.read().split(b'\n')
+        except OSError:
+            return []
+        if start > 0:
+            lines = lines[1:]
+        recs = []
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict) and rec.get('type') in ('assistant', 'user'):
+                rec['_ts'] = parse_ts(rec.get('timestamp')) or os.stat(path).st_mtime
+                recs.append(rec)
+        if recs or start == 0:
+            break
+    return recs
+
+
+def items(rec):
+    content = (rec.get('message') or {}).get('content')
+    return [it for it in content if isinstance(it, dict)] if isinstance(content, list) else []
+
+
+def unanswered_question(recs):
+    """Epoch of the newest assistant record when it holds an AskUserQuestion with no tool_result after it."""
+    last = max((i for i, r in enumerate(recs) if r['type'] == 'assistant'), default=None)
+    if last is None:
+        return None
+    answered = {it.get('tool_use_id') for r in recs[last + 1:] if r['type'] == 'user'
+                for it in items(r) if it.get('type') == 'tool_result'}
+    for it in items(recs[last]):
+        if it.get('type') == 'tool_use' and it.get('name') == 'AskUserQuestion' and it.get('id') not in answered:
+            return recs[last]['_ts']
+    return None
+
+
+def open_dialogs(recs):
+    """(epoch, [tool_use item, ...]) of the AskUserQuestion calls of the newest assistant record that have no
+    tool_result after it, or None."""
+    last = max((i for i, r in enumerate(recs) if r['type'] == 'assistant'), default=None)
+    if last is None:
+        return None
+    answered = {it.get('tool_use_id') for r in recs[last + 1:] if r['type'] == 'user'
+                for it in items(r) if it.get('type') == 'tool_result'}
+    calls = [it for it in items(recs[last]) if it.get('type') == 'tool_use' and it.get('name') == 'AskUserQuestion'
+             and it.get('id') not in answered]
+    return (recs[last]['_ts'], calls) if calls else None
+
+
+def dialog_questions(call):
+    """[(question text, default)] of one AskUserQuestion call: the default is the first option's label, or
+    «No hacerlo» when the question has no options."""
+    out = []
+    questions = (call.get('input') or {}).get('questions')
+    for q in questions if isinstance(questions, list) else []:
+        if not isinstance(q, dict) or not str(q.get('question') or '').strip():
+            continue
+        labels = [str(o.get('label') if isinstance(o, dict) else o).strip()
+                  for o in q.get('options') or [] if (o.get('label') if isinstance(o, dict) else o)]
+        text = str(q['question']).strip()
+        if labels:
+            text += '\n\nOpciones: ' + ' | '.join(labels)
+        out.append((text, labels[0] if labels else 'No hacerlo'))
+    return out
+
+
+def ask_queue_path():
+    return os.path.expanduser(os.environ.get('SESSION_NUDGE_ASK_QUEUE', '~/.claude/scripts/ask-queue'))
+
+
+def queue_dialog(cand):
+    """Copy each question of an open dialog to ask-queue. (ok, detail). Stable keys make a retry after a partial
+    failure safe: ask-queue never opens a second item for the same key."""
+    path = ask_queue_path()
+    if not os.path.isfile(path):
+        return False, f'ask-queue not found at {path}'
+    added = 0
+    for n, (call_id, question, default) in enumerate(cand['questions']):
+        cmd = [path, 'add', '--project', cand['reg'].get('cwd') or '', '--question', question, '--default', default,
+               '--why', 'diálogo abierto sin respuesta', '--blocks', 'nada', '--session', cand['cli'],
+               '--key', f'open-dialog:{cand["cli"]}:{call_id}:{n}']
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=ASK_QUEUE_TIMEOUT)
+        except (OSError, subprocess.SubprocessError) as err:
+            return False, f'ask-queue failed after {added} question(s): {err}'
+        if res.returncode != 0:
+            return False, f'ask-queue exit {res.returncode} after {added} question(s): {res.stderr.strip()[:200]}'
+        added += 1
+    return True, f'{added} question(s) copied to ask-queue'
+
+
+RESET = re.compile(r'resets\s+(?:(?P<mon>[A-Z][a-z]{2})\w*\s+(?P<day>\d{1,2}),\s*)?'
+                   r'(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ap>[ap]m)\s*\((?P<tz>[^)]+)\)')
+MONTHS = {m: i for i, m in enumerate(
+    ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'], 1)}
+
+
+def reset_epoch(text, stamp):
+    """Epoch of the reset an API usage-limit message names (`... resets 5pm (<IANA zone>)`), given when the error was
+    written (stamp, epoch s), or None. Accepts a time of day with minutes (`1:30am`) or with a date (`Nov 5, 2am`)."""
+    found = RESET.search(text or '')
+    if not found:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        zone = ZoneInfo(found['tz'].strip())
+    except Exception:  # unknown zone name or no tzdata
+        return None
+    hour = int(found['h']) % 12 + (12 if found['ap'] == 'pm' else 0)
+    minute = int(found['m'] or 0)
+    base = datetime.fromtimestamp(stamp, zone)
+    if found['mon']:
+        month = MONTHS.get(found['mon'])
+        if not month:
+            return None
+        try:
+            when = base.replace(month=month, day=int(found['day']), hour=hour, minute=minute, second=0, microsecond=0)
+        except ValueError:
+            return None
+        if when < base - timedelta(days=1):
+            when = when.replace(year=base.year + 1)
+        return when.timestamp()
+    when = base.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if when <= base:
+        when += timedelta(days=1)
+    return when.timestamp()
+
+
+def limit_stop(recs):
+    """(error epoch, reset epoch or None, text) when the newest record is a rate-limit API error, else None."""
+    if not recs:
+        return None
+    last = recs[-1]
+    if last['type'] != 'assistant' or not last.get('isApiErrorMessage') or last.get('error') != 'rate_limit':
+        return None
+    text = next((it.get('text') for it in items(last) if it.get('type') == 'text'), '') or ''
+    return last['_ts'], reset_epoch(text, last['_ts']), text.strip()
+
+
+def limit_window(recs):
+    """The window a rate-limit error names (rate_limit_info.rateLimitType: five_hour, seven_day...), or None."""
+    info = ((recs[-1].get('apiErrorParams') or {}).get('rate_limit_info') or {}) if recs else {}
+    return info.get('rateLimitType') if isinstance(info, dict) else None
+
+
+def account_switch_path():
+    return os.path.expanduser(os.environ.get('SESSION_NUDGE_ACCOUNT_SWITCH', '~/.claude/scripts/account-switch'))
+
+
+_USAGE = {}  # account-switch path -> usage answer or None: asked once per run, and only if a limit stop waits
+
+
+def account_usage():
+    """The usage windows of the app's account (GET /api/oauth/usage through account-switch's helpers), or None when
+    they cannot be told: account-switch missing or failing, no answer, or the CLI logged in to another organization
+    than the app (the answer would then be another account's)."""
+    path = account_switch_path()
+    if path not in _USAGE:
+        _USAGE[path] = None
+        try:
+            if not os.path.isfile(path):  # account-switch is optional: without it the stated reset time applies
+                return None
+            import importlib.machinery
+            import importlib.util
+            loader = importlib.machinery.SourceFileLoader('account_switch_helpers', path)
+            spec = importlib.util.spec_from_loader('account_switch_helpers', loader)
+            acct = importlib.util.module_from_spec(spec)
+            loader.exec_module(acct)
+            app_org = (acct.load(acct.STATE, {}) or {}).get('org')
+            if app_org and acct.cli_org() == app_org:
+                _USAGE[path] = acct.usage(), acct.usage_limit
+        except Exception:  # an unreadable helper only means «cannot tell»: the stated reset time still applies
+            _USAGE[path] = None
+    return _USAGE[path]
+
+
+def account_has_usage(window):
+    """True when the app's account demonstrably has usage left in the window a limit error named (five_hour when
+    it named none) and in its five-hour and weekly windows. False when it cannot be told."""
+    found = account_usage()
+    if not found or not isinstance(found[0], dict):
+        return False
+    data, usage_limit = found
+    try:
+        if usage_limit(data):
+            return False
+    except Exception:
+        return False
+    slot = data.get(window or 'five_hour')
+    return isinstance(slot, dict) and (slot.get('utilization') or 0) < 100
+
+
+def api_error_stop(recs):
+    """(error epoch, text) when the newest record is an API error that is not a rate limit (overloaded, 5xx,
+    connection error...), else None."""
+    if not recs:
+        return None
+    last = recs[-1]
+    if last['type'] != 'assistant' or not last.get('isApiErrorMessage') or last.get('error') == 'rate_limit':
+        return None
+    text = next((it.get('text') for it in items(last) if it.get('type') == 'text'), '') or ''
+    return last['_ts'], (text.strip() or str(last.get('error') or 'error'))
+
+
+def apierr_streak(state, cli, stamp, recs):
+    """How many retry nudges this session already got in a row for the API errors before `stamp`: a retry that
+    was followed by a real assistant message (progress) before the next error breaks the chain."""
+    nudges = sorted(((int(k.rsplit(':', 1)[1]), v) for k, v in state.items() if k.startswith(f'a:{cli}:')
+                     and int(k.rsplit(':', 1)[1]) < int(stamp)), reverse=True)
+    streak, boundary = 0, stamp
+    for err_stamp, nudged_at in nudges:
+        progress = any(r['type'] == 'assistant' and not r.get('isApiErrorMessage') and nudged_at < r['_ts'] < boundary
+                       for r in recs)
+        if progress:
+            break
+        streak += 1
+        boundary = err_stamp
+    return streak
+
+
+def cut_like(recs):
+    """Text of the newest record when it looks like a cut (an API error, or a short message saying limit, 429 or
+    resets), else None."""
+    if not recs or recs[-1]['type'] != 'assistant':
+        return None
+    last = recs[-1]
+    its = items(last)
+    text = '\n'.join(it.get('text') or '' for it in its if it.get('type') == 'text').strip()
+    if last.get('isApiErrorMessage'):
+        return text or str(last.get('error') or 'isApiErrorMessage')
+    if text and len(text) <= CUT_LIKE_MAX_CHARS and CUT_LIKE.search(text) \
+            and not any(it.get('type') == 'tool_use' for it in its):
+        return text
+    return None
+
+
+def handoff_guard_path():
+    return os.path.expanduser(os.environ.get('SESSION_NUDGE_HANDOFF_GUARD', '~/.claude/scripts/handoff-guard'))
+
+
+def handoff_match(text):
+    """`handoff-guard match` on the text: the first `(category, fragment)` hit, or None. A missing, slow or
+    failing handoff-guard counts as «no match»."""
+    path = handoff_guard_path()
+    if not text.strip() or not os.path.isfile(path):
+        return None
+    try:
+        res = subprocess.run([path, 'match'], input=text, capture_output=True, text=True,
+                             timeout=HANDOFF_GUARD_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode != 0:
+        return None
+    line = next((ln for ln in res.stdout.splitlines() if ln.strip()), '')
+    cat, _, fragment = line.partition('\t')
+    return (cat.strip() or 'handoff', fragment.strip())
+
+
+def final_text(recs):
+    """Text of the newest record when it is a plain assistant message (no tool call, no API error) with no
+    question mark, else None. A message that asks is the QUESTION case."""
+    if not recs:
+        return None
+    last = recs[-1]
+    if last['type'] != 'assistant' or last.get('isApiErrorMessage'):
+        return None
+    its = items(last)
+    if any(it.get('type') == 'tool_use' for it in its):
+        return None
+    text = '\n'.join(it.get('text') or '' for it in its if it.get('type') == 'text').strip()
+    if not text or '?' in text or '\u00bf' in text:
+        return None
+    return text
+
+
+# ---------------------------------------------------------------- state
+
+@contextlib.contextmanager
+def state_lock(write):
+    os.makedirs(home(), exist_ok=True)
+    with open(os.path.join(home(), '.flock'), 'a+') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX if write else fcntl.LOCK_SH)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def read_state():
+    return load_json(os.path.join(home(), 'state.json')) or {}
+
+
+def write_state(state, now):
+    keep = {k: v for k, v in state.items() if now - v < 14 * 86400}  # forget old entries
+    path = os.path.join(home(), 'state.json')
+    tmp = f'{path}.{os.getpid()}.tmp'
+    with open(tmp, 'w') as fh:
+        json.dump(keep, fh, indent=1, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def log(line):
+    os.makedirs(home(), exist_ok=True)
+    with open(os.path.join(home(), 'nudges.log'), 'a') as fh:
+        fh.write(f'{datetime.now().astimezone().isoformat(timespec="seconds")} {line}\n')
+
+
+# ---------------------------------------------------------------- stuck
+
+_PAUSE = []
+
+
+def paused_project(cwd):
+    """True when `cwd` belongs to a project the developer paused (optional ~/.claude/scripts/project-pause). Never
+    raises."""
+    if not cwd:
+        return False
+    try:
+        if not _PAUSE:
+            bin_path = os.path.expanduser(os.environ.get('PROJECT_PAUSE_BIN', '~/.claude/scripts/project-pause'))
+            if not os.path.isfile(bin_path):  # project-pause is optional: without it no project counts as paused
+                return False
+            import importlib.machinery
+            import importlib.util
+            loader = importlib.machinery.SourceFileLoader('project_pause_for_nudge', bin_path)
+            spec = importlib.util.spec_from_loader(loader.name, loader)
+            module = importlib.util.module_from_spec(spec)
+            loader.exec_module(module)
+            _PAUSE.append(module)
+        return bool(_PAUSE[0].paused_marker(cwd))
+    except Exception:
+        return False
+
+
+def find_stuck(min_minutes, now=None, state=None, unclassified=None):
+    """Candidates: dicts with kind QUESTION|LIMIT|APIERR|HANDOFF, reg, key, text, plus age/reset info and `ready`
+    (time condition). `state` (the nudge state) feeds the APIERR streak. `unclassified`, when a list, collects
+    (cli, key, text) of idle sessions whose last message looks like a cut but fits no kind."""
+    now = now or time.time()
+    state = state or {}
+    apps = app_records()
+    out = []
+    for reg in live_sessions():
+        rec = apps.get(reg.get('hostSessionId')) or {}
+        if rec.get('isArchived') or reg.get('entrypoint') != 'claude-desktop':
+            continue
+        if is_questions_session(reg.get('name') or rec.get('title') or ''):
+            continue
+        if paused_project(reg.get('cwd')):
+            continue  # 2026-11-13: the developer paused this project; nothing wakes its sessions until he resumes it
+        path = transcript_path(reg)
+        recs = tail_records(path) if path else []
+        if not recs:
+            continue
+        cli = reg['sessionId']
+        base = {'reg': reg, 'cli': cli, 'local': reg.get('hostSessionId'), 'name': reg.get('name') or '',
+                'bypass': rec.get('permissionMode') == 'bypassPermissions'}
+        asked = unanswered_question(recs)
+        if asked is not None and reg.get('status') == 'waiting':
+            age = now - asked
+            dialog = open_dialogs(recs)
+            questions = [(call['id'], q, d) for call in dialog[1] for q, d in dialog_questions(call)] if dialog else []
+            if questions:
+                out.append(dict(base, kind='OPEN_DIALOG', key=f'd:{cli}:{dialog[1][0]["id"]}', age=age,
+                                ready=age >= OPEN_DIALOG_AGE, questions=questions, every=None, text=''))
+            out.append(dict(base, kind='QUESTION', key=f'q:{cli}', age=age, ready=age >= min_minutes * 60,
+                            text=QUESTION_TEXT.format(minutes=int(age // 60)), every=QUESTION_EVERY))
+            continue
+        stop = limit_stop(recs)
+        if stop and reg.get('status') == 'idle':
+            stamp, reset, text = stop
+            if reset is None and unclassified is not None:  # a limit whose reset time we cannot read: a new format?
+                unclassified.append((cli, f'u:{cli}:{int(stamp)}', text))
+            fresh = now - stamp <= LIMIT_MAX_AGE
+            ready = fresh and reset is not None and now >= reset + LIMIT_GRACE
+            early = fresh and not ready and now - stamp >= LIMIT_GRACE and account_has_usage(limit_window(recs))
+            out.append(dict(base, kind='LIMIT', key=f'l:{cli}:{int(stamp)}', age=now - stamp, ready=ready or early,
+                            early=early, reset=reset, detail=text, text=LIMIT_TEXT, every=None))
+            continue
+        api = api_error_stop(recs)
+        if api and reg.get('status') == 'idle':
+            stamp, text = api
+            streak = apierr_streak(state, cli, stamp, recs)
+            age = now - stamp
+            out.append(dict(base, kind='APIERR', key=f'a:{cli}:{int(stamp)}', age=age, streak=streak, detail=text,
+                            ready=age >= APIERR_COOLDOWN and streak < APIERR_MAX_STREAK and age <= LIMIT_MAX_AGE,
+                            text=APIERR_TEXT.format(detail=text[:120]), every=None))
+            continue
+        said = final_text(recs) if reg.get('status') == 'idle' else None
+        hit = handoff_match(said) if said else None
+        if hit:
+            stamp = recs[-1]['_ts']
+            age = now - stamp
+            out.append(dict(base, kind='HANDOFF', key=f'h:{cli}:{int(stamp)}', age=age, ready=age >= min_minutes * 60,
+                            detail=f'{hit[0]}: {hit[1]}', text=handoff_text(hit[1] or hit[0]),
+                            every=None))
+            continue
+        cut = cut_like(recs) if reg.get('status') == 'idle' else None
+        if cut and unclassified is not None:
+            unclassified.append((cli, f'u:{cli}:{int(recs[-1]["_ts"])}', cut))
+    return out
+
+
+def describe(cand):
+    name = cand['name'] or '-'
+    if cand['kind'] == 'QUESTION':
+        return f'QUESTION {cand["cli"]} pid={cand["reg"]["pid"]} waiting {int(cand["age"] // 60)} min "{name}"'
+    if cand['kind'] == 'OPEN_DIALOG':
+        return (f'OPEN_DIALOG {cand["cli"]} pid={cand["reg"]["pid"]} open {int(cand["age"] // 60)} min, '
+                f'{len(cand["questions"])} question(s) to copy to ask-queue "{name}"')
+    if cand['kind'] == 'HANDOFF':
+        return (f'HANDOFF {cand["cli"]} pid={cand["reg"]["pid"]} stopped {int(cand["age"] // 60)} min ago '
+                f'({cand["detail"]}) "{name}"')
+    if cand['kind'] == 'APIERR':
+        return (f'APIERR {cand["cli"]} pid={cand["reg"]["pid"]} stopped {int(cand["age"] // 60)} min ago, '
+                f'retry {cand["streak"] + 1}/{APIERR_MAX_STREAK} "{name}": {cand["detail"][:80]}')
+    reset = cand.get('reset')
+    when = datetime.fromtimestamp(reset).astimezone().strftime('%Y-%m-%d %H:%M') if reset else 'unknown'
+    usage = ', the account already has usage again' if cand.get('early') else ''
+    return (f'LIMIT {cand["cli"]} pid={cand["reg"]["pid"]} stopped {int(cand["age"] // 60)} min ago, reset {when}'
+            f'{usage} "{name}"')
+
+
+def due(cand, state, now):
+    if not cand['ready']:
+        return False
+    if 'H:' + cand['key'] in state:  # held in the app: never re-sent
+        return False
+    last = state.get(cand['key'])
+    if last is None:
+        return True
+    return cand['every'] is not None and now - last >= cand['every']
+
+
+def log_unclassified(cli, text):
+    """One line in unclassified.log: time, session, first 200 chars of a last message that looks like a cut but fits
+    no kind, so new formats can be seen."""
+    os.makedirs(home(), exist_ok=True)
+    flat = ' '.join(text.split())[:200]
+    with open(os.path.join(home(), 'unclassified.log'), 'a') as fh:
+        fh.write(f'{datetime.now().astimezone().isoformat(timespec="seconds")} {cli} {flat}\n')
+
+
+def action_of(cand):
+    return 'QUEUE' if cand['kind'] == 'OPEN_DIALOG' else 'NUDGE'
+
+
+def cmd_stuck(args):
+    now = time.time()
+    done = []     # keys acted on and confirmed (nudged and seen in the transcript, or queued)
+    nudged = []   # keys of the confirmed nudges
+    held = []     # keys the socket accepted but the transcript never showed
+    attempts = 0  # nudges tried (sent or held): the --max budget
+    unclassified = []
+    if args.send:
+        with state_lock(True):
+            state = read_state()
+            cands = find_stuck(args.min_minutes, now, state, unclassified)
+            changed = False
+            for cand in cands:
+                if not due(cand, state, now):
+                    continue
+                if cand['kind'] == 'OPEN_DIALOG':
+                    ok, detail = queue_dialog(cand)
+                    log(f'{"QUEUED" if ok else "FAILED"} OPEN_DIALOG {cand["cli"]} {detail}')
+                else:
+                    if attempts >= args.max:
+                        continue
+                    ok, detail = deliver(cand['reg'], cand['text'], cand['bypass'], verify_s())
+                    if ok and detail != DELIVERED:
+                        attempts += 1
+                        held.append(cand['key'])
+                        state[cand['key']] = state['H:' + cand['key']] = now
+                        changed = True
+                        log(f'HELD {cand["kind"]} {cand["cli"]} not seen in the transcript '
+                            f'(a bypass recipient holds it for the developer)')
+                        continue
+                    log(f'{"SENT" if ok else "FAILED"} {cand["kind"]} {cand["cli"]} {detail}')
+                    attempts += bool(ok)
+                if ok:
+                    state[cand['key']] = now
+                    changed = True
+                    done.append(cand['key'])
+                    if cand['kind'] != 'OPEN_DIALOG':
+                        nudged.append(cand['key'])
+            for cli, key, text in unclassified:
+                if key not in state:
+                    log_unclassified(cli, text)
+                    state[key] = now
+                    changed = True
+            if changed:
+                write_state(state, now)
+    else:
+        with state_lock(False):
+            state = read_state()
+        cands = find_stuck(args.min_minutes, now, state)
+    if args.json:
+        print(json.dumps([{'kind': c['kind'], 'session': c['cli'], 'local_id': c['local'], 'pid': c['reg']['pid'],
+                           'name': c['name'], 'age_s': int(c['age']), 'ready': c['ready'], 'due': due(c, state, now),
+                           'early': bool(c.get('early')), 'sent': c['key'] in done, 'held': c['key'] in held} for c in cands], indent=1))
+        return 0
+    for cand in cands:
+        mark = 'sent' if cand['key'] in done else 'held' if cand['key'] in held \
+            else 'due' if due(cand, state, now) else 'wait'
+        print(f'{mark.upper():5} {describe(cand)}')
+    if args.send:
+        print(f'nudged {len(nudged)} session(s), {len(held)} held')
+    return 0
+
+
+def cmd_scan(args):
+    """What `stuck --send` would do now. Touches nothing: no state, no log, no lock file, no message, no queue."""
+    now = time.time()
+    state = read_state()
+    unclassified = []
+    cands = find_stuck(args.min_minutes, now, state, unclassified)
+    acts, budget = [], args.max
+    for cand in cands:
+        action = action_of(cand)
+        if not due(cand, state, now):
+            mark = 'WAIT'
+        elif action == 'NUDGE' and budget <= 0:
+            mark = 'LATER'
+        else:
+            mark = f'WOULD-{action}'
+            budget -= action == 'NUDGE'
+        acts.append((mark, cand))
+    fresh = [(cli, text) for cli, key, text in unclassified if key not in state]
+    if args.json:
+        print(json.dumps({'candidates': [{'kind': c['kind'], 'session': c['cli'], 'pid': c['reg']['pid'],
+                                          'name': c['name'], 'age_s': int(c['age']), 'ready': c['ready'],
+                                          'would': m} for m, c in acts],
+                          'unclassified': [{'session': cli, 'text': text[:200]} for cli, text in fresh]}, indent=1))
+        return 0
+    for mark, cand in acts:
+        print(f'{mark:12} {describe(cand)}')
+    for cli, text in fresh:
+        print(f'{"WOULD-LOG":12} UNCLASSIFIED {cli} {" ".join(text.split())[:100]}')
+    print(f'scan: {sum(m.startswith("WOULD") for m, _ in acts)} action(s), {len(fresh)} unclassified; nothing sent or written')
+    return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog='session-nudge', description=__doc__.split('\n')[0])
+    sub = parser.add_subparsers(dest='cmd', required=True)
+    p = sub.add_parser('send', help='send one text to a live session')
+    p.add_argument('target')
+    p.add_argument('--text', required=True)
+    p.add_argument('--verify', type=float, default=0, help='poll the transcript up to S seconds for the message')
+    p.add_argument('--dry-run', action='store_true')
+    p.set_defaults(func=cmd_send)
+    p = sub.add_parser('stuck', help='list (and with --send, nudge) stopped sessions')
+    p.add_argument('--min-minutes', type=float, default=15)
+    p.add_argument('--send', action='store_true')
+    p.add_argument('--max', type=int, default=6)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_stuck)
+    p = sub.add_parser('scan', help='print what `stuck --send` would do now, sending and writing nothing')
+    p.add_argument('--min-minutes', type=float, default=15)
+    p.add_argument('--max', type=int, default=6)
+    p.add_argument('--json', action='store_true')
+    p.set_defaults(func=cmd_scan)
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

@@ -1,0 +1,1019 @@
+#!/usr/bin/env python3
+"""handoff-guard: Claude Code hook that stops sessions from handing work back to the developer.
+
+Rule: the deploy rule named by `deploy_rule` in the config piece `supervision` (default
+~/.claude/rules/despliegue-y-limites-duros.md), together with the unattended-work rules in `watched_rules`: a session
+does what it can do or check itself and never hands that work back to the developer.
+
+Subcommands
+  hook       json of a hook on stdin -> '' or a decision json on stdout. Always exits 0, fails open
+             (a traceback goes to errors.log, nothing is printed).
+  match      text on stdin -> one `<category>\\t<fragment>` line per pattern hit; exit 0 if any, 1 if none.
+             `match --ask` uses the dialog patterns instead of the Stop ones.
+  self-test  checks without touching the real state.
+
+Hooked events
+  SessionStart              remembers when the session (re)loaded the rules.
+  Stop                      (a) blocks once per text a final message that hands work back;
+                            (b) blocks once per change when a watched rule changed after the session saw it.
+  PreToolUse AskUserQuestion / mcp__ccd_turn__wrap_up
+                            denies once per content a dialog whose questions hand work back.
+
+State: $HANDOFF_GUARD_HOME or ~/.claude/state/handoff-guard/ (decisions.log, errors.log, seen/<session>.json).
+Kill switch: <home>/disabled exists, or HANDOFF_GUARD=off.
+
+Config. The matchers below are the protocol and are not configurable. What belongs to a machine is read, checked, from
+two config pieces (a wrong value keeps the default, a broken file never raises):
+  supervision    deploy_rule, questions_session_titles (sessions judged on their dialogs, not on their turns),
+                 app_sessions_dir (where the app keeps one json per session)
+  handoff-guard  watched_rules (rules besides deploy_rule whose change is announced at Stop), stop_policy, hard_limits
+                 and ask_examples (the wording of the reasons the agent reads; `{rule}` stands for the deploy rule's path)
+Env for tests: HANDOFF_GUARD_HOME, HANDOFF_GUARD_RULES_DIR, HANDOFF_GUARD_APP_GLOB.
+"""
+import glob
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+import unicodedata
+from datetime import datetime, timezone
+
+
+
+def _toolkit_config(piece, defaults):
+    """The config piece `piece`, checked: a wrong value keeps the default and a broken file never raises."""
+    try:
+        lib = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'lib')
+        if lib not in sys.path:
+            sys.path.insert(0, lib)
+        from toolkit_config import load_checked as checked
+        return checked(piece, defaults)
+    except Exception:
+        return dict(defaults)
+
+
+SUPERVISION_DEFAULTS = {
+    'deploy_rule': 'despliegue-y-limites-duros.md',
+    'questions_session_titles': ['sesión de preguntas', 'preguntas de la supervisión', 'buzón de preguntas'],
+    'app_sessions_dir': '~/.config/Claude/claude-code-sessions',
+}
+HANDOFF_DEFAULTS = {
+    'watched_rules': ['desatencion-sin-preguntas.md', 'cierre-con-todo-publicado.md',
+                      'supervisor-decide-lo-documentado.md'],
+    'stop_policy': 'Lo que falte por probar o verificar lo compruebas tú con los medios de prueba del proyecto, sin '
+                   'esperar al desarrollador ({rule}).',
+    'hard_limits': 'dinero fuera de un presupuesto escrito, credenciales o cuentas nuevas, borrar datos sin copia, '
+                   'mensajes o publicaciones a terceros, permisos, infraestructura compartida o un dato que solo '
+                   'sabe el desarrollador',
+    'ask_examples': 'probar con usuarios de prueba, emuladores o navegador, etc.',
+}
+SUPERVISION = _toolkit_config('supervision', SUPERVISION_DEFAULTS)
+CONFIG = _toolkit_config('handoff-guard', HANDOFF_DEFAULTS)
+
+
+def watched_rules():
+    """The deploy rule first, then the configured ones, once each."""
+    out = []
+    for name in [SUPERVISION['deploy_rule']] + list(CONFIG['watched_rules']):
+        if name not in out:
+            out.append(name)
+    return tuple(out)
+
+
+def deploy_rule_path():
+    return '~/.claude/rules/' + SUPERVISION['deploy_rule']
+
+
+def question_title_prefixes():
+    """The configured titles of the question sessions, folded like the title they are compared with."""
+    return tuple(strip_accents(t).strip().lower() for t in SUPERVISION['questions_session_titles'])
+
+
+TAIL_BYTES = 512 * 1024
+HEAD_BYTES = 64 * 1024
+TRANSCRIPT_BUDGET_S = 1.0
+FICHA_SCAN_BUDGET_S = 2.0
+FICHA_NEGATIVE_TTL_S = 120
+MAX_HASHES = 50
+MAX_LOG_BYTES = 1024 * 1024
+
+# ----------------------------------------------------------------------------------------------------------------------
+# paths and small io helpers
+# ----------------------------------------------------------------------------------------------------------------------
+
+def state_home():
+    return os.path.expanduser(os.environ.get('HANDOFF_GUARD_HOME') or '~/.claude/state/handoff-guard')
+
+
+def rules_dir():
+    return os.path.expanduser(os.environ.get('HANDOFF_GUARD_RULES_DIR') or '~/.claude/rules')
+
+
+def app_glob():
+    return os.path.expanduser(os.environ.get('HANDOFF_GUARD_APP_GLOB')
+                              or os.path.join(SUPERVISION['app_sessions_dir'], '*', '*', 'local_*.json'))
+
+
+def disabled():
+    if (os.environ.get('HANDOFF_GUARD') or '').strip().lower() == 'off':
+        return True
+    return os.path.exists(os.path.join(state_home(), 'disabled'))
+
+
+def append_log(name, text):
+    try:
+        os.makedirs(state_home(), exist_ok=True)
+        path = os.path.join(state_home(), name)
+        try:
+            if os.path.getsize(path) > MAX_LOG_BYTES:
+                os.replace(path, path + '.1')
+        except OSError:
+            pass
+        with open(path, 'a', encoding='utf-8') as fh:
+            fh.write(text.rstrip('\n') + '\n')
+    except Exception:
+        pass
+
+
+def log_decision(session, event, decision, detail=''):
+    stamp = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+    detail = re.sub(r'\s+', ' ', detail or '')[:300]
+    append_log('decisions.log', f'{stamp}\t{str(session or "-")[:8]}\t{event}\t{decision}\t{detail}')
+
+
+def log_error(where):
+    stamp = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+    append_log('errors.log', f'[{stamp}] {where}\n{traceback.format_exc().rstrip()}')
+
+
+def safe_name(session):
+    return re.sub(r'[^A-Za-z0-9_.-]', '_', str(session or 'nosession'))[:120] or 'nosession'
+
+
+def seen_path(session):
+    return os.path.join(state_home(), 'seen', safe_name(session) + '.json')
+
+
+def load_seen(session):
+    try:
+        with open(seen_path(session), encoding='utf-8') as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_seen(session, data):
+    path = seen_path(session)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix='.seen-')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+            json.dump(data, fh)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def short_hash(text):
+    return hashlib.sha1(text.encode('utf-8', 'replace')).hexdigest()[:16]
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# text normalisation and patterns
+# ----------------------------------------------------------------------------------------------------------------------
+
+def strip_accents(text):
+    """Remove accents one character at a time, so the result has the same length as the input."""
+    out = []
+    for ch in text:
+        d = unicodedata.normalize('NFD', ch)
+        out.append(d[0] if len(d) > 1 and unicodedata.combining(d[1]) else ch)
+    return ''.join(out)
+
+
+def clean_text(text):
+    """Drop what is not the author's own voice (code blocks, `>` quotes, «quoted rules»), then markdown marks."""
+    text = text or ''
+    text = re.sub(r'```.*?(?:```|\Z)', ' ', text, flags=re.S)
+    text = '\n'.join(line for line in text.split('\n') if not line.lstrip().startswith('>'))
+    text = re.sub(r'«[^»]*»', ' ', text)
+    text = re.sub(r'[*_`]', '', text)
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+_ACTION_STEMS = r'(?:prueb|prob|comprueb|comprob|verifi|revis|sub|despleg|lanc|ejecut|abr|entr|hag|confirm|aprueb|eli|decid)'
+_DEVICES = r'(?:movil|telefono|iphone|android|dispositivo)(?:es|s)?'
+
+# (category, group, regex). Patterns are written without accents: the text is matched accent-stripped.
+#   core      Stop and dialogs; soft  Stop only (a final dialog legitimately asks «¿Quieres modificar algo más?»);
+#   ask-only  dialogs only.
+PATTERN_SPECS = [
+    # who owns the work
+    ('handoff', 'core', r'\bqueda(?:n)? para ti\b'),
+    ('handoff', 'core', r'\bqueda(?:n)? de tu (?:parte|lado|mano)\b'),
+    ('handoff', 'core', r'\bte toca(?:n)?\b'),
+    ('handoff', 'core', r'\bdepende(?:n)? de ti\b'),
+    ('handoff', 'core', r'\bpendientes? de ti\b'),
+    ('handoff', 'core', r'\bes cosa tuya\b'),
+    ('handoff', 'core', r'\bpor tu parte\b'),
+    ('handoff', 'core', r'\b(?:despliegue|deploy|prueba|subida|verificacion)\b.{0,30}\bes tuy[oa]\b'),
+    # his own account or devices
+    ('handoff', 'core', r'\bcon tu (?:propia )?cuenta\b'),
+    ('handoff', 'core', r'\bcon tus? ' + _DEVICES + r'\b'),
+    ('handoff', 'core', r'\ben tus? ' + _DEVICES + r'\b'),
+    ('handoff', 'core', r'\bdesde tu (?:movil|telefono|cuenta)\b'),
+    ('handoff', 'core', r'\bcuenta real\b'),
+    ('handoff', 'core', r'\bdispositivos? reales?\b'),
+    # asking him to do something
+    ('handoff', 'core', r'\b(?:tienes que|tendras que|deberas|debes|necesito que|hace falta que|falta que)\b.{0,40}\b'
+                        + _ACTION_STEMS),
+    # waiting for him
+    ('handoff', 'core', r'\bespero tu (?:respuesta|confirmacion|visto bueno|ok)\b'),
+    ('handoff', 'core', r'\ba la espera de (?:tu|que)\b'),
+    ('handoff', 'core', r'\bquedo a la espera\b'),
+    # 2026-11-13: a promise to go on "as soon as you tell me" slipped through when it carried a pronoun
+    ('handoff', 'core', r'\b(?:en cuanto (?:me )?|cuando me )(?:lo |la |los |las )?(?:confirmes|digas|respondas|avises)\b'),
+    ('handoff', 'core', r'\bREADY TO DEPLOY\b'),
+    ('handoff', 'core', r'\blisto para desplegar\b'),
+    # soft: offers and requests to be told
+    ('handoff', 'soft', r'\bcuando (?:puedas|vuelvas|quieras|tengas un momento)\b'),
+    ('handoff', 'soft', r'\bavisame\b'),
+    ('handoff', 'soft', r'\bdime (?:si|que|cual|cuando)\b'),
+    ('handoff', 'soft', r'\bquieres que\b'),
+    ('handoff', 'soft', r'\bsi quieres,? (?:puedo|lo)\b'),
+    ('handoff', 'soft', r'\bpuedo hacerlo si\b'),
+    ('handoff', 'soft', r'(?:^|[\s¿])(?:lo )?(?:hago|despliego|commiteo|subo)\?'),
+    # the message of a commit is never his to choose
+    ('commit-message', 'core', r'\b(?:que|cual) mensaje (?:de|del|para el) commit\b'),
+    ('commit-message', 'core', r'\bmensaje (?:de|del) commit\b.{0,40}\b(?:elige|eliges|prefieres|quieres|pongo)\b'),
+    ('commit-message', 'core', r'\belige el mensaje\b'),
+    # dialogs only: asking him to test or take photos himself
+    ('ask', 'ask-only', r'\b(?:haz|hacer|saca|sacar|prueba|probar|comprueba|comprobar|sube|subir|instala|instalar)\b'
+                        r'(?: (?:tu|tu mismo|el|usted))?.{0,60}\b(?:foto real|iphone|android|movil|telefono|'
+                        r'dispositivo)'),
+    ('ask', 'ask-only', r'(?:^|[\s¿])(?:puedes|podrias) (?:probar|comprobar|verificar|subir|hacer|revisar)\b'),
+]
+
+PATTERNS = [(cat, grp, re.compile(rx, re.I)) for cat, grp, rx in PATTERN_SPECS]
+STOP_GROUPS = ('core', 'soft')
+ASK_GROUPS = ('core', 'ask-only')
+
+
+def find_matches(text, mode='stop'):
+    """[(category, fragment)] of the patterns of `mode` ('stop' or 'ask') that hit `text`."""
+    groups = STOP_GROUPS if mode == 'stop' else ASK_GROUPS
+    disp = clean_text(text)
+    if not disp:
+        return []
+    norm = strip_accents(disp)
+    hits = []
+    spans = []
+    for cat, grp, rx in PATTERNS:
+        if grp not in groups:
+            continue
+        for m in rx.finditer(norm):
+            s, e = m.span()
+            if any(s < pe and ps < e for ps, pe in spans):
+                continue  # overlaps a fragment already reported
+            spans.append((s, e))
+            frag = disp[s:e].strip()
+            if len(frag) > 110:
+                frag = frag[:107] + '...'
+            hits.append((cat, frag))
+            break  # one fragment per pattern is enough
+    return hits
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# reading the final assistant text from a transcript and the session title from the app
+# ----------------------------------------------------------------------------------------------------------------------
+
+def record_text(rec):
+    msg = rec.get('message') if isinstance(rec.get('message'), dict) else {}
+    content = msg.get('content')
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        return '\n'.join(i['text'] for i in content
+                         if isinstance(i, dict) and i.get('type') == 'text' and isinstance(i.get('text'), str)).strip()
+    return ''
+
+
+def last_assistant_text(path):
+    """Text of the last non-sidechain assistant message, reading only the tail of the file, within a time budget."""
+    deadline = time.monotonic() + TRANSCRIPT_BUDGET_S
+    with open(path, 'rb') as fh:
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        start = max(0, size - TAIL_BYTES)
+        fh.seek(start)
+        data = fh.read()
+    lines = data.split(b'\n')
+    if start > 0:
+        lines = lines[1:]  # the first line is cut in half
+    last_id = None
+    parts = []
+    for raw in reversed(lines):
+        if time.monotonic() > deadline:
+            break
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict) or rec.get('type') != 'assistant' or rec.get('isSidechain'):
+            if parts:
+                break  # the contiguous run of the final message ended
+            continue
+        msg = rec.get('message') if isinstance(rec.get('message'), dict) else {}
+        mid = msg.get('id')
+        if parts and mid != last_id:
+            break
+        last_id = mid
+        text = record_text(rec)
+        if text:
+            parts.append(text)
+        elif not parts and mid is None:
+            return ''
+        if mid is None:
+            break
+    return '\n'.join(reversed(parts))
+
+
+def first_timestamp(path):
+    """Epoch seconds of the first record with a `timestamp` among the first 64 KB of a transcript, else None."""
+    with open(path, 'rb') as fh:
+        head = fh.read(HEAD_BYTES)
+    for raw in head.split(b'\n'):
+        if b'"timestamp"' not in raw:
+            continue
+        try:
+            rec = json.loads(raw)
+        except ValueError:
+            continue
+        ts = rec.get('timestamp') if isinstance(rec, dict) else None
+        if isinstance(ts, str):
+            try:
+                return datetime.fromisoformat(ts.replace('Z', '+00:00')).astimezone(timezone.utc).timestamp()
+            except ValueError:
+                continue
+        if isinstance(ts, (int, float)):
+            return float(ts) / 1000 if ts > 1e11 else float(ts)
+    return None
+
+
+def ficha_title(path, session):
+    try:
+        with open(path, encoding='utf-8') as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if isinstance(data, dict) and data.get('cliSessionId') == session:
+        return str(data.get('title') or '')
+    return None
+
+
+def is_question_title(title):
+    t = strip_accents(title or '').strip().lower()
+    return t.startswith(question_title_prefixes())
+
+
+def is_question_session(session, seen, now):
+    """True when the app's file for this session carries a question-session title. Caches where the file is."""
+    if not session:
+        return False
+    cached = seen.get('ficha')
+    if isinstance(cached, str) and cached:
+        title = ficha_title(cached, session)
+        if title is not None:
+            return is_question_title(title)
+    checked = seen.get('ficha_missing_at')
+    if isinstance(checked, (int, float)) and now - checked < FICHA_NEGATIVE_TTL_S:
+        return False
+    needle = session.encode()
+    deadline = time.monotonic() + FICHA_SCAN_BUDGET_S
+    paths = glob.glob(app_glob())
+
+    def mtime(p):
+        try:
+            return os.path.getmtime(p)
+        except OSError:
+            return 0
+
+    for path in sorted(paths, key=mtime, reverse=True):
+        if time.monotonic() > deadline:
+            break
+        try:
+            with open(path, 'rb') as fh:
+                if needle not in fh.read():
+                    continue
+        except OSError:
+            continue
+        title = ficha_title(path, session)
+        if title is not None:
+            seen['ficha'] = path
+            seen.pop('ficha_missing_at', None)
+            return is_question_title(title)
+    seen['ficha_missing_at'] = now
+    return False
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# reasons (read by the agent: Spanish)
+# ----------------------------------------------------------------------------------------------------------------------
+
+def quote_hits(hits):
+    return '; '.join(f'«{frag}»' for _cat, frag in hits[:4])
+
+
+def reason_stop(hits):
+    commit = any(cat == 'commit-message' for cat, _ in hits)
+    extra = (' El mensaje de un commit lo escribe la sesión, con las convenciones del repositorio: no se le pregunta.'
+             if commit else '')
+    policy = CONFIG['stop_policy'].replace('{rule}', deploy_rule_path())
+    limits = CONFIG['hard_limits']
+    return (f'Tu mensaje final parece devolverle trabajo al desarrollador o dejarte esperándole: {quote_hits(hits)}. '
+            f'{policy}{extra} Si de verdad es un límite duro de esa '
+            f'regla ({limits}), no lo hagas: regístralo con '
+            f'~/.claude/scripts/ask-queue add --project "$PWD" --question … --default "No hacerlo" y sigue con lo '
+            f'demás. Si en realidad tu texto no le devolvía trabajo (una cita, la explicación de una regla), '
+            f'termina igual: no te volveré a parar por este mismo texto.')
+
+
+def reason_rules(changed):
+    lines = '; '.join(f'{path} (modificada a las {datetime.fromtimestamp(m).strftime("%H:%M")})'
+                      for path, m in changed)
+    return (f'Cambió al menos una regla global desde que esta sesión la leyó: {lines}. Antes de terminar el turno, '
+            f'vuelve a leerla ahora con Read (ruta completa) y revisa si lo que acabas de decir o de dejar pendiente '
+            f'la contradice; si es así, corrígelo antes de terminar. No volveré a pararte hasta el siguiente cambio.')
+
+
+def reason_ask(bad, wrap=False):
+    items = '; '.join(f'«{label}»: {quote_hits(hits)}' for label, hits in bad[:5])
+    what = 'el cierre de turno' if wrap else 'el diálogo'
+    return (f'En {what} sobran preguntas que no deben llegar al desarrollador: {items}. Nada que una sesión pueda '
+            f'hacer o comprobar ella misma va a un diálogo ({CONFIG["ask_examples"]}), y tampoco el mensaje de un '
+            f'commit: lo escribe la sesión. '
+            f'Quita esas preguntas, haz tú ese trabajo o devuélveselo a la supervisora, y abre el diálogo solo con '
+            f'el resto. Si de verdad es un límite duro de {deploy_rule_path()}, regístralo '
+            f'con ~/.claude/scripts/ask-queue add --project "$PWD" --question … --default "No hacerlo". Si fue un '
+            f'falso positivo, repite el mismo diálogo tal cual: pasará.')
+
+
+def deny_json(reason):
+    return json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
+                                              'permissionDecisionReason': reason}}, ensure_ascii=False)
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# events
+# ----------------------------------------------------------------------------------------------------------------------
+
+def on_session_start(payload):
+    session = payload.get('session_id')
+    if not session:
+        return ''
+    seen = load_seen(session)
+    seen['rules_loaded_at'] = time.time()
+    save_seen(session, seen)
+    log_decision(session, 'SessionStart', 'seen', str(payload.get('source') or ''))
+    return ''
+
+
+def final_text(payload):
+    text = payload.get('last_assistant_message')
+    if isinstance(text, str) and text.strip():
+        return text
+    path = payload.get('transcript_path')
+    if isinstance(path, str) and os.path.isfile(path):
+        return last_assistant_text(path)
+    return ''
+
+
+def rules_loaded_at(payload, seen, now):
+    value = seen.get('rules_loaded_at')
+    if isinstance(value, (int, float)):
+        return float(value)
+    value = None
+    path = payload.get('transcript_path')
+    if isinstance(path, str) and os.path.isfile(path):
+        try:
+            value = first_timestamp(path)
+        except OSError:
+            value = None
+    seen['rules_loaded_at'] = value if value is not None else now  # unknown start: do not block
+    return seen['rules_loaded_at']
+
+
+def changed_rules(seen, loaded_at):
+    acked = seen.setdefault('acked', {})
+    changed = []
+    for name in watched_rules():
+        path = os.path.join(rules_dir(), name)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        floor = max(loaded_at, acked.get(name, 0) if isinstance(acked.get(name), (int, float)) else 0)
+        if mtime > floor:
+            changed.append((path, mtime, name))
+    return changed
+
+
+def on_stop(payload):
+    if payload.get('stop_hook_active'):
+        return ''
+    session = payload.get('session_id')
+    now = time.time()
+    seen = load_seen(session)
+    dirty = False
+    try:
+        before = json.dumps(seen, sort_keys=True)
+        if is_question_session(session, seen, now):
+            return ''  # the question session is judged on its dialogs, not on its turns
+        # (a) work handed back
+        text = final_text(payload)
+        hits = find_matches(text, 'stop') if text else []
+        if hits:
+            digest = short_hash(clean_text(text))
+            hashes = seen.setdefault('text_hashes', [])
+            if digest not in hashes:
+                hashes.append(digest)
+                del hashes[:-MAX_HASHES]
+                save_seen(session, seen)
+                dirty = False
+                log_decision(session, 'Stop', 'block-handoff', quote_hits(hits))
+                return json.dumps({'decision': 'block', 'reason': reason_stop(hits)}, ensure_ascii=False)
+        # (b) watched rules changed since this session saw them
+        loaded_at = rules_loaded_at(payload, seen, now)
+        changed = changed_rules(seen, loaded_at)
+        if changed:
+            acked = seen.setdefault('acked', {})
+            for _path, mtime, name in changed:
+                acked[name] = mtime
+            save_seen(session, seen)
+            dirty = False
+            log_decision(session, 'Stop', 'block-rules', ','.join(n for _p, _m, n in changed))
+            return json.dumps({'decision': 'block',
+                               'reason': reason_rules([(p, m) for p, m, _n in changed])}, ensure_ascii=False)
+        dirty = json.dumps(seen, sort_keys=True) != before
+        return ''
+    finally:
+        if dirty and session:
+            try:
+                save_seen(session, seen)
+            except Exception:
+                log_error('on_stop save_seen')
+
+
+def question_texts(tool_input):
+    """[(label, text)] per question of an AskUserQuestion input."""
+    out = []
+    questions = tool_input.get('questions') if isinstance(tool_input, dict) else None
+    for i, q in enumerate(questions if isinstance(questions, list) else []):
+        if not isinstance(q, dict):
+            continue
+        parts = [str(q.get('header') or ''), str(q.get('question') or '')]
+        for opt in q.get('options') if isinstance(q.get('options'), list) else []:
+            if isinstance(opt, dict):
+                parts += [str(opt.get('label') or ''), str(opt.get('description') or '')]
+            elif isinstance(opt, str):
+                parts.append(opt)
+        label = (str(q.get('header') or '').strip()
+                 or ' '.join(str(q.get('question') or '').split()[:6]) or f'pregunta {i + 1}')
+        out.append((label, '\n'.join(p for p in parts if p)))
+    return out
+
+
+def on_pre_tool(payload):
+    tool = payload.get('tool_name')
+    tool_input = payload.get('tool_input') if isinstance(payload.get('tool_input'), dict) else {}
+    session = payload.get('session_id')
+    if tool == 'AskUserQuestion':
+        items = question_texts(tool_input)
+        bad = []
+        for label, text in items:
+            hits = find_matches(text, 'ask')
+            if hits:
+                bad.append((label, hits))
+        key, wrap, hashed = 'ask_hashes', False, json.dumps([t for _l, t in items], ensure_ascii=False)
+    elif tool == 'mcp__ccd_turn__wrap_up':
+        text = '\n\n'.join(str(tool_input.get(k) or '') for k in ('recap', 'ask'))
+        hits = find_matches(text, 'stop')
+        bad = [('recap', hits)] if hits else []
+        key, wrap, hashed = 'wrap_hashes', True, text
+    else:
+        return ''
+    if not bad:
+        return ''
+    seen = load_seen(session)
+    digest = short_hash(hashed)
+    hashes = seen.setdefault(key, [])
+    if digest in hashes:
+        log_decision(session, 'PreToolUse', 'allow-repeat', tool or '')
+        return ''  # same content a second time: let it through
+    hashes.append(digest)
+    del hashes[:-MAX_HASHES]
+    save_seen(session or 'nosession', seen)
+    log_decision(session, 'PreToolUse', 'deny', '; '.join(label for label, _h in bad))
+    return deny_json(reason_ask(bad, wrap))
+
+
+def hook_decide(raw):
+    """What the hook prints for a payload (a json string): '' or a decision json. May raise."""
+    if disabled():
+        return ''
+    payload = json.loads(raw)
+    if not isinstance(payload, dict):
+        raise ValueError('hook payload is not a json object')
+    event = payload.get('hook_event_name')
+    if event == 'SessionStart':
+        return on_session_start(payload)
+    if event == 'Stop':
+        return on_stop(payload)
+    if event == 'PreToolUse':
+        return on_pre_tool(payload)
+    return ''
+
+
+# ----------------------------------------------------------------------------------------------------------------------
+# commands
+# ----------------------------------------------------------------------------------------------------------------------
+
+def cmd_hook():
+    try:
+        out = hook_decide(sys.stdin.read())
+    except Exception:
+        log_error('hook')
+        out = ''
+    if out:
+        sys.stdout.write(out)
+    return 0
+
+
+def cmd_match(args):
+    text = sys.stdin.read()
+    hits = find_matches(text, 'ask' if '--ask' in args else 'stop')
+    for cat, frag in hits:
+        print(f'{cat}\t{frag}')
+    return 0 if hits else 1
+
+
+def cmd_self_test():
+    results = []
+
+    def check(name, cond):
+        results.append(bool(cond))
+        print(('ok   ' if cond else 'FAIL ') + name)
+
+    tmp = tempfile.mkdtemp(prefix='handoff-guard-test-')
+    env_keys = ('HANDOFF_GUARD_HOME', 'HANDOFF_GUARD_RULES_DIR', 'HANDOFF_GUARD_APP_GLOB', 'HANDOFF_GUARD',
+                'CLAUDE_TOOLKIT_CONFIG_DIR')
+    saved = {k: os.environ.get(k) for k in env_keys}
+    home = os.path.join(tmp, 'home')
+    rules = os.path.join(tmp, 'rules')
+    app = os.path.join(tmp, 'app')
+    for d in (home, rules, app):
+        os.makedirs(d)
+    os.environ['HANDOFF_GUARD_HOME'] = home
+    os.environ['HANDOFF_GUARD_RULES_DIR'] = rules
+    os.environ['HANDOFF_GUARD_APP_GLOB'] = os.path.join(app, '*', 'local_*.json')
+    os.environ.pop('HANDOFF_GUARD', None)
+    os.makedirs(os.path.join(tmp, 'cfg'))
+    os.environ['CLAUDE_TOOLKIT_CONFIG_DIR'] = os.path.join(tmp, 'cfg')  # no machine config: the defaults
+    saved_config = (dict(SUPERVISION), dict(CONFIG))
+    SUPERVISION.update(SUPERVISION_DEFAULTS)
+    CONFIG.update(HANDOFF_DEFAULTS)
+    os.makedirs(os.path.join(app, 'x'))
+    old = time.time() - 1000
+    for name in watched_rules():
+        p = os.path.join(rules, name)
+        with open(p, 'w') as fh:
+            fh.write('# rule\n')
+        os.utime(p, (old, old))
+
+    counter = [0]
+
+    def sid():
+        counter[0] += 1
+        return f'sess-{counter[0]:04d}-test'
+
+    def hook(payload):
+        return hook_decide(json.dumps(payload))
+
+    def stop(session, text=None, **extra):
+        p = {'hook_event_name': 'Stop', 'session_id': session, 'stop_hook_active': False}
+        if text is not None:
+            p['last_assistant_message'] = text
+        p.update(extra)
+        return hook(p)
+
+    def start(session, source='startup'):
+        return hook({'hook_event_name': 'SessionStart', 'session_id': session, 'source': source})
+
+    def ask(session, questions):
+        return hook({'hook_event_name': 'PreToolUse', 'tool_name': 'AskUserQuestion', 'session_id': session,
+                     'tool_input': {'questions': questions}})
+
+    def blocked(out):
+        return bool(out) and json.loads(out).get('decision') == 'block'
+
+    def denied(out):
+        return bool(out) and json.loads(out)['hookSpecificOutput']['permissionDecision'] == 'deny'
+
+    def seed_seen(session):
+        start(session)  # rules seen now: later cases are not disturbed by rule changes
+
+    try:
+        # --- patterns -------------------------------------------------------------------------------------------
+        verdict = ('PREPROD DEPLOYED — TANDA FINAL. Todo integrado y desplegado en pre-producción. '
+                   'La publicación real con tu cuenta y en tus teléfonos queda para ti.')
+        hits = find_matches(verdict)
+        check('patterns: the real verdict hits (several fragments)', len(hits) >= 3)
+        check('patterns: normal closing does not hit',
+              not find_matches('Hecho: 3 commits integrados en main y desplegados; verificado con el usuario e2e '
+                               'en Chrome.'))
+        check('patterns: "En espera, no parada ... Nada que pedirte" does not hit',
+              not find_matches('En espera, no parada: el vigilante me despierta a las 20:40. Nada que pedirte ni que esperar.'))
+        check('patterns: rule quoted between « » does not hit',
+              not find_matches('La regla dice «lo que sigue queda para ti» y la cumplo.'))
+        check('patterns: code block does not hit',
+              not find_matches('Salida:\n```\nqueda para ti\n```\nFin.'))
+        check('patterns: > quote does not hit', not find_matches('Cita:\n> te toca a ti\nFin.'))
+        check('patterns: without accents too',
+              find_matches('la prueba queda para ti') and find_matches('con tu movil') and find_matches('avisame')
+              and find_matches('que mensaje de commit pongo'))
+        check('patterns: with accents too',
+              find_matches('Avísame cuando termines') and find_matches('en tu móvil') and find_matches('desde tu teléfono')
+              and find_matches('¿Qué mensaje de commit pongo?') and find_matches('tendrás que probar la app'))
+        check('patterns: markdown marks are ignored', find_matches('**queda** _para ti_'))
+        for phrase in ('con tus móviles', 'en tus dispositivos', 'cuenta real', 'dispositivos reales', 'es cosa tuya',
+                       'por tu parte', 'READY TO DEPLOY', 'listo para desplegar', 'espero tu confirmación',
+                       'a la espera de que contestes', 'quedo a la espera', 'en cuanto me confirmes',
+                       'cuando me lo digas, sigo con el resto', 'cuando me lo confirmes, sigo',
+                       'cuando puedas', '¿quieres que despliegue?', 'si quieres, puedo hacerlo', 'puedo hacerlo si me dices',
+                       '¿lo hago?', 'el despliegue es tuyo', 'necesito que pruebes esto', 'hace falta que subas el APK',
+                       'pendientes de ti', 'te tocan', 'dime si funciona', 'elige el mensaje',
+                       'mensaje de commit: elige el que prefieras'):
+            check(f'patterns: hits «{phrase}»', find_matches(phrase))
+        check('patterns: match subcommand quotes the fragment', ('handoff', 'queda para ti') in
+              [(c, f.split('.')[0][-13:]) for c, f in find_matches('esto queda para ti')]
+              or any('queda para ti' in f for _c, f in find_matches('esto queda para ti')))
+
+        # --- SessionStart / Stop (a) ----------------------------------------------------------------------------
+        s = sid()
+        start(s)
+        check('stop: the real verdict blocks', blocked(stop(s, verdict)))
+        check('stop: the same text a second time does not block', stop(s, verdict) == '')
+        check('stop: a different handing-back text blocks again',
+              blocked(stop(s, 'Cuando puedas, dime qué cuenta usar.')))
+        s = sid()
+        start(s)
+        check('stop: normal closing does not block',
+              stop(s, 'Hecho: 3 commits integrados en main y desplegados; verificado con el usuario e2e en Chrome.')
+              == '')
+        check('stop: "En espera, no parada" does not block',
+              stop(s, 'En espera, no parada: el vigilante me despierta a las 20:40. Nada que pedirte ni que esperar.') == '')
+        check('stop: quoted rule does not block', stop(s, 'La regla dice «te toca a ti». No aplica.') == '')
+        check('stop: code block does not block', stop(s, 'Mira:\n```\nqueda para ti\n```') == '')
+        s = sid()
+        start(s)
+        check('stop: stop_hook_active never blocks', stop(s, verdict, stop_hook_active=True) == '')
+        check('stop: an empty final message does not block', stop(s, '') == '')
+        out = stop(s, verdict)
+        check('stop: reason is Spanish, cites the fragments and the ask-queue command',
+              blocked(out) and 'queda para ti' in json.loads(out)['reason']
+              and deploy_rule_path() in json.loads(out)['reason'] and 'ask-queue add' in json.loads(out)['reason'])
+        s = sid()
+        start(s)
+        out = stop(s, '¿Qué mensaje de commit prefieres?')
+        check('stop: commit-message question blocks and says the session writes it',
+              blocked(out) and 'lo escribe la sesión' in json.loads(out)['reason'])
+
+        # --- question session -------------------------------------------------------------------------------------
+        def write_ficha(session, title, name):
+            with open(os.path.join(app, 'x', name), 'w') as fh:
+                json.dump({'sessionId': 'local_' + name, 'cliSessionId': session, 'title': title}, fh)
+
+        for title, name in (('Preguntas de la supervisión de demo', 'local_a.json'),
+                            ('PREGUNTAS DE LA SUPERVISION DE demo', 'local_b.json'),
+                            ('Buzón de preguntas', 'local_c.json')):
+            s = sid()
+            start(s)
+            write_ficha(s, title, name)
+            check(f'stop: question session «{title}» is not evaluated', stop(s, verdict) == '')
+        s = sid()
+        start(s)
+        write_ficha(s, 'demo · Arreglo de login', 'local_d.json')
+        check('stop: an ordinary session with a ficha is evaluated', blocked(stop(s, verdict)))
+        s = sid()
+        start(s)
+        check('stop: no ficha means not a question session', blocked(stop(s, verdict)))
+
+        # --- transcript fallback ---------------------------------------------------------------------------------
+        def write_transcript(path, last_text, filler=0, sidechain_after=None, first_ts=None):
+            with open(path, 'w') as fh:
+                fh.write(json.dumps({'type': 'permission-mode', 'mode': 'x'}) + '\n')
+                if first_ts:
+                    fh.write(json.dumps({'type': 'user', 'timestamp': first_ts,
+                                         'message': {'role': 'user', 'content': 'hola'}}) + '\n')
+                for i in range(filler):
+                    fh.write(json.dumps({'type': 'user', 'message': {'role': 'user', 'content': 'x' * 900}}) + '\n')
+                fh.write(json.dumps({'type': 'assistant', 'message': {'id': 'm1', 'role': 'assistant', 'content': [
+                    {'type': 'text', 'text': last_text}]}}) + '\n')
+                if sidechain_after:
+                    fh.write(json.dumps({'type': 'assistant', 'isSidechain': True, 'message': {
+                        'id': 'm2', 'role': 'assistant', 'content': [{'type': 'text', 'text': sidechain_after}]}}) + '\n')
+
+        s = sid()
+        start(s)
+        tr = os.path.join(tmp, 't1.jsonl')
+        write_transcript(tr, verdict, filler=900, sidechain_after='Todo hecho.')
+        check('transcript: tail of a >512 KB file is read; the sidechain record is ignored',
+              os.path.getsize(tr) > 512 * 1024 and blocked(stop(s, transcript_path=tr)))
+        s = sid()
+        start(s)
+        write_transcript(tr, 'Todo hecho y verificado.', filler=10, sidechain_after='queda para ti')
+        check('transcript: a handing-back sidechain record does not block', stop(s, transcript_path=tr) == '')
+        s = sid()
+        start(s)
+        check('transcript: a missing file does not break', stop(s, transcript_path=os.path.join(tmp, 'no.jsonl')) == '')
+
+        # --- Stop (b): rules changed -----------------------------------------------------------------------------
+        rule = os.path.join(rules, SUPERVISION['deploy_rule'])
+        s = sid()
+        start(s)
+        time.sleep(0.05)
+        future = time.time() + 5
+        os.utime(rule, (future, future))
+        out = stop(s, 'Todo hecho.')
+        check('rules: a rule newer than the session start blocks once, naming its full path',
+              blocked(out) and rule in json.loads(out)['reason'] and 'Read' in json.loads(out)['reason'])
+        check('rules: ... and not a second time', stop(s, 'Todo hecho.') == '')
+        later = future + 5
+        os.utime(rule, (later, later))
+        check('rules: ... until the next change', blocked(stop(s, 'Todo hecho.')))
+        check('rules: ... which is also seen only once', stop(s, 'Todo hecho.') == '')
+        s = sid()
+        os.utime(rule, (time.time() - 50, time.time() - 50))
+        start(s)
+        check('rules: a SessionStart after the change counts it as seen', stop(s, 'Todo hecho.') == '')
+        s = sid()
+        tr2 = os.path.join(tmp, 't2.jsonl')
+        write_transcript(tr2, 'ok', first_ts='2020-01-01T00:00:00.000Z')
+        check('rules: no seen file, transcript older than the rules -> blocks',
+              blocked(stop(s, 'Todo hecho.', transcript_path=tr2)))
+        s = sid()
+        check('rules: no seen file and no transcript -> does not block', stop(s, 'Todo hecho.') == '')
+        check('rules: ... and stays quiet afterwards', stop(s, 'Todo hecho.') == '')
+        s = sid()
+        start(s)
+        os.utime(rule, (time.time() + 9, time.time() + 9))
+        check('rules: (a) takes precedence, (b) waits', 'queda para ti' in json.loads(stop(s, verdict))['reason'])
+        check('rules: ... then (b) fires on the next different text', blocked(stop(s, 'Todo hecho.')))
+        os.utime(rule, (old, old))
+
+        # --- AskUserQuestion --------------------------------------------------------------------------------------
+        s = sid()
+        start(s)
+        q_photo = [{'header': 'Foto real', 'question': 'Saca tú la foto real y prueba con tu iPhone',
+                    'options': [{'label': 'Hecho', 'description': 'Ya la he sacado'}, {'label': 'No puedo'}]}]
+        out = ask(s, q_photo)
+        check('ask: asking him to take a real photo and test on his iPhone is denied, naming the question',
+              denied(out) and 'Foto real' in json.loads(out)['hookSpecificOutput']['permissionDecisionReason'])
+        check('ask: the identical retry passes', ask(s, q_photo) == '')
+        s = sid()
+        start(s)
+        check('ask: «¿Quieres modificar algo más?» passes',
+              ask(s, [{'header': 'Final', 'question': '¿Quieres modificar algo más?',
+                       'options': [{'label': 'No, está todo', 'description': 'Se cierra'},
+                                   {'label': 'Sí', 'description': 'Dime qué cambiar'}]}]) == '')
+        check('ask: a final yes/no confirmation about a deployed environment passes',
+              ask(s, [{'header': 'Pre-producción', 'question': 'Pre-producción desplegada y verificada. ¿Está bien así?',
+                       'options': [{'label': 'Está bien así'}, {'label': 'Hay que cambiar algo'}]}]) == '')
+        out = ask(s, [{'header': 'Commit', 'question': '¿Qué mensaje de commit pongo?',
+                       'options': [{'label': 'fix: login'}, {'label': 'feat: login'}]}])
+        check('ask: a question about the commit message is denied', denied(out))
+        s = sid()
+        start(s)
+        out = ask(s, [{'header': 'Bien', 'question': '¿Confirmas el rumbo A?', 'options': [{'label': 'Confirmar'}]},
+                      {'header': 'Prueba', 'question': '¿Puedes probar el login?', 'options': [{'label': 'Sí'}]}])
+        reason = json.loads(out)['hookSpecificOutput']['permissionDecisionReason'] if out else ''
+        check('ask: only the offending question is named', 'Prueba' in reason and 'Bien' not in reason)
+        s = sid()
+        start(s)
+        out = hook({'hook_event_name': 'PreToolUse', 'tool_name': 'mcp__ccd_turn__wrap_up', 'session_id': s,
+                    'tool_input': {'recap': 'Desplegado. La publicación real con tu cuenta queda para ti.'}})
+        check('wrap_up: handing-back recap is denied once', denied(out))
+        check('wrap_up: ... and the identical retry passes',
+              hook({'hook_event_name': 'PreToolUse', 'tool_name': 'mcp__ccd_turn__wrap_up', 'session_id': s,
+                    'tool_input': {'recap': 'Desplegado. La publicación real con tu cuenta queda para ti.'}}) == '')
+        check('wrap_up: a clean recap passes',
+              hook({'hook_event_name': 'PreToolUse', 'tool_name': 'mcp__ccd_turn__wrap_up', 'session_id': s,
+                    'tool_input': {'recap': 'Desplegado y verificado en el entorno de pruebas.'}}) == '')
+        check('pretooluse: another tool is ignored',
+              hook({'hook_event_name': 'PreToolUse', 'tool_name': 'Bash', 'session_id': s,
+                    'tool_input': {'command': 'echo queda para ti'}}) == '')
+
+        # --- kill switch -----------------------------------------------------------------------------------------
+        s = sid()
+        start(s)
+        os.environ['HANDOFF_GUARD'] = 'off'
+        check('kill switch: HANDOFF_GUARD=off does nothing', stop(s, verdict) == '' and ask(s, q_photo) == '')
+        os.environ.pop('HANDOFF_GUARD')
+        flag = os.path.join(home, 'disabled')
+        open(flag, 'w').close()
+        check('kill switch: <home>/disabled does nothing', stop(s, verdict) == '' and ask(s, q_photo) == '')
+        os.unlink(flag)
+        check('kill switch: removed, the guard works again', blocked(stop(s, verdict)))
+
+        # --- processes (stdin/stdout/exit codes) ------------------------------------------------------------------
+        me = os.path.abspath(__file__)
+        env = dict(os.environ)
+
+        def run(args, stdin):
+            return subprocess.run([sys.executable, me] + args, input=stdin, capture_output=True, text=True, env=env,
+                                  timeout=20)
+
+        r = run(['hook'], 'this is { not json')
+        check('process: broken json -> no output, exit 0', r.stdout == '' and r.returncode == 0)
+        check('process: ... and the traceback is in errors.log',
+              os.path.isfile(os.path.join(home, 'errors.log')) and 'Traceback' in open(os.path.join(home, 'errors.log')).read())
+        r = run(['hook'], '{}')
+        check('process: {} -> no output, exit 0', r.stdout == '' and r.returncode == 0)
+        r = run(['hook'], '')
+        check('process: empty stdin -> no output, exit 0', r.stdout == '' and r.returncode == 0)
+        s = sid()
+        r = run(['hook'], json.dumps({'hook_event_name': 'Stop', 'session_id': s, 'last_assistant_message': verdict}))
+        check('process: a Stop payload prints the block json, exit 0',
+              r.returncode == 0 and json.loads(r.stdout)['decision'] == 'block')
+        r = run(['match'], 'esto queda para ti')
+        check('process: match exits 0 and prints category<TAB>fragment',
+              r.returncode == 0 and r.stdout.startswith('handoff\t') and 'queda para ti' in r.stdout)
+        r = run(['match'], 'todo hecho')
+        check('process: match exits 1 when nothing hits', r.returncode == 1 and r.stdout == '')
+        r = run(['match', '--ask'], 'saca tú la foto real')
+        check('process: match --ask uses the dialog patterns', r.returncode == 0 and r.stdout.startswith('ask\t'))
+        r = run(['match', '--ask'], '¿quieres que despliegue?')
+        check('process: match --ask skips the soft group', r.returncode == 1)
+        check('decisions.log is written',
+              os.path.isfile(os.path.join(home, 'decisions.log')) and 'block-handoff' in open(os.path.join(home, 'decisions.log')).read())
+    finally:
+        SUPERVISION.update(saved_config[0])
+        CONFIG.update(saved_config[1])
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        # remove the temp tree without rm -rf
+        for root, dirs, files in os.walk(tmp, topdown=False):
+            for f in files:
+                try:
+                    os.unlink(os.path.join(root, f))
+                except OSError:
+                    pass
+            for d in dirs:
+                try:
+                    os.rmdir(os.path.join(root, d))
+                except OSError:
+                    pass
+        try:
+            os.rmdir(tmp)
+        except OSError:
+            pass
+    failed = results.count(False)
+    print(f'{len(results)} cases, {failed} failed')
+    return 1 if failed else 0
+
+
+def main(argv):
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+    if hasattr(sys.stdin, 'reconfigure'):
+        sys.stdin.reconfigure(encoding='utf-8', errors='replace')
+    cmd = argv[1] if len(argv) > 1 else ''
+    if cmd == 'hook':
+        return cmd_hook()
+    if cmd == 'match':
+        return cmd_match(argv[2:])
+    if cmd == 'self-test':
+        return cmd_self_test()
+    sys.stderr.write('usage: handoff-guard hook|match [--ask]|self-test\n')
+    return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))

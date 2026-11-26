@@ -1,0 +1,37 @@
+piece: project-pause
+dest: scripts/project-pause
+kind: cli
+config: supervision
+probes:
+  - name: help lists the subcommands
+    args: [--help]
+    exit: [0]
+    contains: resume
+  - name: nothing is paused in a fresh home
+    args: [status]
+    exit: [0]
+    contains: "Ningún proyecto en pausa."
+  - name: a directory that is not paused exits 1
+    args: [check, .]
+    exit: [1]
+    stdout: empty
+  - name: the hook lets an unpaused prompt through silently
+    args: [hook]
+    stdin: {hook_event_name: UserPromptSubmit, session_id: probe, cwd: ".", prompt: "<task-notification> done"}
+    exit: [0]
+    stdout: empty
+  - name: malformed hook input never fails
+    args: [hook]
+    stdin_raw: not json
+    exit: [0]
+    stdout: empty
+  - name: a corrupt config does not crash
+    args: [status]
+    corrupt_config: true
+    exit: [0]
+    stdout: any
+  - name: self-test passes from the installed copy
+    args: [self-test]
+    exit: [0]
+    contains: all passed
+    timeout: 120

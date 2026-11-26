@@ -1,0 +1,3 @@
+{
+  "handoff_text": "[session-nudge] Tu ultimo mensaje devuelve trabajo al desarrollador ({what}). No es suyo: hazlo tu con los medios de prueba del proyecto (usuario de seed o e2e, navegador, emulador lanzado con heavy-job), segun la regla de despliegue y limites duros del proyecto ({rule}). Solo un limite duro va a ~/.claude/scripts/ask-queue add, y aun asi sigues con lo que no dependa de el. Este aviso no autoriza commit, push, merge ni despliegue."
+}

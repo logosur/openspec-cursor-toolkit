@@ -24,6 +24,11 @@ Criteria for a piece to enter (design D10): (a) the privacy guard finds nothing 
 | supervision | rules: messages only within the project, readable question dialogs | privacy guard 0 |
 | heavy-jobs | `scripts/heavy-job`, `hooks/heavy-job-gate`, the classifier library both import (slots from config) | contracts; both test files in `scripts/toolkit/tests/pieces/` |
 | openspec | the whole `.claude/` catalog and `docs/openspec/` | validator; installer tests |
+| supervision | `scripts/supervisor-lock` and its library, `supervisa-sesiones`, `hooks/supervisor-stop-gate` | contracts; self-test; skill lint |
+| supervision | `scripts/project-pause`, `scripts/session-nudge`, `scripts/handoff-guard`, the rule on project pauses, the prompt of the app task that revives supervisors (wording and titles from config) | contracts with a corrupt config; their test files in `scripts/toolkit/tests/pieces/` |
+| heavy-jobs | `scripts/cloud-tests` (excluded projects from config, none by default) | contract; its test file, with no cloud or network |
+| accounts | `scripts/claude-sessions-sync`, `scripts/account-switch` with its hook, rule and app task prompt (task folder and title from config) | self-test; contracts; their test files |
+| routines | `scripts/routines` and its rule (permission profiles, notes folder and skipped app tasks from config; no profile of one machine) | contract; its test file |
 
 ## Left in the override for now, with the reason
 
@@ -35,10 +40,7 @@ Counts are privacy findings in the live copy (rule ids only; the text is not rep
 | `hooks/docker-desktop-restart-gate` | 7 findings; specific to one desktop engine setup | config piece; optional module |
 | `hooks/contexto-gate`, `harness-contexto.sh` | home path and a private name | config piece |
 | `scripts/rewrite-claude-authorship` | 11 findings; it rewrites published history | neutral copy; it stays opt-in |
-| `supervisor-lock`, `supervisa-sesiones` and their hooks | personal (94 findings in the skill) and about 500 KB in one file | split planned in tasks §8 with acceptance criteria |
-| `account-switch`, `session-nudge`, `cloud-tests` | they handle session tokens, an app socket or OAuth credentials | not toolkit material while they need them; optional for the pieces that name them |
-| `project-pause`, `handoff-guard` | one machine's way of working | neutral copy and tests; optional until then |
-| scheduled routines and other machine services | personal by nature | not toolkit material |
+| the routines and app tasks of one machine (their prompts and schedules), `scripts/open-in-developer-chrome` | personal by nature | not toolkit material; the engine that runs routines is the `routines` module |
 
 ## Known gap found by a probe
 

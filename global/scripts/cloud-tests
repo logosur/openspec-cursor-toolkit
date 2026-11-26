@@ -1,0 +1,2306 @@
+#!/usr/bin/env python3
+"""cloud-tests: run a project's test suites in a Claude Code cloud session instead of the laptop's heavy-job slots.
+
+Supervisors send the test suites to cloud sessions, unattended, so the machine's heavy-job slots stay free; each
+project keeps its cloud setup in the repository so a new cloud session starts fast; no redundant test sessions or runs.
+
+How it works (all from Bash, so it also works in a supervisor's automated tick, where the app refuses start_session):
+  * One runner per project: a cloud session created with `claude --cloud` (through a pseudo-terminal, the CLI needs a
+    TTY). Requests reach it as follow-ups (`claude -p <msg> --cloud <session>`), ONE AT A TIME: the queue lives in the
+    ledger (state `queued`), not in the runner. Whoever calls request, poll, wait or pump (under the ledger lock) sends
+    the oldest queued run when the runner is free (`dispatch`), so a queued run can be superseded or expired, and a
+    silent runner is noticed: a dispatched run past its deadline marks the runner dead, goes back to the head of the
+    queue once and a fresh runner is launched; the second time it expires. If the launch fails, the head run expires
+    (`launch_failed`) and no launch is tried again for LAUNCH_BACKOFF_S. The deadline counts from the dispatch, not from
+    the request. A queued run never sent within QUEUE_MAX_S expires.
+  * A newer request for the same suite and branch supersedes the older runs still queued (SUPERSEDED); `wait` follows
+    the chain to the successor. Runs already sent cannot be cancelled.
+  * `pump` (hidden, spawned detached by request while runs are queued or sent) keeps polling so the queue moves with
+    nobody waiting; one per project (flock), it stops when nothing is queued or sent.
+  * `preflight` (top level of the recipe, or per suite): check-only shell commands run locally, under heavy-job
+    `--kind typecheck`, before queuing, when the checkout is exactly the pushed tree. A failure is PREFLIGHT_FAILED
+    (exit 6) and nothing is queued: it saves a runner slot for code that cannot pass (style, lint, static analysis).
+  * The runner checks out the exact pushed commit, runs the suite command from the project's recipe
+    (`.claude/cloud-tests.json`, committed) and publishes the result as `runs/<run>.json` on the branch
+    `cloud-tests-results` (commit message with `[skip ci]`). A cloud session cannot message back and the app does not
+    list sessions created by the CLI, so git is the return channel.
+  * A machine-wide ledger (~/.claude/state/cloud-tests/<project key>.json, flock) dedupes: the same tree and command
+    is never run twice. A finished one is reused (REUSE), one in flight is waited for (WAIT).
+  * The account's usage limit (2026-11-19) is not a mute runner. While the account the CLI launches cloud sessions with
+    is out of usage (usage endpoint; refused desktop turns when it does not answer), nothing is launched, sent or
+    expired and no deadline runs: runs wait QUEUED with `held_by_limit_until=HH:MM`. When it ends, a run that was in
+    the cloud during it gets a whole new deadline from the end of the limit (plus LIMIT_RESUME_GRACE_MIN): a cut
+    session may carry on by itself. If it stays silent past that, it is a mute runner as usual. The queue clock starts
+    again at the end of the limit, and the pump stays alive until after a long limit.
+  * A run that expires (deadline twice, launch failure, or too long in the queue) is EXPIRED: the caller runs it locally
+    with heavy-job and records it with `record-local`.
+  * No redundant local run: a suite that runs in the cloud is not run locally too, and a local copy already running
+    or queued is stopped:
+      - `heavy-job run|hold` asks `local-guard` first and refuses (exit 76) a suite that is in flight in the cloud, or
+        already green there (24 h), for the same code: same project, same command (the recipe's `command`, its
+        `local_commands` and the command in `equivalent_to`, leading VAR=value dropped) and the same tree (the tree of
+        the working directory, uncommitted and untracked files included);
+      - when a run is SENT, WAITed for or REUSEd green, and on every poll of `wait`, the same local jobs that were
+        already running or queued in heavy-job are stopped: the wrapper's whole process tree and, for `ddev exec` /
+        `docker exec`, the matching exec in the container. The wrapper prints why and exits 76.
+
+Commands (run inside the project's checkout or a worktree of it, or pass --repo):
+  check                         ELIGIBLE <owner/name> (exit 0) or LOCAL <reason> (exit 3)
+  request --suite S [--ref BR] [--skip-preflight]
+                                SENT|QUEUED|WAIT|REUSE <run> ... (exit 0); LOCAL (3); NOT_PUSHED (4); LAUNCH_FAILED (5);
+                                PREFLIGHT_FAILED (6: fix the code and request again, never run the suite locally because
+                                of it). Run states: queued sent done local expired mismatch superseded
+  poll                          DONE / PENDING / QUEUED / EXPIRED lines for the runs of the last 24 h (moves the queue)
+  wait RUN [RUN...]             polls until they finish: 0 all done, 5 one expired, 75 timeout (run in background);
+                                follows SUPERSEDED runs to their successor
+  result RUN                    the stored result, JSON
+  record-local --suite S --exit N --summary TEXT [--ref BR]   a local fallback run, so others reuse it
+  status                        runner and runs
+  runner [--forget]             show or drop the project's runner
+  local-guard [--cwd D] -- CMD  exit 3 + why when CMD here is redundant with a cloud run (heavy-job calls it), else 0
+  stop-local [RUN...]           stop the redundant local jobs of these runs (of all in-flight runs without RUN)
+  brief                         the runner brief (what the cloud session is told)
+  pump                          (hidden) keeps the queue moving until nothing is queued or sent
+  sweep [--dry-run]             archives in the cloud the runners of every project that nobody needs any more: replaced,
+                                used up or failed, idle and quiet for 3 h, no run waiting (the supervisor-watchdog timer
+                                runs it every 10 min; ARCHIVED / WOULD_ARCHIVE / SKIP / WARN lines, always exit 0)
+  self-test                     offline tests with a fake `claude` and a local origin
+
+Configuration (toolkit piece `cloud-tests`, ~/.claude/toolkit/config/cloud-tests.json; a missing or wrong value keeps
+the default, a broken file never raises):
+  excluded_names   repository or checkout names whose code never goes to the cloud (default: none)
+  excluded_owners  GitHub owners whose repositories never go to the cloud (default: none)
+
+Optional pieces: heavy-job (preflight and the redundant-local-run guard; without it the preflight is skipped and
+nothing local is stopped), account-switch (the account's usage limit; without it the account is never taken for
+limited) and supervisor-lock (the project key; without it the key is the checkout name plus a hash).
+"""
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import json
+import os
+import re
+import secrets
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+
+STATE_DIR = os.environ.get('CLOUD_TESTS_STATE', os.path.expanduser('~/.claude/state/cloud-tests'))
+RECIPE = '.claude/cloud-tests.json'
+RESULTS_BRANCH = 'cloud-tests-results'
+RESULTS_LOCAL_REF = 'refs/cloud-tests/results'
+MAX_RUNS_PER_RUNNER = int(os.environ.get('CLOUD_TESTS_MAX_RUNS', '15'))
+MAX_RUNNER_AGE_S = int(os.environ.get('CLOUD_TESTS_MAX_RUNNER_AGE_S', str(3 * 86400)))
+DEFAULT_DEADLINE_MIN = 60
+LAUNCH_OVERHEAD_MIN = 15  # cloud VM start, setup hook and checkout before the suite starts
+DISPATCH_OVERHEAD_MIN = 5  # a follow-up to a running runner: checkout and setup before the suite starts
+LAUNCH_BACKOFF_S = 600  # after a failed launch, no new launch is tried for this long
+QUEUE_MAX_S = 3 * 3600  # a run still queued after this long expires (the runner never became free)
+PREFLIGHT_TIMEOUT_S = 20 * 60
+PUMP_MAX_S = 8 * 3600
+RETRYABLE_EXITS = (97, 98)  # the cloud could not run the suite, or its result was unreadable: never reused
+HEAVY_JOB_BIN = os.environ.get('HEAVY_JOB_BIN', os.path.expanduser('~/.claude/scripts/heavy-job'))
+GREEN_REUSE_S = 86400  # a green result blocks a local rerun of the same code for this long
+STOP_GRACE_S = 10
+EXEC_WINDOW_TICKS = 10 * os.sysconf('SC_CLK_TCK')  # a container exec starts within this of its `docker exec` client
+CONTAINER_CGROUP_RE = re.compile(r'/docker-([0-9a-f]{12,})\.scope|/docker/([0-9a-f]{12,})|/libpod-([0-9a-f]{12,})')
+GENERIC_WORDS = {'bash', 'sh', 'exec', 'sudo', 'env', 'docker', 'ddev', 'compose'}
+
+
+def _toolkit_config(piece, defaults):
+    """The piece's toolkit config, checked: a wrong value keeps the default and a broken file never raises."""
+    try:
+        lib = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'lib')
+        if lib not in sys.path:
+            sys.path.insert(0, lib)
+        from toolkit_config import load_checked as checked
+        return checked(piece, defaults)
+    except Exception:
+        return dict(defaults)
+
+
+CONFIG = _toolkit_config('cloud-tests', {'excluded_names': [], 'excluded_owners': []})
+# Projects whose code never leaves the machine through the cloud, by checkout or repository name and by GitHub owner.
+EXCLUDED_NAMES = {n.strip().lower() for n in CONFIG['excluded_names']}
+EXCLUDED_OWNERS = {o.strip().lower() for o in CONFIG['excluded_owners']}
+
+# 2026-11-19: the account's 5-hour limit cut two projects' runners mid-suite, twice in one night. Past the deadline the
+# runner was taken for mute, a fresh one was launched inside the limit and died at once, and the run expired: the
+# supervisor ran the suite locally and four stopped cloud sessions were left in the sidebar. The result of that expired
+# run reached the results branch an hour after the reset: a cut cloud session can carry on by itself when usage comes
+# back (another one, launched inside the limit, never did, and a follow-up sent to it the next day was not acted on).
+# Now the account's usage limit is a state of its own. While it lasts nothing
+# is launched, sent or expired and no deadline runs; when it is over, a run that was in the cloud during it gets a whole
+# new deadline counted from the end of the limit, so a session that resumes by itself is waited for. If it stays silent
+# after that, it is a mute runner as before: a fresh runner and one more attempt.
+LIMIT_CACHE_S = 120          # the account's usage is asked at most this often (shared by every project)
+LIMIT_FRESH_429_S = 15 * 60  # a refused turn this recent wins over a usage answer that says «not limited»
+LIMIT_LOOKBACK_S = 6 * 3600  # refused turns are looked for this far back when the usage endpoint does not answer
+LIMIT_HISTORY_S = 48 * 3600  # limit windows kept in the ledger
+LIMIT_RESUME_GRACE_MIN = 30  # a cut cloud session took ~26 min to start again after the reset (19-11 03:50 -> 04:16)
+ACCOUNT_SWITCH = os.environ.get('CLOUD_TESTS_ACCOUNT_SWITCH', os.path.expanduser('~/.claude/scripts/account-switch'))
+
+
+def die(code, line):
+    print(line)
+    sys.exit(code)
+
+
+def run(cmd, cwd=None, check=True, env=None, timeout=None):
+    p = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, timeout=timeout)
+    if check and p.returncode != 0:
+        raise RuntimeError(f"{' '.join(cmd)}: {p.stderr.strip() or p.stdout.strip()}")
+    return p
+
+
+def git(args, cwd, check=True):
+    return run(['git', *args], cwd=cwd, check=check).stdout.strip()
+
+
+# ---------------------------------------------------------------------------------------------------------- project
+
+class Project:
+    def __init__(self, repo):
+        self.dir = os.path.realpath(repo or os.getcwd())
+        top = run(['git', 'rev-parse', '--show-toplevel'], cwd=self.dir, check=False)
+        if top.returncode != 0:
+            die(3, 'LOCAL not a git repository')
+        self.top = top.stdout.strip()
+        common = git(['rev-parse', '--path-format=absolute', '--git-common-dir'], self.top)
+        self.common = os.path.realpath(common)
+        self.checkout = os.path.dirname(self.common) if os.path.basename(self.common) == '.git' else self.top
+        self.name = os.path.basename(self.checkout)
+        self.key = self._key()
+        self.origin = git(['remote', 'get-url', 'origin'], self.top, check=False)
+        self.slug = github_slug(self.origin)
+
+    def _key(self):
+        lock = os.path.expanduser('~/.claude/scripts/supervisor-lock')
+        if os.path.exists(lock) and not os.environ.get('CLOUD_TESTS_OWN_KEY'):
+            p = run([lock, 'project'], cwd=self.top, check=False)
+            m = re.search(r'^key=(\S+)$', p.stdout, re.M)
+            if p.returncode == 0 and m:
+                return m.group(1)
+        return f"{self.name}-{hashlib.sha1(self.common.encode()).hexdigest()[:8]}"
+
+
+def github_slug(url):
+    if os.environ.get('CLOUD_TESTS_ALLOW_ANY_REMOTE') and url:
+        return 'local/' + os.path.basename(url.rstrip('/')).removesuffix('.git')
+    m = re.match(r'^(?:git@github(?:\.com|-[\w.-]+):|ssh://git@github\.com/|https://github\.com/)([\w.-]+)/([\w.-]+?)(?:\.git)?/?$',
+                 url or '')
+    return f'{m.group(1)}/{m.group(2)}' if m else None
+
+
+def excluded(proj):
+    names = {proj.name.lower(), (proj.slug or '').split('/')[-1].lower()}
+    owner = (proj.slug or '/').split('/')[0].lower()
+    return bool(names & EXCLUDED_NAMES) or owner in EXCLUDED_OWNERS
+
+
+def claude_bin():
+    return os.environ.get('CLOUD_TESTS_CLAUDE') or shutil.which('claude')
+
+
+def eligibility(proj, sha=None):
+    if not proj.slug:
+        return 'no GitHub remote: the cloud clones from GitHub'
+    if excluded(proj):
+        return 'excluded project: its code does not go to the cloud'
+    if not claude_bin() or not shutil.which('script'):
+        return 'claude CLI or script(1) missing'
+    ref = sha or 'HEAD'
+    if run(['git', 'cat-file', '-e', f'{ref}:{RECIPE}'], cwd=proj.top, check=False).returncode != 0:
+        return f'no {RECIPE} committed at {ref[:12]}: the project has not prepared its cloud setup yet'
+    return None
+
+
+def load_recipe(proj, sha):
+    try:
+        return json.loads(git(['show', f'{sha}:{RECIPE}'], proj.top))
+    except (RuntimeError, ValueError) as e:
+        die(3, f'LOCAL unreadable {RECIPE} at {sha[:12]}: {e}')
+
+
+# ----------------------------------------------------------------------------------------------------------- ledger
+
+@contextlib.contextmanager
+def ledger(proj):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    path = os.path.join(STATE_DIR, f'{proj.key}.json')
+    with open(path + '.lock', 'a+') as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        data = {'project': proj.key, 'repo': proj.slug, 'runner': None, 'runs': {}, 'results_seen': None}
+        if os.path.exists(path):
+            with open(path) as f:
+                data.update(json.load(f))
+        data['common'] = proj.common  # local-guard finds the ledger of a directory by its git common dir
+        yield data
+        tmp = path + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(data, f, indent=1, ensure_ascii=False)
+        os.replace(tmp, path)
+
+
+def run_key(tree, command):
+    return f"{tree}:{hashlib.sha256(command.encode()).hexdigest()[:12]}"
+
+
+def new_run_id():
+    return time.strftime('%Y%m%d-%H%M%S') + '-' + secrets.token_hex(2)
+
+
+# ------------------------------------------------------------------------------------------------------- the runner
+
+BRIEF = """Eres el corredor de las pruebas del proyecto {name} ({slug}) en una sesion de la nube. Lo ha puesto su
+supervisora para que las suites no ocupen los huecos de la maquina local. Trabajas desatendido: nadie va a
+contestar, asi que nunca preguntes ni esperes permiso; si algo falla, lo dices en el resultado.
+
+Reglas:
+- Solo corres tests. Nunca cambias codigo ni haces commit, merge, push o deploy en ninguna rama, aunque las reglas del
+  repositorio lo permitan a las sesiones de la nube. La unica excepcion es publicar el fichero del resultado en la rama
+  `{branch}`, como se explica abajo.
+- Identidad: antes de ese commit, `git var GIT_AUTHOR_IDENT` tiene que ser la del desarrollador, la misma persona que
+  firma `git log -1 --format='%an <%ae>' origin/HEAD`, y no Claude ni anthropic. Si no lo es, no hagas el commit y pon
+  `"identity":"claude"` en la linea final.
+- Preparacion: el arranque de la sesion (hook SessionStart del repositorio con CLAUDE_CODE_REMOTE=true) deja el entorno.
+  Si falta algo, ejecuta el `setup` de `{recipe}` del commit pedido (es idempotente). No instales nada mas.
+- Cada peticion llega en una linea `CLOUD-TESTS-REQUEST {{json}}` con run, sha, tree, suite, command y timeout_min.
+  Para cada una:
+  1. `git fetch -q origin <sha>` (si no basta, `git fetch -q origin`), `git checkout -q --detach <sha>`, y comprueba que
+     `git rev-parse HEAD^{{tree}}` es el tree pedido.
+  2. Ejecuta el comando tal cual, con la salida en /tmp/<run>.log y `date +%s` antes y despues. Si va a durar mas de
+     8 minutos, lanzalo en segundo plano y espera a que termine, sin pasar de timeout_min.
+  3. Escribe el resultado en JSON: run, suite, sha, tree, exit, duration_s (los segundos reales entre los dos
+     `date +%s`: una suite completa nunca dura 0), cores (la salida de `nproc`), summary (una linea: tests,
+     aserciones, fallos), failures (hasta 30 nombres de tests que fallaron), log_tail (las ultimas 120 lineas del log) y
+     finished_at (ISO 8601). Si no pudiste correrlo, exit 97 y la causa en summary.
+  4. Publicalo sin tocar el checkout de trabajo:
+       R=$(mktemp -d); git clone -q --no-checkout . "$R"; git -C "$R" remote set-url origin "$(git remote get-url origin)"
+       cd "$R"; if git ls-remote --exit-code origin refs/heads/{branch} >/dev/null; then
+         git fetch -q origin {branch} && git checkout -q -B {branch} FETCH_HEAD; else
+         git checkout -q --orphan {branch} && git rm -rqf --cached --ignore-unmatch . ; fi
+       mkdir -p runs; (escribe runs/<run>.json); git add runs/<run>.json
+       git commit -qm "cloud-tests: <run> [skip ci]" && git push -q origin HEAD:refs/heads/{branch}
+     Si el push se rechaza por una carrera: fetch, `git rebase FETCH_HEAD` y reintenta, hasta 5 veces.
+  5. Termina el turno con una sola linea final: `CLOUD-TESTS-RESULT {{el mismo JSON sin log_tail}}`.
+- Entre peticiones no hagas nada.
+"""
+
+
+def brief_for(proj):
+    return BRIEF.format(name=proj.name, slug=proj.slug or '?', branch=RESULTS_BRANCH, recipe=RECIPE)
+
+
+def request_line(entry):
+    payload = {k: entry[k] for k in ('run', 'sha', 'tree', 'suite', 'command', 'timeout_min')}
+    return 'CLOUD-TESTS-REQUEST ' + json.dumps(payload, ensure_ascii=False)
+
+
+def strip_ansi(text):
+    text = re.sub(r'\x1b\[[0-9;?]*[ -/]*[@-~]', '', text)
+    text = re.sub(r'\x1b[()][A-Z0-9]|\x1b[>=]', '', text)
+    return text.replace('\r', '\n')
+
+
+def via_tty(proj, argv, timeout):
+    """The CLI refuses --cloud without a terminal, so it runs under script(1)."""
+    with tempfile.TemporaryDirectory(prefix='cloud-tests-') as tmp:
+        args_file = os.path.join(tmp, 'argv.json')
+        with open(args_file, 'w') as f:
+            json.dump(argv, f)
+        inner = ('python3 -c ' + shlex.quote('import json,os,sys; a=json.load(open(sys.argv[1])); os.execvp(a[0], a)')
+                 + ' ' + shlex.quote(args_file))
+        log = os.path.join(tmp, 'tty.log')
+        env = dict(os.environ, TERM='xterm-256color', COLUMNS='200', LINES='50')
+        try:
+            subprocess.run(['script', '-qfec', inner, log], cwd=proj.top, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            with open(log, errors='replace') as f:
+                return strip_ansi(f.read())
+        except FileNotFoundError:
+            return ''
+
+
+def launch_runner(proj, first_request):
+    text = brief_for(proj) + '\nPrimera peticion:\n' + first_request
+    out = via_tty(proj, [claude_bin(), '--cloud', text], timeout=150)
+    m = re.search(r'\b(session_[A-Za-z0-9]+)\b', out)
+    if not m or 'Created cloud session' not in out:
+        tail = ' | '.join(l.strip() for l in out.splitlines() if l.strip() and not l.startswith('Script '))[-300:]
+        return None, tail
+    return m.group(1), None
+
+
+def send_followup(proj, session, line):
+    out = via_tty(proj, [claude_bin(), '-p', line, '--cloud', session], timeout=90)
+    return 'Sent to cloud session' in out, out
+
+
+# ------------------------------------------------------------------------------------------- the account's usage limit
+
+def _account_switch():
+    import importlib.machinery
+    import importlib.util
+    loader = importlib.machinery.SourceFileLoader('account_switch_for_cloud_tests', ACCOUNT_SWITCH)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def _limit_from_account(now):
+    """{until, what, source} while the account the CLI launches cloud sessions with is out of usage, else None.
+    The usage endpoint (the CLI's own account) decides; a desktop turn refused with usage_limit_reached in the last
+    LIMIT_FRESH_429_S still counts when it says «not limited» (it can read 99 % while turns are already refused), and
+    the refused turns of the last LIMIT_LOOKBACK_S decide when it does not answer. Any failure means «not limited»:
+    the old behaviour, never a hold on a guess."""
+    try:
+        acct = _account_switch()
+    except (Exception, SystemExit):  # absent, or a copy that exits while loading: never take the account for limited
+        return None
+    try:
+        data = acct.usage()
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        try:
+            lim = acct.usage_limit(data)
+        except Exception:
+            lim = None
+        if lim:
+            return {'until': lim['until'], 'what': lim['what'], 'source': 'usage'}
+        lookback = LIMIT_FRESH_429_S
+    else:
+        lookback = LIMIT_LOOKBACK_S
+    try:
+        lim = acct.transcript_limit(now - lookback)
+    except Exception:
+        lim = None
+    return {'until': lim['until'], 'what': lim['what'], 'source': 'refused-turns'} if lim else None
+
+
+def account_limit(now):
+    """The account's usage limit now, cached LIMIT_CACHE_S in STATE_DIR/account-limit.json. $CLOUD_TESTS_LIMIT
+    overrides it (tests): 'none', or the epoch the limit resets at."""
+    forced = os.environ.get('CLOUD_TESTS_LIMIT', '').strip()
+    if forced:
+        if forced == 'none':
+            return None
+        until = float(forced)
+        return {'until': until, 'what': 'five_hour', 'source': 'env'} if until > now else None
+    path = os.path.join(STATE_DIR, 'account-limit.json')
+    try:
+        with open(path) as f:
+            cached = json.load(f)
+        if 0 <= now - cached.get('time', 0) < LIMIT_CACHE_S:
+            lim = cached.get('limit')
+            return lim if lim and lim.get('until', 0) > now else None
+    except (OSError, ValueError, AttributeError):
+        pass
+    lim = _limit_from_account(now)
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        tmp = f'{path}.{os.getpid()}.tmp'
+        with open(tmp, 'w') as f:
+            json.dump({'time': now, 'limit': lim}, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+    return lim
+
+
+def note_limit(data, now):
+    """Records the current limit (data['limit']) and its window (data['limits']: [{from, until}]); returns it."""
+    lim = account_limit(now)
+    windows = [w for w in data.get('limits') or [] if now - w.get('until', 0) < LIMIT_HISTORY_S]
+    if lim:
+        data['limit'] = lim
+        last = windows[-1] if windows else None
+        if last and last.get('until', 0) >= now - LIMIT_CACHE_S and last.get('from', now) <= now:
+            last['until'] = max(last['until'], lim['until'])
+        else:
+            windows.append({'from': now, 'until': lim['until'], 'what': lim['what']})
+    else:
+        data.pop('limit', None)
+        for w in windows:  # the limit ended earlier than announced (an account switch, extra usage): close the window
+            if w.get('from', 0) <= now < w.get('until', 0):
+                w['until'] = now
+    if windows:
+        data['limits'] = windows
+    else:
+        data.pop('limits', None)
+    return lim
+
+
+def cut_by_limit(data, e, now):
+    """The end of the latest window of the account's limit, already over, that fell while the sent run `e` was in the
+    cloud; 0 when none did."""
+    start = e.get('dispatched')
+    if start is None:
+        return 0
+    return max([w['until'] for w in data.get('limits') or []
+                if w.get('from', 0) <= now and w.get('until', 0) > start and w.get('until', 0) <= now] or [0])
+
+
+def last_limit_end(data, now):
+    return max([w['until'] for w in data.get('limits') or [] if w.get('until', 0) <= now] or [0])
+
+
+def hhmm(epoch):
+    return time.strftime('%H:%M', time.localtime(epoch)) if epoch else '?'
+
+
+def runner_usable(r, now):
+    return bool(r) and not r.get('dead') and r.get('runs', 0) < MAX_RUNS_PER_RUNNER \
+        and now - r.get('created', 0) < MAX_RUNNER_AGE_S
+
+
+# ---------------------------------------------------------------------------------------------------------- results
+
+def fetch_results(proj, data):
+    """Fetches the results branch when it moved; returns {run: result} for the files found."""
+    p = run(['git', 'ls-remote', 'origin', f'refs/heads/{RESULTS_BRANCH}'], cwd=proj.top, check=False)
+    if p.returncode != 0 or not p.stdout.strip():
+        return {}
+    remote_sha = p.stdout.split()[0]
+    if data.get('results_seen') != remote_sha or \
+            run(['git', 'rev-parse', '-q', '--verify', RESULTS_LOCAL_REF], cwd=proj.top, check=False).stdout.strip() != remote_sha:
+        f = run(['git', 'fetch', '-q', 'origin', f'+refs/heads/{RESULTS_BRANCH}:{RESULTS_LOCAL_REF}'], cwd=proj.top, check=False)
+        if f.returncode != 0:
+            return {}
+        data['results_seen'] = remote_sha
+    found = {}
+    names = run(['git', 'ls-tree', '--name-only', f'{RESULTS_LOCAL_REF}:runs'], cwd=proj.top, check=False).stdout.split()
+    wanted = {rid for rid, e in data['runs'].items() if e.get('state') == 'sent'}
+    for name in names:
+        rid = name.removesuffix('.json')
+        if rid in wanted:
+            try:
+                found[rid] = json.loads(git(['show', f'{RESULTS_LOCAL_REF}:runs/{name}'], proj.top))
+            except (RuntimeError, ValueError):
+                found[rid] = {'exit': 98, 'summary': 'unreadable result file'}
+    return found
+
+
+class LaunchFailed(Exception):
+    pass
+
+
+def queued_ids(data):
+    """The queued runs, in dispatch order: oldest first (a re-queued run keeps its `created`, so it goes first)."""
+    return sorted((rid for rid, e in data['runs'].items() if e.get('state') == 'queued'),
+                  key=lambda rid: (data['runs'][rid].get('created', 0), rid))
+
+
+def queued_since(e):
+    return e.get('queued_at', e.get('created', 0))
+
+
+def runner_busy(data):
+    """True while a sent run belongs to the current runner's session: a dispatched one, or a legacy one (sent before
+    the queue existed, no `dispatched`) until it settles. A dead runner is never busy: nobody waits for it."""
+    r = data.get('runner')
+    if not r or r.get('dead'):
+        return False
+    return any(e.get('state') == 'sent' and e.get('session') == r.get('session') for e in data['runs'].values())
+
+
+def pending_runs(data):
+    return any(e.get('state') in ('queued', 'sent') for e in data['runs'].values())
+
+
+def dispatch(proj, data, now, fresh=None):
+    """Sends the oldest queued run when the runner is free: a follow-up if the runner is usable, else a new runner.
+    Returns the dispatched run id or None. A launch that fails expires the head run (`launch_failed`) and starts the
+    launch backoff; for the run `fresh` (a request being made right now) it raises LaunchFailed instead and leaves the
+    ledger untouched, so the caller keeps its contract (LAUNCH_FAILED, nothing recorded)."""
+    queue = queued_ids(data)
+    if not queue or runner_busy(data) or data.get('limit'):  # nothing leaves while the account is out of usage
+        return None
+    rid = queue[0]
+    e = data['runs'][rid]
+    line = request_line(e)
+    r = data.get('runner')
+    session, launched = None, False
+    if runner_usable(r, now):
+        ok, _ = send_followup(proj, r['session'], line)
+        if ok:
+            session = r['session']
+        else:
+            r['dead'] = True  # refused: the session is gone
+    if not session:
+        if data.get('launch_backoff_until', 0) > now:
+            return None
+        session, err = launch_runner(proj, line)
+        if not session:
+            if rid == fresh:
+                raise LaunchFailed(err or 'no session id in the CLI output')
+            e['state'] = 'expired'
+            e['expired_reason'] = 'launch_failed'
+            e['finished'] = now
+            data['launch_backoff_until'] = now + LAUNCH_BACKOFF_S
+            return None
+        if r and r.get('session'):  # `sweep` archives it in the cloud once nobody needs it
+            data['retired'] = (data.get('retired') or [])[-49:] + [
+                {'session': r['session'], 'created': r.get('created'), 'retired': now}]
+        data['runner'] = r = {'session': session, 'created': now, 'runs': 0}
+        data.pop('launch_backoff_until', None)
+        launched = True
+    r['runs'] = r.get('runs', 0) + 1
+    r['last_used'] = now
+    e['state'] = 'sent'
+    e['session'] = session
+    e['dispatched'] = now
+    e['deadline'] = now + (e['timeout_min'] + (LAUNCH_OVERHEAD_MIN if launched else DISPATCH_OVERHEAD_MIN)) * 60
+    return rid
+
+
+def settle(proj, data, now, fresh=None):
+    """Moves runs along: sent -> done / mismatch (result found) or, past the deadline, back to the queue once with a
+    new runner (dispatched runs) or expired (legacy runs, or a second time); queued -> expired when it waited too long;
+    then dispatches the queue head. Returns the runs that changed."""
+    changed = []
+    limited = note_limit(data, now)
+    for rid, res in fetch_results(proj, data).items():
+        e = data['runs'][rid]
+        e['result'] = res
+        e['state'] = 'done' if str(res.get('tree', e['tree'])) == e['tree'] else 'mismatch'
+        e['finished'] = now
+        changed.append(rid)
+    if limited:  # out of usage: no deadline runs, nothing expires, nothing is sent; the queue just waits
+        return changed
+    queue_clock = last_limit_end(data, now)  # the time in the queue starts again when a limit ends
+    for rid, e in data['runs'].items():
+        cut_end = cut_by_limit(data, e, now) if e.get('state') == 'sent' else 0
+        if cut_end and cut_end > e.get('limit_extended_to', 0):
+            # The limit fell while it was in the cloud and no result came yet. The session may carry on by itself now
+            # that there is usage again: a whole new deadline from the end of the limit, once per limit window.
+            changed.append(rid)
+            e['limit_cuts'] = e.get('limit_cuts', 0) + 1
+            e['limit_extended_to'] = cut_end
+            e['deadline'] = max(e.get('deadline', 0),
+                                cut_end + (e['timeout_min'] + LAUNCH_OVERHEAD_MIN + LIMIT_RESUME_GRACE_MIN) * 60)
+        elif e.get('state') == 'sent' and now > e.get('deadline', 0):
+            changed.append(rid)
+            if 'dispatched' not in e:  # legacy: sent under the old scheme
+                e['state'] = 'expired'
+                continue
+            r = data.get('runner')
+            if r and r.get('session') == e.get('session'):
+                r['dead'] = True  # silent past its deadline: nobody waits for that runner any more
+            if e.get('redispatched'):
+                e['state'] = 'expired'
+                e['expired_reason'] = 'deadline'
+                e['finished'] = now
+            else:
+                e['redispatched'] = 1
+                e['state'] = 'queued'
+                e['queued_at'] = now
+                for k in ('session', 'dispatched', 'deadline'):
+                    e.pop(k, None)
+        elif e.get('state') == 'queued' and now - max(queued_since(e), queue_clock) > QUEUE_MAX_S:
+            e['state'] = 'expired'
+            e['expired_reason'] = 'queue'
+            e['finished'] = now
+            changed.append(rid)
+    if dispatch(proj, data, now, fresh):
+        changed.append('dispatch')
+    return changed
+
+
+def held_note(data):
+    """' held_by_limit_until=HH:MM' while the account is out of usage, else ''."""
+    lim = (data or {}).get('limit')
+    return f" held_by_limit_until={hhmm(lim.get('until'))}" if lim else ''
+
+
+def describe(rid, e, now, data=None):
+    st = e.get('state')
+    if st in ('done', 'local'):
+        r = e.get('result') or {}
+        src = 'local' if st == 'local' else 'cloud'
+        return (f"DONE {rid} exit={r.get('exit')} source={src} suite={e['suite']} sha={e['sha'][:12]} "
+                f"duration_s={r.get('duration_s')} summary={json.dumps(r.get('summary', ''), ensure_ascii=False)}")
+    held = held_note(data)
+    if st == 'sent':
+        return (f"PENDING {rid} suite={e['suite']} sha={e['sha'][:12]} age_min={int((now - e['created']) / 60)} "
+                f"deadline_in_min={int((e['deadline'] - now) / 60)}{held}")
+    if st == 'queued':
+        pos = queued_ids(data).index(rid) + 1 if data is not None and rid in queued_ids(data) else '?'
+        return (f"QUEUED {rid} suite={e['suite']} sha={e['sha'][:12]} position={pos} "
+                f"age_min={int((now - e['created']) / 60)}{held}"
+                + (f" limit_cuts={e['limit_cuts']}" if e.get('limit_cuts') else ''))
+    if st == 'superseded':
+        return f"SUPERSEDED {rid} by {e.get('superseded_by')} suite={e['suite']} sha={e['sha'][:12]}"
+    return f"{st.upper()} {rid} suite={e['suite']} sha={e['sha'][:12]}" + \
+        (f" reason={e['expired_reason']}" if e.get('expired_reason') else '')
+
+
+# ------------------------------------------------------------------------------------------- redundant local runs
+
+def norm_command(cmd):
+    """'IS_DDEV_PROJECT=true XDEBUG_MODE=off make ci', 'env make ci', "bash -c 'make ci'" and ['make', 'ci'] all
+    give 'make ci'."""
+    try:
+        argv = shlex.split(cmd) if isinstance(cmd, str) else [str(a) for a in cmd]
+    except ValueError:
+        return str(cmd).strip()
+    while argv and (re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', argv[0]) or argv[0] == 'env'):
+        argv = argv[1:]
+    if len(argv) == 3 and os.path.basename(argv[0]) in ('bash', 'sh') and argv[1] in ('-c', '-lc'):
+        return norm_command(argv[2])
+    return ' '.join(argv)
+
+
+SHELLS = ('bash', 'sh', 'dash', 'zsh')
+WRAPPERS = {'timeout': 1, 'nice': 0, 'ionice': 0, 'stdbuf': 0, 'time': 0, 'command': 0, 'exec': 0}
+# What sessions put around a suite in the same shell line without changing what it tests.
+SAFE_PROGS = {'echo', 'printf', 'test', '[', '[[', 'true', ':', 'cd', 'pwd', 'date', 'sleep', 'export', 'set', 'wc',
+              'cat', 'head', 'tail', 'tee', 'grep', 'ls'}
+SAFE_GIT = {'status', 'rev-parse', 'log', 'diff', 'show', 'branch', 'describe', 'fetch'}
+
+
+def command_parts(cmd):
+    """The simple commands of a command line (argv list or string), `bash -c` / `sh -c` unwrapped, each normalized
+    (leading VAR=value, env, timeout N, nice... dropped). Splits on && || ; | and newlines."""
+    if isinstance(cmd, str):
+        try:
+            argv = shlex.split(cmd)
+        except ValueError:
+            return [cmd.strip()] if cmd.strip() else []
+    else:
+        argv = [str(a) for a in cmd]
+    while argv and (re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', argv[0]) or argv[0] == 'env'):
+        argv = argv[1:]
+    while argv and os.path.basename(argv[0]) in WRAPPERS:
+        skip = WRAPPERS[os.path.basename(argv[0])]
+        argv = argv[1:]
+        while argv and argv[0].startswith('-'):
+            argv = argv[1:]
+        argv = argv[skip:]
+    if len(argv) >= 3 and os.path.basename(argv[0]) in SHELLS and re.match(r'^-[a-z]*c$', argv[1]):
+        parts = []
+        for piece in re.split(r'&&|\|\||;|\n|\|', argv[2]):
+            parts.extend(command_parts(piece))
+        return parts
+    words, i = [], 0
+    while i < len(argv):  # redirections (2>&1, > log, >>log, < in) do not change what runs
+        w = argv[i]
+        if w in ('>', '>>', '<', '2>', '2>>', '&>', '&>>'):
+            i += 2
+            continue
+        if not re.match(r'^(\d*>>?|&>>?|<)\S+$|^\d*>&\d+$', w):
+            words.append(w)
+        i += 1
+    return [' '.join(words)] if words else []
+
+
+def safe_part(part):
+    words = part.split()
+    if not words:
+        return True
+    prog = os.path.basename(words[0].lstrip('({'))
+    if prog == 'git':
+        return len(words) > 1 and words[1] in SAFE_GIT
+    return prog in SAFE_PROGS or prog in ('', ')', '}')
+
+
+def same_suite(cmd, matches):
+    """True when `cmd` runs one of `matches` (normalized suite commands) and nothing else but harmless commands. A line
+    that also deploys or publishes is never taken for a redundant test run."""
+    parts = command_parts(cmd)
+    if not any(p in matches for p in parts):
+        return False
+    return all(safe_part(p) for p in parts if p not in matches)
+
+
+def local_match(suite):
+    """The local command lines that are the same suite: its command, `local_commands` and `equivalent_to`."""
+    out = {norm_command(suite.get('command', ''))}
+    out.update(norm_command(c) for c in suite.get('local_commands') or [])
+    if suite.get('equivalent_to'):
+        out.add(norm_command(re.sub(r'\s*\(.*$', '', suite['equivalent_to'])))
+    out.discard('')
+    return sorted(out)
+
+
+def common_dir(cwd):
+    p = run(['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'], cwd=cwd, check=False)
+    return os.path.realpath(p.stdout.strip()) if p.returncode == 0 and p.stdout.strip() else None
+
+
+def worktree_tree(cwd):
+    """The tree a test run in `cwd` sees: HEAD plus uncommitted and untracked (not ignored) files. A copy of the index
+    is used, so the checkout's own index is never touched."""
+    top = git(['rev-parse', '--show-toplevel'], cwd)
+    index = git(['rev-parse', '--path-format=absolute', '--git-path', 'index'], top)
+    with tempfile.TemporaryDirectory(prefix='cloud-tests-tree-') as d:
+        tmp_index = os.path.join(d, 'index')
+        if os.path.exists(index):
+            shutil.copyfile(index, tmp_index)
+        env = dict(os.environ, GIT_INDEX_FILE=tmp_index)
+        run(['git', 'add', '-A'], cwd=top, env=env, timeout=120)
+        return run(['git', 'write-tree'], cwd=top, env=env).stdout.strip()
+
+
+def heavy_job_module():
+    from importlib.machinery import SourceFileLoader
+    import importlib.util
+    loader = SourceFileLoader('heavy_job', HEAVY_JOB_BIN)
+    spec = importlib.util.spec_from_loader('heavy_job', loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def local_jobs(hj):
+    """heavy-job's cpu jobs: running ones (a held slot) and queued ones (a live ticket), as heavy-job describes them."""
+    d = hj.state_dir()
+    jobs, seen = [], set()
+    for i in range(hj.slot_count()):
+        if not hj.slot_is_held(d, i):
+            continue
+        info = hj.read_info(d, i)
+        if not info or info.get('mode') != 'run':
+            continue
+        wrapper = info.get('wrapper_pid') or info.get('pid')
+        if wrapper in seen:
+            continue
+        seen.add(wrapper)
+        jobs.append(dict(info, state='running', wrapper=wrapper))
+    queued = [dict(item['info'], state='queued', wrapper=item['pid'], pid=None) for item in hj.read_queue(d, prune=False)]
+    return queued + jobs  # the queued ones first: stopping a running copy frees a slot that a queued copy would take
+
+
+def redundant_jobs(proj, runs, hj=None):
+    """[(run id, job)] for each local heavy-job job that runs the same suite on the same code as one of `runs`."""
+    hj = hj or heavy_job_module()
+    out, trees = [], {}
+    for job in local_jobs(hj):
+        cands = [(rid, e) for rid, e in runs
+                 if same_suite(job.get('argv') or [], e.get('local_match') or [norm_command(e.get('command', ''))])]
+        cwd = job.get('cwd') or ''
+        if not cands or not os.path.isdir(cwd) or common_dir(cwd) != proj.common:
+            continue
+        if cwd not in trees:
+            try:
+                trees[cwd] = worktree_tree(cwd)
+            except (RuntimeError, OSError, subprocess.SubprocessError):
+                trees[cwd] = None
+        for rid, e in cands:
+            if trees[cwd] == e['tree']:
+                out.append((rid, job))
+                break
+    return out
+
+
+def processes():
+    """pid -> {'ppid', 'start' (clock ticks since boot), 'uid', 'argv', 'container'} for every process we can read."""
+    procs = {}
+    for name in os.listdir('/proc'):
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        try:
+            with open(f'/proc/{pid}/stat') as f:
+                raw = f.read()
+            rest = raw[raw.rindex(')') + 2:].split()
+            with open(f'/proc/{pid}/cmdline', 'rb') as f:
+                argv = [a.decode(errors='replace') for a in f.read().split(b'\0') if a]
+            with open(f'/proc/{pid}/cgroup') as f:
+                cgroup = f.read()
+            uid = os.stat(f'/proc/{pid}').st_uid
+        except (OSError, ValueError):
+            continue
+        m = CONTAINER_CGROUP_RE.search(cgroup)
+        procs[pid] = {'ppid': int(rest[1]), 'start': int(rest[19]), 'uid': uid, 'argv': argv, 'state': rest[0],
+                      'container': next((g for g in m.groups() if g), None) if m else None}
+    return procs
+
+
+def subtree(root, procs):
+    children = {}
+    for pid, p in procs.items():
+        children.setdefault(p['ppid'], []).append(pid)
+    out, todo = [], [root]
+    while todo:
+        pid = todo.pop()
+        if pid in procs and pid not in out:
+            out.append(pid)
+            todo.extend(children.get(pid, []))
+    return out
+
+
+def exec_client(argv):
+    """True for `docker exec ...`, `docker compose exec ...`, `docker-compose exec ...` and `ddev exec ...`."""
+    if not argv:
+        return False
+    prog = os.path.basename(argv[0])
+    return prog in ('docker', 'docker-compose', 'ddev') and 'exec' in argv[1:4]
+
+
+DOCKER_EXEC_VALUE_OPTS = {'-e', '--env', '--env-file', '-u', '--user', '-w', '--workdir', '--detach-keys', '--index'}
+
+
+def exec_target(pid, procs):
+    """The full id of the container a `docker exec` / `docker compose exec` / `ddev exec` client runs in, resolved with
+    the client's own directory and environment (DOCKER_CONTEXT, COMPOSE_PROJECT_NAME...), or None."""
+    argv = procs[pid]['argv']
+    try:
+        cwd = os.readlink(f'/proc/{pid}/cwd')
+        with open(f'/proc/{pid}/environ', 'rb') as f:
+            env = dict(kv.split('=', 1) for kv in f.read().decode(errors='replace').split('\0') if '=' in kv)
+    except OSError:
+        return None
+    env.setdefault('PATH', os.environ.get('PATH', ''))
+    prog = os.path.basename(argv[0])
+    rest = argv[argv.index('exec') + 1:]
+    positional, i = None, 0
+    while i < len(rest):
+        w = rest[i]
+        if w in DOCKER_EXEC_VALUE_OPTS or w in ('-s', '--service', '-d', '--dir') and prog == 'ddev':
+            if prog == 'ddev' and w in ('-s', '--service') and i + 1 < len(rest):
+                positional = rest[i + 1]
+            i += 2
+            continue
+        if w.startswith('-'):
+            if prog == 'ddev' and w.startswith('--service='):
+                positional = w.split('=', 1)[1]
+            i += 1
+            continue
+        if prog != 'ddev':
+            positional = w
+        break
+    if prog == 'ddev':
+        d = cwd
+        while d != '/' and not os.path.isfile(os.path.join(d, '.ddev', 'config.yaml')):
+            d = os.path.dirname(d)
+        try:
+            with open(os.path.join(d, '.ddev', 'config.yaml')) as f:
+                m = re.search(r'^name:\s*["\']?([\w.-]+)', f.read(), re.M)
+        except OSError:
+            return None
+        name = f"ddev-{m.group(1) if m else os.path.basename(d)}-{positional or 'web'}"
+    elif 'compose' in argv[1:3] or prog == 'docker-compose':
+        if not positional:
+            return None
+        cmd = ['docker', 'compose', 'ps', '-q', positional] if prog == 'docker' else ['docker-compose', 'ps', '-q', positional]
+        try:
+            name = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True, timeout=20).stdout.split()[0]
+        except (OSError, subprocess.SubprocessError, IndexError):
+            return None
+    else:
+        name = positional
+    if not name:
+        return None
+    try:
+        out = subprocess.run(['docker', 'inspect', '-f', '{{.Id}}', name], env=env, capture_output=True, text=True,
+                             timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() if out.returncode == 0 and re.match(r'^[0-9a-f]{64}$', out.stdout.strip()) else None
+
+
+def container_execs(clients, procs):
+    """The exec processes a `docker exec` / `ddev exec` client started inside its container. They outlive their
+    client, so stopping the client is not enough. Matched by the container the client targets (its id against the
+    process's cgroup), our uid, start time (within EXEC_WINDOW_TICKS after the client) and a word of the client's
+    command in the container's command line. Returns (pids, clients whose container could not be resolved)."""
+    roots = [pid for pid, p in procs.items() if p['container'] and not procs.get(p['ppid'], {}).get('container')
+             and p['uid'] == os.getuid()]
+    found, unresolved = [], []
+    for c in clients:
+        cp = procs[c]
+        target = exec_target(c, procs)
+        if not target:
+            unresolved.append(c)
+            continue
+        words = {w for w in cp['argv'][cp['argv'].index('exec') + 1:] if len(w) >= 4 and not w.startswith('-')}
+        words |= {os.path.basename(w) for w in words}
+        words -= GENERIC_WORDS
+        for r in roots:
+            if procs[r]['container'] != target or not 0 <= procs[r]['start'] - cp['start'] <= EXEC_WINDOW_TICKS:
+                continue
+            tree = subtree(r, procs)
+            text = ' '.join(' '.join(procs[p]['argv']) for p in tree)
+            if any(w in text for w in words):
+                found.extend(tree)
+    return found, unresolved
+
+
+def alive(pid):
+    try:
+        with open(f'/proc/{pid}/stat') as f:
+            raw = f.read()
+        return raw[raw.rindex(')') + 2:].split()[0] != 'Z'
+    except (OSError, ValueError):
+        return False
+
+
+def stop_job(hj, rid, e, job):
+    """Stop one redundant local job: leave the note for its wrapper, SIGTERM its process tree (and its container
+    execs), SIGKILL what is still there after STOP_GRACE_S. Returns a one-line description."""
+    wrapper = job['wrapper']
+    note = (f"esa suite corre en la nube para este mismo código (run {rid}, suite {e['suite']}, commit {e['sha'][:12]}): "
+            f"el resultado llega con `~/.claude/scripts/cloud-tests wait {rid}`. No la relances aquí.")
+    stopped_dir = os.path.join(hj.state_dir(), getattr(hj, 'CLOUD_STOPPED_DIR', 'cloud-stopped'))
+    os.makedirs(stopped_dir, exist_ok=True)
+    with open(os.path.join(stopped_dir, f'{wrapper}.txt'), 'w') as f:
+        f.write(note + '\n')
+    procs = processes()
+    host = subtree(wrapper, procs)
+    inside, unresolved = container_execs([p for p in host if exec_client(procs[p]['argv'])], procs)
+    targets = [p for p in host if p != wrapper] + inside
+    for sig_round, sig in enumerate((signal.SIGTERM, signal.SIGKILL)):
+        for pid in ([wrapper] if sig_round == 0 else []) + targets:
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                pass
+        end = time.time() + STOP_GRACE_S
+        while time.time() < end and any(alive(p) for p in targets):
+            time.sleep(0.2)
+        targets = [p for p in targets if alive(p)]
+        if not targets:
+            break
+    end = time.time() + STOP_GRACE_S
+    while time.time() < end and alive(wrapper):  # it prints the note and leaves once its child is gone
+        time.sleep(0.2)
+    if alive(wrapper):
+        try:
+            os.kill(wrapper, signal.SIGKILL)
+        except OSError:
+            pass
+    left = [p for p in targets if alive(p)]
+    return (f"STOPPED {job['state']} run={rid} wrapper={wrapper} label={json.dumps(job.get('label') or '', ensure_ascii=False)} "
+            f"cwd={job.get('cwd')} argv={json.dumps(' '.join(job.get('argv') or []), ensure_ascii=False)} "
+            f"container_procs={len(inside)}" + (f" still_alive={left}" if left else '')
+            + (f" container_unresolved={unresolved}" if unresolved else ''))
+
+
+def stop_redundant(proj, rids=None):
+    """Stop the local heavy-job jobs that duplicate in-flight (or green) runs of this project. Prints and records."""
+    now = time.time()
+    with ledger(proj) as data:
+        runs = [(rid, dict(e)) for rid, e in data['runs'].items() if (rids is None or rid in rids) and blocking(e, now)]
+    if not runs:
+        return []
+    try:
+        hj = heavy_job_module()
+        jobs = redundant_jobs(proj, runs, hj)
+    except Exception as err:  # never let the cleanup break a request or a wait
+        print(f'WARN no pude mirar los trabajos locales de heavy-job: {err}')
+        return []
+    lines = []
+    for rid, job in jobs:
+        try:
+            lines.append(stop_job(hj, rid, dict(runs)[rid], job))
+        except Exception as err:
+            lines.append(f"WARN no pude parar wrapper={job.get('wrapper')}: {err}")
+    if lines:
+        with ledger(proj) as data:
+            for line in lines:
+                m = re.search(r'run=(\S+)', line)
+                if m and m.group(1) in data['runs']:
+                    data['runs'][m.group(1)].setdefault('stopped_local', []).append({'at': now, 'what': line})
+        for line in lines:
+            print(line)
+    return lines
+
+
+def blocking(e, now):
+    """A run that makes the same local run redundant: in flight in the cloud, or green within GREEN_REUSE_S."""
+    if e.get('state') == 'queued':
+        return now - queued_since(e) <= QUEUE_MAX_S
+    if e.get('state') == 'sent':
+        return now <= e.get('deadline', 0)
+    if e.get('state') in ('done', 'local'):
+        return (e.get('result') or {}).get('exit') == 0 and now - e.get('finished', e.get('created', 0)) <= GREEN_REUSE_S
+    return False
+
+
+# --------------------------------------------------------------------------------------------------------- commands
+
+def resolve_ref(proj, ref):
+    branch = ref or git(['symbolic-ref', '--short', '-q', 'HEAD'], proj.top, check=False)
+    if not branch:
+        die(4, 'NOT_PUSHED detached HEAD: pass --ref <pushed branch>')
+    local = git(['rev-parse', '--verify', '-q', f'refs/heads/{branch}^{{commit}}'], proj.top, check=False)
+    remote = run(['git', 'ls-remote', 'origin', f'refs/heads/{branch}'], cwd=proj.top, check=False).stdout.split()
+    remote_sha = remote[0] if remote else ''
+    if not local:
+        die(4, f'NOT_PUSHED {branch}: no such local branch')
+    if local != remote_sha:
+        die(4, f'NOT_PUSHED {branch} local={local[:12]} origin={remote_sha[:12] or "-"}: push it first (project rules), then retry')
+    return branch, local, git(['rev-parse', f'{local}^{{tree}}'], proj.top)
+
+
+def cmd_check(args):
+    proj = Project(args.repo)
+    why = eligibility(proj)
+    if why:
+        die(3, f'LOCAL {why}')
+    print(f'ELIGIBLE {proj.slug} key={proj.key}')
+
+
+def find_existing(data, key, now):
+    """(run id, line) of the run that makes a new request with this key redundant, or None: a finished one is REUSEd,
+    one queued or in flight is WAITed for."""
+    for rid, e in sorted(data['runs'].items(), key=lambda kv: kv[1]['created'], reverse=True):
+        if e['key'] != key:
+            continue
+        if e['state'] in ('done', 'local'):
+            if (e.get('result') or {}).get('exit') in RETRYABLE_EXITS:
+                continue
+            return rid, 'REUSE ' + describe(rid, e, now, data)[5:]
+        if e['state'] == 'sent':
+            return rid, f"WAIT {rid} session={e.get('session')} " + describe(rid, e, now, data)[8 + len(rid):]
+        if e['state'] == 'queued':
+            return rid, f'WAIT {rid} queued ' + describe(rid, e, now, data)[8 + len(rid):]
+    return None
+
+
+def run_preflight(proj, recipe, name, suite, tree, skip):
+    """The recipe's check-only commands (a suite's own `preflight` overrides the top-level one), run locally under
+    heavy-job before the run is queued. Skipped, saying so, when the checkout is not exactly the pushed tree."""
+    cmds = suite.get('preflight', recipe.get('preflight')) or []
+    if isinstance(cmds, str):
+        cmds = [cmds]
+    if not cmds:
+        return
+    if skip:
+        print(f'PREFLIGHT_SKIPPED {name} (--skip-preflight)')
+        return
+    try:
+        same = worktree_tree(proj.top) == tree
+    except (RuntimeError, OSError, subprocess.SubprocessError):
+        same = False
+    if not same:
+        print(f'PREFLIGHT_SKIPPED {name} (the checkout is not the pushed commit)')
+        return
+    if not os.access(HEAVY_JOB_BIN, os.X_OK):
+        print(f'PREFLIGHT_SKIPPED {name} (heavy-job is not installed)')
+        return
+    for cmd in cmds:
+        argv = [HEAVY_JOB_BIN, 'run', '--kind', 'typecheck', '--label', f'cloud-tests preflight {name}', '--',
+                'bash', '-c', cmd]
+        proc = subprocess.Popen(argv, cwd=proj.top, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                start_new_session=True)
+        try:
+            out = proc.communicate(timeout=PREFLIGHT_TIMEOUT_S)[0]
+            code = proc.returncode
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except OSError:
+                pass
+            out = (proc.communicate()[0] or '') + f'\n(preflight timed out after {PREFLIGHT_TIMEOUT_S // 60} min)'
+            code = 124
+        if code != 0:
+            print(f'PREFLIGHT_FAILED {name} exit={code} command={cmd}')
+            print('\n'.join((out or '').rstrip().splitlines()[-40:]))
+            sys.exit(6)
+
+
+def ensure_pump(proj):
+    """Spawns the detached pump (one per project, it takes a flock) so the queue moves with nobody waiting."""
+    if os.environ.get('CLOUD_TESTS_NO_PUMP') == '1':
+        return
+    try:
+        log = open(os.path.join(STATE_DIR, f'{proj.key}.pump.log'), 'a')
+        subprocess.Popen([os.path.realpath(__file__), '--repo', proj.top, 'pump'], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=log, stderr=log, cwd=proj.top)
+    except OSError as e:
+        print(f'WARN no pude lanzar el pump: {e}')
+
+
+def cmd_request(args):
+    proj = Project(args.repo)
+    branch, sha, tree = resolve_ref(proj, args.ref)
+    why = eligibility(proj, sha)
+    if why:
+        die(3, f'LOCAL {why}')
+    recipe = load_recipe(proj, sha)
+    suite = (recipe.get('suites') or {}).get(args.suite)
+    if not suite or not suite.get('command'):
+        die(3, f'LOCAL suite {args.suite!r} is not in {RECIPE} (cloud suites: {", ".join(recipe.get("suites", {})) or "none"})')
+    command = suite['command']
+    timeout_min = int(args.deadline_min or suite.get('timeout_min') or DEFAULT_DEADLINE_MIN)
+    key = run_key(tree, command)
+    now = time.time()
+    with ledger(proj) as data:
+        settle(proj, data, now)
+        found = find_existing(data, key, now)
+        pending = pending_runs(data)
+    if found:
+        print(found[1])
+        if pending:
+            ensure_pump(proj)
+        stop_redundant(proj, {found[0]})  # only a queued, in-flight or green run stops anything (`blocking`)
+        return
+    run_preflight(proj, recipe, args.suite, suite, tree, args.skip_preflight)  # outside the lock: it can take minutes
+    now = time.time()
+    lines = []
+    with ledger(proj) as data:
+        settle(proj, data, now)
+        found = find_existing(data, key, now)  # another session may have asked for the same code meanwhile
+        if not found:
+            rid = new_run_id()
+            for old in [r for r, e in data['runs'].items() if e.get('state') == 'queued' and e.get('suite') == args.suite
+                        and e.get('ref') == branch and e['key'] != key]:  # newer code on the same branch
+                data['runs'][old].update(state='superseded', superseded_by=rid, finished=now)
+                lines.append(f'SUPERSEDED {old} -> {rid}')
+            entry = {'run': rid, 'key': key, 'suite': args.suite, 'command': command, 'ref': branch, 'sha': sha,
+                     'tree': tree, 'timeout_min': timeout_min, 'requester': args.requester or os.environ.get('CLAUDE_SESSION_ID', ''),
+                     'created': now, 'queued_at': now, 'state': 'queued', 'local_match': local_match(suite)}
+            data['runs'][rid] = entry
+            try:
+                dispatch(proj, data, now, fresh=rid)
+            except LaunchFailed as err:
+                die(5, f'LAUNCH_FAILED {err}: run it locally with heavy-job')
+            if entry['state'] == 'sent':
+                lines.append(f"SENT {rid} session={entry['session']} suite={args.suite} sha={sha[:12]} tree={tree[:12]} "
+                             f"deadline_min={round((entry['deadline'] - entry['dispatched']) / 60)}")
+            else:
+                lines.append(f"QUEUED {rid} position={queued_ids(data).index(rid) + 1} suite={args.suite} "
+                             f"sha={sha[:12]} tree={tree[:12]}{held_note(data)}")
+        pending = pending_runs(data)
+    if found:
+        lines.append(found[1])
+        rid = found[0]
+    for line in lines:
+        print(line)
+    sys.stdout.flush()
+    if pending:
+        ensure_pump(proj)
+    stop_redundant(proj, {rid})
+
+
+def cmd_poll(args):
+    proj = Project(args.repo)
+    now = time.time()
+    with ledger(proj) as data:
+        settle(proj, data, now)
+        for rid, e in sorted(data['runs'].items(), key=lambda kv: kv[1]['created']):
+            if now - e['created'] < 86400 or e.get('state') in ('sent', 'queued'):
+                print(describe(rid, e, now, data))
+
+
+def cmd_pump(args):
+    """Keeps settling (and so dispatching) until nothing is queued or sent. One per project: it holds a flock."""
+    proj = Project(args.repo)
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(os.path.join(STATE_DIR, f'{proj.key}.pump.lock'), 'a+') as lk:
+        try:
+            fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            sys.exit(0)
+        lk.seek(0)
+        lk.truncate()
+        lk.write(str(os.getpid()))
+        lk.flush()
+        interval = int(os.environ.get('CLOUD_TESTS_PUMP_INTERVAL', 60))
+        end = time.time() + PUMP_MAX_S
+        failures = 0
+        while time.time() < end:
+            if not os.path.isdir(proj.top):  # the worktree it was started from is gone: let the next request respawn it
+                print(f'pump stops: {proj.top} no longer exists')
+                return
+            try:
+                with ledger(proj) as data:
+                    settle(proj, data, time.time())
+                    pending = pending_runs(data)
+                    lim = data.get('limit')
+                if lim and pending:  # a long limit (the weekly one) must not outlast the pump: it stays until after it
+                    end = max(end, lim['until'] + 3600)
+                failures = 0
+            except Exception as err:  # a bad tick (git, network) must not kill the pump...
+                failures += 1
+                print(f'WARN pump tick failed ({failures}): {err}')
+                if failures >= 5:  # ...but a pump that never works must not hold the lock for hours
+                    return
+                pending = True
+            if not pending:
+                return
+            time.sleep(interval)
+
+
+def cmd_wait(args):
+    proj = Project(args.repo)
+    end = time.time() + args.timeout
+    targets = list(args.runs)
+    announced = set()
+    while True:
+        now = time.time()
+        with ledger(proj) as data:
+            settle(proj, data, now)
+            missing = [r for r in targets if r not in data['runs']]
+            if missing:
+                die(3, f'UNKNOWN {" ".join(missing)}')
+            for i, r in enumerate(targets):  # a superseded run is waited for through its successor
+                while data['runs'][r].get('state') == 'superseded' and data['runs'][r].get('superseded_by') in data['runs']:
+                    nxt = data['runs'][r]['superseded_by']
+                    if r not in announced:
+                        announced.add(r)
+                        print(f'SUPERSEDED {r} -> {nxt}')
+                    r = nxt
+                targets[i] = r
+            targets = list(dict.fromkeys(targets))
+            states = {r: data['runs'][r]['state'] for r in targets}
+        stop_redundant(proj, set(targets))  # a local copy started meanwhile (outside heavy-job's guard window)
+        if all(s not in ('sent', 'queued') for s in states.values()):
+            with ledger(proj) as data:
+                for r in targets:
+                    print(describe(r, data['runs'][r], now, data))
+            sys.exit(5 if any(s in ('expired', 'mismatch', 'superseded') for s in states.values()) else 0)
+        if now >= end:
+            print('TIMEOUT ' + ' '.join(targets))
+            sys.exit(75)
+        time.sleep(min(args.interval, max(1, end - now)))
+
+
+def cmd_local_guard(args):
+    """For heavy-job: exit 3 with the reason when running ARGV in CWD would repeat a cloud run (in flight, or green
+    within GREEN_REUSE_S) of the same suite on the same code; exit 0 otherwise, and on any doubt."""
+    try:
+        names = [n for n in os.listdir(STATE_DIR) if n.endswith('.json')]
+    except OSError:
+        sys.exit(0)
+    cwd = os.path.realpath(args.cwd or os.getcwd())
+    common = common_dir(cwd) if names and args.argv else None
+    if not common:
+        sys.exit(0)
+    now = time.time()
+    for name in names:
+        try:
+            with open(os.path.join(STATE_DIR, name)) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if data.get('common') != common:
+            continue
+        cands = sorted(((rid, e) for rid, e in (data.get('runs') or {}).items() if blocking(e, now)
+                        and same_suite(args.argv, e.get('local_match') or [norm_command(e.get('command', ''))])),
+                       key=lambda kv: kv[1].get('created', 0), reverse=True)
+        if not cands:
+            continue
+        try:
+            tree = worktree_tree(cwd)
+        except (RuntimeError, OSError, subprocess.SubprocessError):
+            sys.exit(0)
+        for rid, e in cands:
+            if e.get('tree') != tree:
+                continue
+            if e['state'] in ('sent', 'queued'):
+                print(f"esa suite ya corre en la nube para este mismo código (run {rid}, suite {e['suite']}, commit "
+                      f"{e['sha'][:12]}). Espera su resultado con `~/.claude/scripts/cloud-tests wait {rid}` en segundo "
+                      f"plano, sin ocupar un hueco aquí. [CLOUD_RUNNING {rid}]")
+            else:
+                src = 'en local' if e['state'] == 'local' else 'en la nube'
+                print(f"esa suite ya pasó {src} para este mismo código (run {rid}, suite {e['suite']}, exit 0). Usa ese "
+                      f"resultado: `~/.claude/scripts/cloud-tests result {rid}`. [CLOUD_DONE {rid}]")
+            sys.exit(3)
+    sys.exit(0)
+
+
+def cmd_stop_local(args):
+    proj = Project(args.repo)
+    if not stop_redundant(proj, set(args.runs) if args.runs else None):
+        print('NONE no redundant local job')
+
+
+def cmd_result(args):
+    proj = Project(args.repo)
+    with ledger(proj) as data:
+        e = data['runs'].get(args.run)
+        if not e:
+            die(3, f'UNKNOWN {args.run}')
+        print(json.dumps(e, indent=1, ensure_ascii=False))
+
+
+def cmd_record_local(args):
+    proj = Project(args.repo)
+    branch = args.ref or git(['symbolic-ref', '--short', '-q', 'HEAD'], proj.top, check=False) or 'HEAD'
+    sha = git(['rev-parse', f'{branch}^{{commit}}'], proj.top)
+    tree = git(['rev-parse', f'{sha}^{{tree}}'], proj.top)
+    try:
+        recipe = json.loads(git(['show', f'{sha}:{RECIPE}'], proj.top))
+        command = recipe['suites'][args.suite]['command']
+    except (RuntimeError, ValueError, KeyError):
+        command = args.command or args.suite
+    now = time.time()
+    with ledger(proj) as data:
+        rid = args.run or new_run_id()
+        e = data['runs'].get(rid) or {'run': rid, 'suite': args.suite, 'command': command, 'ref': branch, 'sha': sha,
+                                       'tree': tree, 'key': run_key(tree, command), 'created': now, 'timeout_min': 0,
+                                       'deadline': now}
+        e['state'] = 'local'
+        e['result'] = {'exit': args.exit, 'summary': args.summary, 'source': 'local', 'finished_at': time.strftime('%Y-%m-%dT%H:%M:%S%z')}
+        data['runs'][rid] = e
+        print(f'RECORDED {rid} exit={args.exit} source=local sha={e["sha"][:12]}')
+
+
+def cmd_status(args):
+    proj = Project(args.repo)
+    now = time.time()
+    with ledger(proj) as data:
+        r = data.get('runner')
+        print(f"project={proj.key} repo={proj.slug} eligible={'yes' if not eligibility(proj) else 'no: ' + eligibility(proj)}")
+        if r:
+            print(f"runner={r['session']} runs={r.get('runs', 0)}/{MAX_RUNS_PER_RUNNER} age_h={int((now - r['created']) / 3600)}"
+                  f"{' DEAD' if r.get('dead') else ''} "
+                  f"usable={'yes' if runner_usable(r, now) else 'no'} busy={'yes' if runner_busy(data) else 'no'}")
+        else:
+            print('runner=none')
+        lim = note_limit(data, now)
+        if lim:
+            print(f"account_limit={lim['what']} until={hhmm(lim['until'])} source={lim['source']}: nothing is launched, "
+                  f"sent or expired until then; the queue moves by itself when it ends")
+        if data.get('launch_backoff_until', 0) > now:
+            print(f"launch_backoff_min={int((data['launch_backoff_until'] - now) / 60) + 1}")
+        print(f"queued={len(queued_ids(data))}")
+        for rid, e in sorted(data['runs'].items(), key=lambda kv: kv[1]['created'])[-15:]:
+            print('  ' + describe(rid, e, now, data))
+        for rid in queued_ids(data):  # a queued run older than the last 15 would otherwise not show
+            if rid not in [r_ for r_, _ in sorted(data['runs'].items(), key=lambda kv: kv[1]['created'])[-15:]]:
+                print('  ' + describe(rid, data['runs'][rid], now, data))
+
+
+def cmd_runner(args):
+    proj = Project(args.repo)
+    with ledger(proj) as data:
+        if args.forget and data.get('runner'):
+            data['runner']['dead'] = True
+            print(f"FORGOTTEN {data['runner']['session']}")
+        else:
+            print(json.dumps(data.get('runner'), ensure_ascii=False))
+
+
+def cmd_brief(args):
+    print(brief_for(Project(args.repo)))
+
+
+# ------------------------------------------------------------------------------------- retired runners (sweep)
+# 2026-11-21: the sidebar showed several stopped cloud test runners, some with a warning, taken for hung sessions that
+# no supervisor attended. Each runner that was replaced (mute, used up, too old, cut by the account's limit) stayed
+# active in the cloud for good: 24 of them on 2026-11-21, the oldest from 2026-11-12. Supervisors cannot see cloud sessions with their tools, so `sweep` (run by the supervisor-watchdog timer)
+# archives them, with the same call the CLI uses (POST /v1/code/sessions/<id>/archive, reversible from the archive).
+
+API_BASE = os.environ.get('CLOUD_TESTS_API', 'https://api.anthropic.com')
+API_FAKE = os.environ.get('CLOUD_TESTS_API_FAKE')  # self-test: a JSON file {"sessions": [...]}
+CREDENTIALS = os.environ.get('CLOUD_TESTS_CREDENTIALS', os.path.expanduser('~/.claude/.credentials.json'))
+SWEEP_GRACE_S = int(os.environ.get('CLOUD_TESTS_SWEEP_GRACE_S', str(3 * 3600)))
+RUNNER_ENV_KIND = 'anthropic_cloud'  # a real cloud session; never 'bridge' (the Remote Control mirror of a local one)
+
+
+class ApiUnavailable(Exception):
+    pass
+
+
+def sid_key(session):
+    """'session_01X…' (what the CLI prints) and 'cse_01X…' (what the sessions API lists) are the same session."""
+    s = str(session or '')
+    for prefix in ('session_', 'cse_'):
+        if s.startswith(prefix):
+            return s[len(prefix):]
+    return s
+
+
+def api_headers():
+    """The CLI's own login, read at call time; never refreshed or written here (the CLI renews it when it runs)."""
+    try:
+        with open(CREDENTIALS) as f:
+            oauth = json.load(f).get('claudeAiOauth') or {}
+    except (OSError, ValueError):
+        raise ApiUnavailable('no CLI login')
+    token = oauth.get('accessToken')
+    if not token or oauth.get('expiresAt', 0) / 1000 < time.time() + 60:
+        raise ApiUnavailable('the CLI login has expired (the CLI renews it the next time it runs)')
+    return {'Authorization': f'Bearer {token}', 'Content-Type': 'application/json',
+            'anthropic-version': '2023-06-01', 'User-Agent': 'cloud-tests (claude-cli)'}
+
+
+def api_call(method, path, body=None):
+    """(HTTP status, JSON body). Network trouble raises ApiUnavailable; an HTTP error is returned, not raised."""
+    if API_FAKE:
+        with open(API_FAKE) as f:
+            st = json.load(f)
+        if method == 'GET':
+            return 200, {'data': [x for x in st['sessions'] if x.get('status') == 'active'], 'next_cursor': None}
+        sid = path.rstrip('/').split('/')[-2]
+        hit = [x for x in st['sessions'] if x['id'] == sid]
+        for x in hit:
+            x['status'] = 'archived'
+        st['archived'] = st.get('archived', []) + [sid]
+        with open(API_FAKE, 'w') as f:
+            json.dump(st, f)
+        return (200 if hit else 404), {}
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(API_BASE + path, headers=api_headers(), method=method,
+                                 data=None if body is None else json.dumps(body).encode())
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read()
+            return resp.status, json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as err:
+        return err.code, {}
+    except (urllib.error.URLError, OSError, ValueError) as err:
+        raise ApiUnavailable(f'network: {err}')
+
+
+def active_cloud_sessions():
+    import urllib.parse
+    rows, cursor = [], None
+    for _ in range(20):
+        q = '/v1/code/sessions?limit=100&statuses=active' + (f'&cursor={urllib.parse.quote(cursor)}' if cursor else '')
+        code, body = api_call('GET', q)
+        if code != 200:
+            raise ApiUnavailable(f'listing the cloud sessions: HTTP {code}')
+        rows += body.get('data') or []
+        cursor = body.get('next_cursor')
+        if not cursor:
+            break
+    return rows
+
+
+def iso_epoch(text):
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(str(text).replace('Z', '+00:00')).timestamp()
+    except ValueError:
+        return 0
+
+
+@contextlib.contextmanager
+def ledger_by_key(key):
+    """The ledger of a project by its key, under the same lock as `ledger`; written back only if it changed."""
+    path = os.path.join(STATE_DIR, f'{key}.json')
+    with open(path + '.lock', 'a+') as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        with open(path) as f:
+            data = json.load(f)
+        before = json.dumps(data, sort_keys=True)
+        yield data
+        if json.dumps(data, sort_keys=True) != before:
+            tmp = path + '.tmp'
+            with open(tmp, 'w') as f:
+                json.dump(data, f, indent=1, ensure_ascii=False)
+            os.replace(tmp, path)
+
+
+def ledger_keys():
+    if not os.path.isdir(STATE_DIR):
+        return []
+    return sorted(n[:-5] for n in os.listdir(STATE_DIR) if n.endswith('.json') and n != 'account-limit.json')
+
+
+def sweep_targets(data, sessions, now):
+    """The cloud sessions this ledger proves are its runners and that nobody needs any more. A session qualifies only if
+    its id is in the ledger (the runner, a retired one or a run's session), it is a real cloud session, still active,
+    not working, quiet for SWEEP_GRACE_S (a runner cut by a limit may still publish its result: 2026-11-19), no sent run
+    waits on it, and it is not the usable current runner (a current one that failed or is used up does go)."""
+    r = data.get('runner') or {}
+    proven = {sid_key(x.get('session')) for x in data.get('retired') or []}
+    proven |= {sid_key(e.get('session')) for e in data['runs'].values() if e.get('session')}
+    proven.add(sid_key(r.get('session')))
+    proven.discard('')
+    busy = {sid_key(e.get('session')) for e in data['runs'].values() if e.get('state') == 'sent'}
+    current = sid_key(r.get('session'))
+    repo = (data.get('repo') or '').lower()
+    out = []
+    for s in sessions:
+        k = sid_key(s.get('id'))
+        if k not in proven or k in busy:
+            continue
+        if s.get('environment_kind') != RUNNER_ENV_KIND or s.get('status') != 'active' \
+                or s.get('worker_status') == 'running':
+            continue
+        if now - iso_epoch(s.get('last_event_at') or s.get('updated_at') or '') < SWEEP_GRACE_S:
+            continue
+        if k == current and runner_usable(r, now) and s.get('status_bucket') != 'failed':
+            continue
+        urls = [str(x.get('url', '')).lower() for x in (s.get('config') or {}).get('sources') or [] if isinstance(x, dict)]
+        if repo and any(urls) and not any(repo in u for u in urls):
+            continue  # paranoia: an id from this ledger on another repository is not ours to touch
+        out.append(s)
+    return out
+
+
+def cmd_sweep(args):
+    """Archives the project runners nobody needs (see sweep_targets) across every ledger. Never fails the caller."""
+    now = time.time()
+    try:
+        sessions = active_cloud_sessions()
+    except ApiUnavailable as err:
+        print(f'SKIP {err}')
+        return
+    log = os.path.join(STATE_DIR, 'sweep.log')
+    for key in ledger_keys():
+        try:
+            with ledger_by_key(key) as data:
+                if not isinstance(data.get('runs'), dict):
+                    continue
+                targets = sweep_targets(data, sessions, now)
+                r = data.get('runner') or {}
+                if not args.dry_run and any(sid_key(s['id']) == sid_key(r.get('session')) for s in targets):
+                    r['dead'] = True  # failed or used up: the next run launches a fresh runner
+            done = []
+            for s in targets:
+                line = (f"{key} {s['id']} bucket={s.get('status_bucket')} last={str(s.get('last_event_at'))[:16]} "
+                        f"title={json.dumps((s.get('title') or '')[:60], ensure_ascii=False)}")
+                if args.dry_run:
+                    print(f'WOULD_ARCHIVE {line}')
+                    continue
+                code, _ = api_call('POST', f"/v1/code/sessions/{s['id']}/archive", {})
+                if code in (200, 404, 409):  # archived now, already gone, already archived
+                    print(f'ARCHIVED {line}')
+                    done.append(s['id'])
+                    with open(log, 'a') as f:
+                        f.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} ARCHIVED {line} http={code}\n")
+                elif code in (401, 403):
+                    print(f'SKIP the cloud refused the archive (HTTP {code}); next tick')
+                    return
+                else:
+                    print(f'WARN {line} HTTP {code}')
+            if done:
+                with ledger_by_key(key) as data:
+                    data['archived'] = (data.get('archived') or [])[-(100 - len(done)):] + \
+                        [{'session': sid, 'at': now} for sid in done]
+        except (OSError, ValueError, ApiUnavailable) as err:
+            print(f'WARN {key}: {err}')
+
+
+# -------------------------------------------------------------------------------------------------------- self-test
+
+FAKE_CLAUDE = r'''#!/usr/bin/env python3
+import os, sys, json, time
+log = os.environ['FAKE_CLAUDE_LOG']
+a = sys.argv[1:]
+with open(log, 'a') as f:
+    f.write(json.dumps(a) + '\n')
+if not sys.stdout.isatty():
+    print('Error: --cloud requires an interactive terminal.'); sys.exit(1)
+mode = os.environ.get('FAKE_CLAUDE_MODE', 'ok')
+if a and a[0] == '--cloud':
+    if mode == 'launch-fail':
+        print('Error: no cloud environment'); sys.exit(1)
+    n = sum(1 for _ in open(log))
+    print('Created cloud session: test'); print(f'Resume with: claude --teleport session_FAKE{n}')
+elif a and a[0] == '-p':
+    if mode == 'send-fail':
+        print('Error: session not found'); sys.exit(1)
+    print('Sent to cloud session.'); print('Session ID: ' + a[-1])
+'''
+
+
+def self_test():
+    global HEAVY_JOB_BIN
+    failures = []
+
+    def check(name, cond, detail=''):
+        print(('ok   ' if cond else 'FAIL ') + name + ('' if cond else f'  [{detail}]'))
+        if not cond:
+            failures.append(name)
+
+    me = os.path.realpath(__file__)
+    if not os.access(HEAVY_JOB_BIN, os.X_OK):  # the toolkit layout: heavy-job installed next to this script
+        HEAVY_JOB_BIN = os.path.join(os.path.dirname(me), 'heavy-job')
+    if not os.access(HEAVY_JOB_BIN, os.X_OK):
+        check('heavy-job is installed (the local-guard and preflight checks need it; set HEAVY_JOB_BIN)', False,
+              HEAVY_JOB_BIN)
+        print(f'\n{len(failures)} failure(s)')
+        return 1
+    tmp = tempfile.mkdtemp(prefix='cloud-tests-selftest-')
+    env = dict(os.environ, CLOUD_TESTS_STATE=os.path.join(tmp, 'state'), CLOUD_TESTS_ALLOW_ANY_REMOTE='1',
+               CLOUD_TESTS_OWN_KEY='1', CLOUD_TESTS_NO_PUMP='1', FAKE_CLAUDE_LOG=os.path.join(tmp, 'claude.log'),
+               CLOUD_TESTS_LIMIT='none',  # never the real account's usage
+               CLOUD_TESTS_API='http://127.0.0.1:9', CLOUD_TESTS_CREDENTIALS=os.path.join(tmp, 'no-login.json'),
+               HEAVY_JOB_BIN=HEAVY_JOB_BIN, HEAVY_JOB_DIR=os.path.join(tmp, 'hj'))  # never the real API or slots
+    # The throwaway repositories commit with the git identity already configured on the machine (authorship rule).
+    env.pop('GIT_DIR', None)
+    fake = os.path.join(tmp, 'claude')
+    with open(fake, 'w') as f:
+        f.write(FAKE_CLAUDE)
+    os.chmod(fake, 0o755)
+    env['CLOUD_TESTS_CLAUDE'] = fake
+    origin = os.path.join(tmp, 'origin.git')
+    work = os.path.join(tmp, 'proj')
+    sh = lambda c, cwd=work, e=env: subprocess.run(c, shell=True, cwd=cwd, env=e, text=True,
+                                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    ct = lambda a, e=env: subprocess.run([me, *a], cwd=work, env=e, text=True, stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT)
+    sh(f'git init -q --bare -b main {origin}', cwd=tmp)
+    sh(f'git init -q -b main {work} && git -C {work} remote add origin {origin}', cwd=tmp)
+    launches = lambda: sum(1 for l in open(env['FAKE_CLAUDE_LOG']) if l.startswith('["--cloud"')) \
+        if os.path.exists(env['FAKE_CLAUDE_LOG']) else 0
+    sends = lambda: sum(1 for l in open(env['FAKE_CLAUDE_LOG']) if l.startswith('["-p"')) \
+        if os.path.exists(env['FAKE_CLAUDE_LOG']) else 0
+
+    tree_now = lambda: sh('git rev-parse HEAD^{tree}').stdout.strip()
+    pub = os.path.join(tmp, 'pub')
+
+    def publish(run_id, tree_, code=0, summary='ok'):
+        """The runner publishes a result on the results branch (a clone, as the cloud does)."""
+        if not os.path.isdir(pub):
+            init = (f'git clone -q {origin} {pub} && cd {pub} && git checkout -q --orphan {RESULTS_BRANCH} '
+                    f'&& git rm -rqf --cached --ignore-unmatch . && mkdir -p runs')
+        else:
+            init = f'cd {pub} && git pull -q --rebase origin {RESULTS_BRANCH} && mkdir -p runs'
+        body = json.dumps({'run': run_id, 'tree': tree_, 'exit': code, 'duration_s': 61, 'summary': summary})
+        return sh(f"{init} && echo '{body}' > runs/{run_id}.json && git add runs && git commit -qm 'cloud-tests: {run_id} [skip ci]' "
+                  f"&& git push -q origin HEAD:refs/heads/{RESULTS_BRANCH}", cwd=tmp)
+
+    def ledger_file():
+        st_ = env['CLOUD_TESTS_STATE']
+        names = [x for x in os.listdir(st_) if x.endswith('.json')] if os.path.isdir(st_) else []
+        return os.path.join(st_, names[0]) if names else None
+
+    def ledger_data():
+        with open(ledger_file()) as f_:
+            return json.load(f_)
+
+    def edit_ledger(fn):
+        d_ = ledger_data()
+        fn(d_)
+        with open(ledger_file(), 'w') as f_:
+            json.dump(d_, f_)
+
+    def drain(e_=env):
+        """Publishes a green result for every sent run and polls, until nothing is queued or sent."""
+        for _ in range(12):
+            d_ = ledger_data()
+            sent_ = [(r_, x_) for r_, x_ in d_['runs'].items() if x_['state'] == 'sent']
+            if not sent_ and not any(x_['state'] == 'queued' for x_ in d_['runs'].values()):
+                return
+            for r_, x_ in sent_:
+                publish(r_, x_['tree'])
+            ct(['poll'], e=e_)
+
+    sh('echo hi > a.txt && git add a.txt && git commit -qm init && git push -q origin main')
+    p = ct(['check'])
+    check('check: no recipe -> LOCAL (3)', p.returncode == 3 and 'no .claude/cloud-tests.json' in p.stdout, p.stdout)
+
+    os.makedirs(os.path.join(work, '.claude'))
+    with open(os.path.join(work, RECIPE), 'w') as f:
+        json.dump({'setup': 'tools/cloud-setup.sh', 'suites': {'ci': {'command': 'make ci', 'timeout_min': 30},
+                                                                 'unit': {'command': 'make unit'}}}, f)
+    sh('git add .claude && git commit -qm recipe')
+    p = ct(['request', '--suite', 'ci'])
+    check('request: unpushed branch -> NOT_PUSHED (4)', p.returncode == 4 and p.stdout.startswith('NOT_PUSHED main'), p.stdout)
+    sh('git push -q origin main')
+    p = ct(['check'])
+    check('check: recipe and remote -> ELIGIBLE', p.returncode == 0 and p.stdout.startswith('ELIGIBLE'), p.stdout)
+
+    p = ct(['request', '--suite', 'nope'])
+    check('request: unknown suite -> LOCAL (3)', p.returncode == 3 and "suite 'nope'" in p.stdout, p.stdout)
+
+    p = ct(['request', '--suite', 'ci', '--requester', 'test'])
+    m = re.match(r'SENT (\S+) session=(session_FAKE\d+)', p.stdout)
+    check('request: first run launches the runner -> SENT', p.returncode == 0 and bool(m) and launches() == 1, p.stdout)
+    run1 = m.group(1) if m else ''
+    log_lines = open(env['FAKE_CLAUDE_LOG']).read() if os.path.exists(env['FAKE_CLAUDE_LOG']) else ''
+    check('launch: the brief and the first request reach the CLI', 'corredor de las pruebas' in log_lines and
+          'CLOUD-TESTS-REQUEST' in log_lines and run1 in log_lines, log_lines[:200])
+
+    p = ct(['request', '--suite', 'ci'])
+    check('request: same tree and command in flight -> WAIT, no new launch or send',
+          p.returncode == 0 and p.stdout.startswith(f'WAIT {run1}') and launches() == 1 and sends() == 0, p.stdout)
+
+    p = ct(['request', '--suite', 'unit'])
+    m2 = re.match(r'QUEUED (\S+) position=1 suite=unit', p.stdout)
+    check('request: the runner is busy -> QUEUED behind it, nothing sent',
+          p.returncode == 0 and bool(m2) and launches() == 1 and sends() == 0, p.stdout)
+    run2 = m2.group(1) if m2 else ''
+    p = ct(['request', '--suite', 'unit'])
+    check('request: same tree and command queued -> WAIT, nothing sent',
+          p.returncode == 0 and p.stdout.startswith(f'WAIT {run2} queued') and 'position=1' in p.stdout and sends() == 0, p.stdout)
+
+    p = ct(['poll'])
+    check('poll: one pending, one queued with its position',
+          p.stdout.count('PENDING') == 1 and re.search(rf'QUEUED {run2} .*position=1', p.stdout) is not None, p.stdout)
+    p = ct(['status'])
+    check('status: shows the queue', 'queued=1' in p.stdout and 'busy=yes' in p.stdout and f'QUEUED {run2}' in p.stdout, p.stdout)
+
+    # The runner publishes run1's result on the results branch (a clone, as the cloud does).
+    tree = tree_now()
+    published = publish(run1, tree)
+    check('fixture: the fake runner published its result', published.returncode == 0, published.stdout[-300:])
+    p = ct(['wait', run1, '--timeout', '5', '--interval', '1'])
+    check('wait: result on the results branch -> DONE exit 0', p.returncode == 0 and p.stdout.startswith(f'DONE {run1} exit=0'), p.stdout)
+    check('wait: the queued run was sent as a follow-up once the runner was free',
+          sends() == 1 and launches() == 1 and ledger_data()['runs'][run2]['state'] == 'sent'
+          and ledger_data()['runs'][run2].get('dispatched'), f'{sends()} {launches()}')
+    check('fetch: no local branch created for the results',
+          sh(f'git rev-parse -q --verify refs/heads/{RESULTS_BRANCH}').returncode != 0, '')
+
+    p = ct(['request', '--suite', 'ci'])
+    check('request: same tree and command already done -> REUSE, nothing sent',
+          p.returncode == 0 and p.stdout.startswith(f'REUSE {run1}') and launches() == 1 and sends() == 1, p.stdout)
+
+    # A result whose tree does not match is not trusted.
+    publish(run2, 'deadbeef')
+    p = ct(['wait', run2, '--timeout', '5', '--interval', '1'])
+    check('wait: tree mismatch -> MISMATCH, exit 5', p.returncode == 5 and p.stdout.startswith(f'MISMATCH {run2}'), p.stdout)
+
+    # A dispatched run past its deadline: the runner is presumed silent, a new one is launched and the run goes again;
+    # past the deadline a second time it expires.
+    sh('echo 2 > a.txt && git commit -qam two && git push -q origin main')
+    p = ct(['request', '--suite', 'ci', '--deadline-min', '0'])
+    run3 = p.stdout.split()[1] if p.stdout.startswith('SENT') else ''
+    check('request: runner free again -> SENT by follow-up', bool(run3) and sends() == 2 and launches() == 1, p.stdout)
+    deadline_min = int(re.search(r'deadline_min=(\d+)', p.stdout).group(1)) if 'deadline_min' in p.stdout else 0
+    check('request: the deadline counts from the dispatch (timeout + DISPATCH_OVERHEAD_MIN)',
+          deadline_min == 30 + DISPATCH_OVERHEAD_MIN, p.stdout)
+    old_session = ledger_data()['runs'][run3]['session']
+    edit_ledger(lambda d: d['runs'][run3].update(deadline=time.time() - 1))
+    p = ct(['wait', run3, '--timeout', '3', '--interval', '1'])
+    e3 = ledger_data()['runs'][run3]
+    check('deadline: silent runner -> relaunched and the run goes again (still pending)',
+          p.returncode == 75 and launches() == 2 and e3['state'] == 'sent' and e3.get('redispatched') == 1
+          and e3['session'] != old_session and ledger_data()['runner']['session'] == e3['session'], p.stdout)
+    edit_ledger(lambda d: d['runs'][run3].update(deadline=time.time() - 1))
+    p = ct(['wait', run3, '--timeout', '3', '--interval', '1'])
+    check('wait: past the deadline a second time -> EXPIRED, exit 5',
+          p.returncode == 5 and p.stdout.startswith(f'EXPIRED {run3}') and launches() == 2
+          and ledger_data()['runs'][run3].get('expired_reason') == 'deadline', p.stdout)
+    p = ct(['record-local', '--suite', 'ci', '--exit', '0', '--summary', 'local fallback ok'])
+    check('record-local: stored as local', p.returncode == 0 and p.stdout.startswith('RECORDED'), p.stdout)
+    p = ct(['request', '--suite', 'ci'])
+    check('request: a local result for the same tree is reused', p.stdout.startswith('REUSE') and 'source=local' in p.stdout, p.stdout)
+
+    # A runner that no longer takes follow-ups is replaced. (The runner of run3 was marked dead: a first request
+    # launches a fresh one, then a usable runner refuses the follow-up.)
+    sh('echo 3 > a.txt && git commit -qam three && git push -q origin main')
+    before = launches()
+    p = ct(['request', '--suite', 'ci'])
+    run_a = p.stdout.split()[1] if p.stdout.startswith('SENT') else ''
+    check('request: dead runner -> a new runner is launched', bool(run_a) and launches() == before + 1, p.stdout)
+    publish(run_a, tree_now())
+    sh('echo 4 > a.txt && git commit -qam four && git push -q origin main')
+    before = launches()
+    p = ct(['request', '--suite', 'ci'], e=dict(env, FAKE_CLAUDE_MODE='send-fail'))
+    run_b = p.stdout.split()[1] if p.stdout.startswith('SENT') else ''
+    check('request: follow-up refused -> a new runner is launched', bool(run_b) and launches() == before + 1, p.stdout)
+
+    # Rotation after MAX_RUNS.
+    publish(run_b, tree_now())
+    sh('echo 5 > a.txt && git commit -qam five && git push -q origin main')
+    before = launches()
+    p = ct(['request', '--suite', 'ci'], e=dict(env, CLOUD_TESTS_MAX_RUNS='1'))
+    run_c = p.stdout.split()[1] if p.stdout.startswith('SENT') else ''
+    check('request: runner with too many runs -> rotated', bool(run_c) and launches() == before + 1, p.stdout)
+
+    publish(run_c, tree_now())
+    sh('echo 6 > a.txt && git commit -qam six && git push -q origin main')
+    sha6 = sh('git rev-parse HEAD').stdout.strip()
+    p = ct(['request', '--suite', 'ci'], e=dict(env, FAKE_CLAUDE_MODE='launch-fail', CLOUD_TESTS_MAX_RUNS='1'))
+    check('request: launch refused -> LAUNCH_FAILED (5), nothing recorded as sent',
+          p.returncode == 5 and p.stdout.startswith('LAUNCH_FAILED')
+          and not any(e_['sha'] == sha6 for e_ in ledger_data()['runs'].values()), p.stdout)
+
+    # A run the cloud could not prepare (exit 97) is reported, but a new request runs it again.
+    sh('echo 8 > a.txt && git commit -qam eight && git push -q origin main')
+    p = ct(['request', '--suite', 'ci'])
+    run6 = p.stdout.split()[1] if p.stdout.startswith('SENT') else ''
+    tree6 = tree_now()
+    publish(run6, tree6, code=97, summary='setup failed')
+    p = ct(['wait', run6, '--timeout', '5', '--interval', '1'])
+    check('wait: setup failure reported as DONE exit=97', p.stdout.startswith(f'DONE {run6} exit=97'), p.stdout)
+    p = ct(['request', '--suite', 'ci'])
+    run6b = p.stdout.split()[1] if p.stdout.startswith('SENT') else ''
+    check('request: an exit-97 result is not reused -> SENT again', bool(run6b) and run6 not in p.stdout, p.stdout)
+    publish(run6b, tree6)
+
+    # Redundant local runs (2026-11-13): a cloud request stops the same suite on the same code that was
+    # running or queued in heavy-job, and heavy-job refuses to start it again.
+    check('norm: env, bash -c and assignments', norm_command("bash -c 'IS_DDEV_PROJECT=true XDEBUG_MODE=off make ci'")
+          == 'make ci' and norm_command(['env', 'A=1', 'make', 'ci']) == 'make ci')
+    check('local_match: command, local_commands and equivalent_to',
+          local_match({'command': 'X=1 make ci', 'local_commands': ['ddev exec make ci'],
+                       'equivalent_to': 'make gate (heavy-job --kind gate)'}) == ['ddev exec make ci', 'make ci', 'make gate'])
+    hjdir = os.path.join(tmp, 'hj')
+    henv = dict(env, HEAVY_JOB_DIR=hjdir, HEAVY_JOB_SLOTS='1', HEAVY_JOB_LIGHT_SLOTS='1', HEAVY_JOB_SCAN='0',
+                HEAVY_JOB_SETTLE='0', HEAVY_JOB_MIN_AVAIL_GIB='0', HEAVY_JOB_POLL='0.2', CLOUD_TESTS_BIN=me,
+                HEAVY_JOB_BIN=HEAVY_JOB_BIN)
+
+    def wait_for(cond, seconds=20):
+        end = time.time() + seconds
+        while time.time() < end:
+            if cond():
+                return True
+            time.sleep(0.2)
+        return False
+
+    with open(os.path.join(work, 'suite.sh'), 'w') as f:
+        f.write('#!/bin/sh\n[ -n "$QUICK" ] && exit 0\nsleep 300 &\nwait\n')
+    os.chmod(os.path.join(work, 'suite.sh'), 0o755)
+    recipe = json.load(open(os.path.join(work, RECIPE)))
+    recipe['suites']['slow'] = {'command': 'SLOW=1 ./suite.sh', 'timeout_min': 30}
+    json.dump(recipe, open(os.path.join(work, RECIPE), 'w'))
+    sh('git add -A && git commit -qm slow && git push -q origin main')
+    local = lambda e=henv: subprocess.Popen([HEAVY_JOB_BIN, 'run', '--kind', 'gate', '--label', 'local copy', '--',
+                                             './suite.sh'], cwd=work, env=e, text=True, stdout=subprocess.PIPE,
+                                            stderr=subprocess.STDOUT)
+    first = local()
+    held = wait_for(lambda: os.path.exists(os.path.join(hjdir, 'slot-0.json')))
+    second = local()
+    queued = wait_for(lambda: any(n.endswith('.ticket') for n in os.listdir(os.path.join(hjdir, 'queue')))
+                      if os.path.isdir(os.path.join(hjdir, 'queue')) else False)
+    check('fixture: one local copy running and one queued', held and queued)
+    wait_for(lambda: len(subtree(first.pid, processes())) >= 3, 5)
+    tree_before = subtree(first.pid, processes())
+    p = ct(['request', '--suite', 'slow'], e=henv)
+    run_slow = p.stdout.split()[1] if p.stdout.startswith('SENT') else ''
+    check('request: SENT and both local copies stopped (queued first)', p.stdout.startswith('SENT')
+          and p.stdout.count('STOPPED') == 2 and p.stdout.index('STOPPED queued') < p.stdout.index('STOPPED running'),
+          p.stdout)
+    out1 = first.communicate(timeout=60)[0]
+    out2 = second.communicate(timeout=60)[0]
+    check('heavy-job: the running copy exits 76 and says why', first.returncode == 76 and 'corre en la nube' in out1,
+          f'{first.returncode} {out1[-300:]}')
+    check('heavy-job: the queued copy exits 76 and says why', second.returncode == 76 and 'corre en la nube' in out2,
+          f'{second.returncode} {out2[-300:]}')
+    check('stop: no process of the running copy is left (its sleep included)',
+          len(tree_before) >= 3 and not any(alive(x) for x in tree_before), str(tree_before))
+    third = subprocess.run([HEAVY_JOB_BIN, 'run', '--kind', 'gate', '--', './suite.sh'], cwd=work, env=henv, text=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60)
+    check('heavy-job: the same suite on the same code is refused while the cloud runs it (76)',
+          third.returncode == 76 and f'CLOUD_RUNNING {run_slow}' in third.stdout, f'{third.returncode} {third.stdout}')
+    p = ct(['local-guard', '--cwd', work, '--', 'bash', '-c', 'SLOW=1 ./suite.sh'], e=henv)
+    check('local-guard: bash -c and VAR=value forms are the same suite', p.returncode == 3, p.stdout)
+    p = ct(['local-guard', '--cwd', work, '--', 'sh', '-c', 'test -z "$(git status --porcelain)" && echo "CLEAN '
+            '$(git rev-parse HEAD)" && cd . && timeout 3600 ./suite.sh 2>&1 | tail -40'], e=henv)
+    check('local-guard: a suite wrapped in harmless commands (test, echo, cd, timeout, | tail) is the same suite',
+          p.returncode == 3, p.stdout)
+    p = ct(['local-guard', '--cwd', work, '--', 'bash', '-c', './suite.sh && ./deploy.sh'], e=henv)
+    check('local-guard: a suite chained with a deploy is never taken for redundant', p.returncode == 0, p.stdout)
+    with open(os.path.join(work, 'b.txt'), 'w') as f:
+        f.write('uncommitted\n')
+    fourth = subprocess.run([HEAVY_JOB_BIN, 'run', '--kind', 'gate', '--', './suite.sh'], cwd=work,
+                            env=dict(henv, QUICK='1'), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            timeout=60)
+    check('heavy-job: other code (an untracked file) is not redundant: it runs', fourth.returncode == 0, fourth.stdout)
+    os.remove(os.path.join(work, 'b.txt'))
+    p = ct(['local-guard', '--cwd', work, '--', './other.sh'], e=henv)
+    check('local-guard: another command is not redundant', p.returncode == 0, p.stdout)
+    publish(run_slow, tree_now(), summary='ok')
+    ct(['wait', run_slow, '--timeout', '5', '--interval', '1'], e=henv)
+    fifth = subprocess.run([HEAVY_JOB_BIN, 'run', '--kind', 'gate', '--', './suite.sh'], cwd=work,
+                           env=dict(henv, QUICK='1'), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           timeout=60)
+    check('heavy-job: already green in the cloud for this code -> refused (76, CLOUD_DONE)',
+          fifth.returncode == 76 and f'CLOUD_DONE {run_slow}' in fifth.stdout, f'{fifth.returncode} {fifth.stdout}')
+    # Validating a suite (the same tree once locally, once in the cloud) works in this order: local first, to the end
+    # and without record-local, then the cloud request.
+    sh('echo 7 > a.txt && git commit -qam seven && git push -q origin main')
+    sixth = subprocess.run([HEAVY_JOB_BIN, 'run', '--kind', 'gate', '--', './suite.sh'], cwd=work,
+                           env=dict(henv, QUICK='1'), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                           timeout=60)
+    p = ct(['request', '--suite', 'slow'], e=henv)
+    check('validation: local run first (no record-local), then the cloud request -> SENT, not REUSE',
+          sixth.returncode == 0 and p.stdout.startswith('SENT') and 'STOPPED' not in p.stdout, f'{sixth.stdout} {p.stdout}')
+    for proc in (first, second):
+        if proc.poll() is None:
+            proc.kill()
+
+    # ---- the queue ---------------------------------------------------------------------------------------------
+    drain()
+
+    # An old-format ledger (key `runner`, sent runs without `dispatched`) loads unchanged and its runner counts as busy.
+    sh('echo 9 > a.txt && git commit -qam nine && git push -q origin main')
+    tree9 = tree_now()
+    sha9 = sh('git rev-parse HEAD').stdout.strip()
+    now_ = time.time()
+
+    def legacy(d):
+        d['runner'] = {'session': 'session_OLD', 'created': now_, 'runs': 1}
+        d['runs']['legacy-1'] = {'run': 'legacy-1', 'key': run_key(tree9, 'make unit'), 'suite': 'unit', 'command': 'make unit',
+                                 'ref': 'main', 'sha': sha9, 'tree': tree9, 'timeout_min': 60, 'requester': '',
+                                 'created': now_ - 60, 'deadline': now_ + 3600, 'state': 'sent', 'session': 'session_OLD',
+                                 'local_match': ['make unit']}
+        d['runs']['legacy-2'] = dict(d['runs']['legacy-1'], run='legacy-2', key='x:y', session='session_ANCIENT',
+                                     deadline=now_ - 5)
+    edit_ledger(legacy)
+    before_l, before_s = launches(), sends()
+    p = ct(['request', '--suite', 'ci'])
+    run_l = p.stdout.split()[1] if p.stdout.startswith('QUEUED') else ''
+    d_ = ledger_data()
+    check('legacy: a request behind a legacy sent run is QUEUED, nothing sent or launched',
+          bool(run_l) and launches() == before_l and sends() == before_s and d_['runs'][run_l]['state'] == 'queued', p.stdout)
+    check('legacy: the legacy run keeps its state, deadline and shape; one past its deadline expires without a relaunch',
+          d_['runs']['legacy-1']['state'] == 'sent' and 'dispatched' not in d_['runs']['legacy-1']
+          and d_['runs']['legacy-1']['deadline'] == now_ + 3600 and d_['runs']['legacy-2']['state'] == 'expired'
+          and 'expired_reason' not in d_['runs']['legacy-2'] and not d_['runner'].get('dead'), json.dumps(d_['runs']['legacy-2']))
+    publish('legacy-1', tree9)
+    p = ct(['wait', 'legacy-1', '--timeout', '5', '--interval', '1'])
+    d_ = ledger_data()
+    check('legacy: once the legacy run settles the queued one goes to the same runner as a follow-up',
+          p.stdout.startswith('DONE legacy-1') and sends() == before_s + 1 and launches() == before_l
+          and d_['runs'][run_l]['state'] == 'sent' and d_['runs'][run_l]['session'] == 'session_OLD'
+          and d_['runs'][run_l].get('dispatched'), p.stdout)
+
+    # A queued run is superseded by newer code on the same branch; wait follows the chain.
+    sh('echo 10 > a.txt && git commit -qam ten && git push -q origin main')
+    p = ct(['request', '--suite', 'unit'])
+    run_q1 = p.stdout.split()[1] if p.stdout.startswith('QUEUED') else ''
+    sh('echo 11 > a.txt && git commit -qam eleven && git push -q origin main')
+    tree11 = tree_now()
+    p = ct(['request', '--suite', 'unit'])
+    m_ = re.match(rf'SUPERSEDED {run_q1} -> (\S+)\nQUEUED (\S+) position=1 ', p.stdout)
+    run_q2 = m_.group(1) if m_ else ''
+    d_ = ledger_data()
+    check('supersede: the older queued run on the same suite and branch is SUPERSEDED by the new one',
+          bool(m_) and m_.group(1) == m_.group(2) and d_['runs'][run_q1]['state'] == 'superseded'
+          and d_['runs'][run_q1]['superseded_by'] == run_q2 and d_['runs'][run_l]['state'] == 'sent', p.stdout)
+    p = ct(['poll'])
+    check('supersede: describe() says who replaced it', f'SUPERSEDED {run_q1} by {run_q2} suite=unit' in p.stdout, p.stdout)
+    p = ct(['wait', run_q1, '--timeout', '2', '--interval', '1'])
+    check('wait: follows a superseded run to its successor (still pending -> 75)',
+          p.returncode == 75 and p.stdout.count(f'SUPERSEDED {run_q1} -> {run_q2}') == 1 and f'TIMEOUT {run_q2}' in p.stdout, p.stdout)
+    publish(run_l, tree9)
+    p = ct(['wait', run_q1, '--timeout', '3', '--interval', '1'])
+    check('wait: the busy run finished -> the successor is dispatched meanwhile (still pending)',
+          p.returncode == 75 and ledger_data()['runs'][run_q2]['state'] == 'sent', p.stdout)
+    publish(run_q2, tree11)
+    p = ct(['wait', run_q1, '--timeout', '5', '--interval', '1'])
+    check('wait: exit code comes from the final run (0), the old id is announced once',
+          p.returncode == 0 and p.stdout.count(f'SUPERSEDED {run_q1} -> {run_q2}') == 1 and f'DONE {run_q2} exit=0' in p.stdout, p.stdout)
+    check('blocking: a queued run blocks a redundant local run only while it is young',
+          blocking({'state': 'queued', 'created': time.time()}, time.time())
+          and not blocking({'state': 'queued', 'created': time.time() - QUEUE_MAX_S - 5}, time.time()))
+
+    # A launch that fails inside settle expires the head run and starts a backoff: no launch on every poll.
+    sh('echo 12 > a.txt && git commit -qam twelve && git push -q origin main')
+    p = ct(['request', '--suite', 'ci'])
+    run_r1 = p.stdout.split()[1] if p.stdout.startswith('SENT') else ''
+    sh('echo 13 > a.txt && git commit -qam thirteen && git push -q origin main')
+    tree13 = tree_now()
+    p = ct(['request', '--suite', 'ci'])
+    run_r2 = p.stdout.split()[1] if p.stdout.startswith('QUEUED') else ''
+    check('queue: the second request waits behind the first', bool(run_r1) and bool(run_r2), p.stdout)
+    edit_ledger(lambda d: d['runs'][run_r1].update(deadline=time.time() - 1))
+    before_l = launches()
+    fail_env = dict(env, FAKE_CLAUDE_MODE='launch-fail')
+    p = ct(['poll'], e=fail_env)
+    d_ = ledger_data()
+    check('launch failure in settle: the head run is EXPIRED (launch_failed) and the next one stays queued',
+          launches() == before_l + 1 and d_['runs'][run_r1]['state'] == 'expired'
+          and d_['runs'][run_r1]['expired_reason'] == 'launch_failed' and d_['runs'][run_r2]['state'] == 'queued'
+          and f'EXPIRED {run_r1}' in p.stdout and 'reason=launch_failed' in p.stdout and d_['launch_backoff_until'] > time.time(),
+          p.stdout)
+    p = ct(['poll'], e=fail_env)
+    check('launch failure: the next poll does not launch again (backoff)',
+          launches() == before_l + 1 and ledger_data()['runs'][run_r2]['state'] == 'queued', p.stdout)
+    edit_ledger(lambda d: d.update(launch_backoff_until=time.time() - 1))
+    p = ct(['poll'])
+    check('launch failure: after the backoff the queue moves again with a new runner',
+          launches() == before_l + 2 and ledger_data()['runs'][run_r2]['state'] == 'sent' and 'launch_backoff_until' not in ledger_data(),
+          p.stdout)
+    publish(run_r2, tree13)
+    ct(['poll'])
+
+    # A queued run that never gets a runner expires.
+    drain()
+    sh('echo 14 > a.txt && git commit -qam fourteen && git push -q origin main')
+    p = ct(['request', '--suite', 'ci'])
+    run_s1 = p.stdout.split()[1] if p.stdout.startswith('SENT') else ''
+    sh('echo 15 > a.txt && git commit -qam fifteen && git push -q origin main')
+    p = ct(['request', '--suite', 'unit'])
+    run_s2 = p.stdout.split()[1] if p.stdout.startswith('QUEUED') else ''
+    edit_ledger(lambda d: d['runs'][run_s2].update(created=time.time() - QUEUE_MAX_S - 60, queued_at=time.time() - QUEUE_MAX_S - 60))
+    p = ct(['poll'])
+    check('queue: a run queued longer than QUEUE_MAX_S is EXPIRED (queue)',
+          f'EXPIRED {run_s2}' in p.stdout and ledger_data()['runs'][run_s2].get('expired_reason') == 'queue', p.stdout)
+
+    # Preflight: check-only commands before queuing, only when the checkout is exactly the pushed commit.
+    drain()
+    marker = os.path.join(tmp, 'preflight-ran')
+
+    def recipe_commit(n, **extra):
+        rec = json.load(open(os.path.join(work, RECIPE)))
+        rec.pop('preflight', None)
+        for suite_ in rec['suites'].values():
+            suite_.pop('preflight', None)
+        for k_, v_ in extra.items():
+            if k_ == 'unit_preflight':
+                rec['suites']['unit']['preflight'] = v_
+            else:
+                rec[k_] = v_
+        json.dump(rec, open(os.path.join(work, RECIPE), 'w'))
+        sh(f'echo {n} > a.txt && git commit -qam recipe{n} && git push -q origin main')
+
+    recipe_commit(16, preflight=['echo style-error >&2; exit 7'])
+    sha16 = sh('git rev-parse HEAD').stdout.strip()
+    p = ct(['request', '--suite', 'ci'], e=henv)
+    check('preflight: a failing command -> PREFLIGHT_FAILED (6) with its output, nothing recorded',
+          p.returncode == 6 and p.stdout.startswith("PREFLIGHT_FAILED ci exit=7 command=echo style-error >&2; exit 7")
+          and 'style-error' in p.stdout and not any(x_['sha'] == sha16 for x_ in ledger_data()['runs'].values()), p.stdout)
+    p = ct(['request', '--suite', 'ci', '--skip-preflight'], e=henv)
+    check('preflight: --skip-preflight says so and goes on', p.returncode == 0 and p.stdout.startswith('PREFLIGHT_SKIPPED ci (--skip-preflight)')
+          and re.search(r'^(SENT|QUEUED) ', p.stdout, re.M) is not None, p.stdout)
+    drain()
+    recipe_commit(17, preflight=['echo style-error >&2; exit 7'])
+    with open(os.path.join(work, 'c.txt'), 'w') as f:
+        f.write('not pushed\n')
+    p = ct(['request', '--suite', 'ci'], e=henv)
+    check('preflight: the checkout differs from the pushed commit -> PREFLIGHT_SKIPPED and goes on',
+          p.returncode == 0 and p.stdout.startswith('PREFLIGHT_SKIPPED ci (the checkout is not the pushed commit)')
+          and re.search(r'^(SENT|QUEUED) ', p.stdout, re.M) is not None, p.stdout)
+    os.remove(os.path.join(work, 'c.txt'))
+    drain()
+    recipe_commit(18, preflight=[f'touch {marker}', 'true'])
+    p = ct(['request', '--suite', 'ci'], e=henv)
+    check('preflight: passing commands ran and the run is queued or sent, with no preflight message',
+          p.returncode == 0 and os.path.exists(marker) and re.match(r'(SENT|QUEUED) ', p.stdout) and 'PREFLIGHT' not in p.stdout, p.stdout)
+    drain()
+    recipe_commit(19, preflight=['true'], unit_preflight=['exit 3'])
+    p = ct(['request', '--suite', 'unit'], e=henv)
+    check('preflight: a suite\'s own preflight overrides the top-level one', p.returncode == 6 and 'exit=3 command=exit 3' in p.stdout, p.stdout)
+    recipe_commit(20)
+    p = ct(['request', '--suite', 'unit'], e=henv)
+    check('preflight: no preflight in the recipe -> says nothing', p.returncode == 0 and 'PREFLIGHT' not in p.stdout, p.stdout)
+
+    # The pump moves the queue with nobody waiting.
+    drain()
+    pump_env = {k_: v_ for k_, v_ in env.items() if k_ != 'CLOUD_TESTS_NO_PUMP'}
+    pump_env['CLOUD_TESTS_PUMP_INTERVAL'] = '1'
+    sh('echo 21 > a.txt && git commit -qam twentyone && git push -q origin main')
+    p = ct(['request', '--suite', 'ci'], e=pump_env)
+    run_p1 = p.stdout.split()[1] if p.stdout.startswith('SENT') else ''
+    sh('echo 22 > a.txt && git commit -qam twentytwo && git push -q origin main')
+    tree22 = tree_now()
+    p = ct(['request', '--suite', 'unit'], e=pump_env)
+    run_p2 = p.stdout.split()[1] if p.stdout.startswith('QUEUED') else ''
+    lock_file = os.path.join(env['CLOUD_TESTS_STATE'], os.listdir(env['CLOUD_TESTS_STATE'])[0].split('.')[0] + '.pump.lock')
+    ok_lock = wait_for(lambda: os.path.exists(lock_file) and os.path.getsize(lock_file) > 0, 10)
+    pump_pid = int(open(lock_file).read() or 0) if ok_lock else 0
+    check('pump: request spawned it (detached, pid in its lock file)', bool(run_p1 and run_p2) and pump_pid > 0 and alive(pump_pid), p.stdout)
+    publish(run_p1, sh('git rev-parse HEAD~1^{tree}').stdout.strip())
+    check('pump: with no wait running, the queued run is dispatched',
+          wait_for(lambda: ledger_data()['runs'][run_p2]['state'] == 'sent', 15), json.dumps(ledger_data()['runs'][run_p2]))
+    publish(run_p2, tree22)
+    check('pump: nothing queued or sent -> it exits',
+          wait_for(lambda: ledger_data()['runs'][run_p2]['state'] == 'done' and not alive(pump_pid), 15), '')
+    if pump_pid and alive(pump_pid):
+        os.kill(pump_pid, signal.SIGKILL)
+
+    # The account's usage limit (2026-11-19: the 5-hour limit killed the runners and the runs expired). A state dir
+    # of its own, so the runs above do not interfere.
+    lenv = dict(env, CLOUD_TESTS_STATE=os.path.join(tmp, 'state-limit'))
+    lct = lambda a, until=None: ct(a, e=dict(lenv, CLOUD_TESTS_LIMIT=str(until) if until else 'none'))
+
+    def lledger(fn=None):
+        st_ = lenv['CLOUD_TESTS_STATE']
+        path_ = os.path.join(st_, [x for x in os.listdir(st_) if x.endswith('.json') and x != 'account-limit.json'][0])
+        with open(path_) as f_:
+            d_ = json.load(f_)
+        if fn:
+            fn(d_)
+            with open(path_, 'w') as f_:
+                json.dump(d_, f_)
+        return d_
+
+    sh('echo limit > limit.txt && git add limit.txt && git commit -qm limit && git push -q origin main')
+    l0, s0 = launches(), sends()
+    soon = time.time() + 3600
+    p = lct(['request', '--suite', 'ci', '--skip-preflight'], until=soon)
+    m = re.match(r'QUEUED (\S+) position=1 .*held_by_limit_until=', p.stdout)
+    check('limit: a request while the account is out of usage -> QUEUED and held, nothing launched or sent',
+          p.returncode == 0 and bool(m) and launches() == l0 and sends() == s0, p.stdout)
+    lrun = m.group(1) if m else ''
+    lledger(lambda d_: d_['runs'][lrun].update(created=time.time() - 5 * 3600, queued_at=time.time() - 5 * 3600))
+    p = lct(['poll'], until=soon)
+    check('limit: a run queued for 5 h does not expire while the limit lasts',
+          lledger()['runs'][lrun]['state'] == 'queued' and launches() == l0 and 'held_by_limit_until' in p.stdout, p.stdout)
+    p = lct(['status'], until=soon)
+    check('limit: status says the account is out of usage', 'account_limit=five_hour' in p.stdout, p.stdout)
+    p = lct(['poll'])
+    d = lledger()
+    check('limit: when it ends the queue clock starts again and the run is launched',
+          d['runs'][lrun]['state'] == 'sent' and launches() == l0 + 1 and not d.get('limit'), p.stdout)
+    lsession = d['runs'][lrun].get('session')
+    lledger(lambda d_: d_['runs'][lrun].update(deadline=time.time() - 60))
+    p = lct(['poll'], until=time.time() + 3600)
+    d = lledger()
+    check('limit: a sent run past its deadline during the limit stays sent; the runner is not taken for mute',
+          d['runs'][lrun]['state'] == 'sent' and not d['runner'].get('dead') and launches() == l0 + 1, p.stdout)
+    s1 = sends()
+    p = lct(['poll'])
+    d = lledger()
+    e_ = d['runs'][lrun]
+    check('limit: after it the cut run stays with its runner and gets a whole new deadline from the end of the limit',
+          e_['state'] == 'sent' and e_.get('session') == lsession and e_.get('limit_cuts') == 1
+          and e_['deadline'] >= time.time() + (e_['timeout_min'] + LAUNCH_OVERHEAD_MIN + LIMIT_RESUME_GRACE_MIN) * 60 - 120
+          and not e_.get('redispatched') and not d['runner'].get('dead') and sends() == s1 and launches() == l0 + 1,
+          json.dumps(e_)[:300])
+    p = lct(['poll'])
+    check('limit: the new deadline is given once per limit window', lledger()['runs'][lrun].get('limit_cuts') == 1)
+    publish(lrun, lledger()['runs'][lrun]['tree'])
+    lct(['poll'])
+    check('limit: a session that carries on by itself after the limit: its result is taken',
+          lledger()['runs'][lrun]['state'] == 'done' and launches() == l0 + 1)
+    # A runner that stays silent after the limit is a mute runner as before.
+    p = lct(['request', '--suite', 'unit', '--skip-preflight'], until=time.time() + 3600)
+    m = re.match(r'QUEUED (\S+) ', p.stdout)
+    lrun2 = m.group(1) if m else ''
+    s2 = sends()
+    lct(['poll'])
+    check('limit: when it ends a queued run goes to the runner that is still there (a follow-up, no launch)',
+          lledger()['runs'].get(lrun2, {}).get('state') == 'sent' and sends() == s2 + 1 and launches() == l0 + 1, p.stdout)
+    lct(['poll'], until=time.time() + 3600)
+    lct(['poll'])
+    lledger(lambda d_: d_['runs'][lrun2].update(deadline=time.time() - 60))
+    lct(['poll'])
+    d = lledger()
+    check('limit: silent past the new deadline -> mute runner: a fresh one and the attempt counted',
+          d['runs'][lrun2].get('redispatched') == 1 and d['runs'][lrun2]['state'] == 'sent' and launches() == l0 + 2,
+          json.dumps(d['runs'][lrun2])[:300])
+    check('sweep: the runner a fresh one replaces is kept in `retired`, so `sweep` can archive it later',
+          len(d.get('retired') or []) >= 1 and d['retired'][-1]['session'] != d['runner']['session'], json.dumps(d)[:300])
+
+    # sweep (2026-11-21: 24 replaced runners stayed active in the cloud; one with ⚠ in his sidebar). A ledger and a fake
+    # sessions API of their own.
+    senv = dict(env, CLOUD_TESTS_STATE=os.path.join(tmp, 'state-sweep'), CLOUD_TESTS_API_FAKE=os.path.join(tmp, 'api.json'))
+    os.makedirs(senv['CLOUD_TESTS_STATE'])
+    iso = lambda age_s: time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - age_s))
+    old, fresh_ = iso(5 * 3600), iso(600)
+    sl = {'project': 'sw-1', 'repo': 'o/sw', 'runner': {'session': 'session_CUR', 'created': time.time() - 3600, 'runs': 1},
+          'retired': [{'session': 'session_RET'}], 'results_seen': None,
+          'runs': {'a': {'state': 'done', 'session': 'session_DONE'}, 'b': {'state': 'sent', 'session': 'session_BUSY'},
+                   'c': {'state': 'expired', 'session': 'session_RUNNING'}, 'd': {'state': 'done', 'session': 'session_NEW'},
+                   'e': {'state': 'done', 'session': 'session_BRIDGE'}, 'f': {'state': 'done', 'session': 'session_OTHER'}}}
+    with open(os.path.join(senv['CLOUD_TESTS_STATE'], 'sw-1.json'), 'w') as f_:
+        json.dump(sl, f_)
+    mk = lambda i, **kw: dict({'id': i, 'status': 'active', 'worker_status': 'idle', 'status_bucket': 'completed',
+                               'environment_kind': 'anthropic_cloud', 'last_event_at': old, 'title': 'Corredor de tests',
+                               'config': {'sources': [{'url': 'https://github.com/o/sw'}]}}, **kw)
+    api = {'sessions': [mk('cse_CUR'), mk('cse_RET'), mk('cse_DONE'), mk('cse_BUSY'), mk('cse_RUNNING', worker_status='running'),
+                        mk('cse_NEW', last_event_at=fresh_), mk('cse_BRIDGE', environment_kind='bridge'),
+                        mk('cse_OTHER', config={'sources': [{'url': 'https://github.com/o/elsewhere'}]}),
+                        mk('cse_STRANGER', title='Cloud test runner')]}
+    with open(senv['CLOUD_TESTS_API_FAKE'], 'w') as f_:
+        json.dump(api, f_)
+    p = ct(['sweep', '--dry-run'], e=senv)
+    check('sweep --dry-run: names what it would archive and archives nothing',
+          'WOULD_ARCHIVE sw-1 cse_RET' in p.stdout and 'WOULD_ARCHIVE sw-1 cse_DONE' in p.stdout
+          and not json.load(open(senv['CLOUD_TESTS_API_FAKE'])).get('archived'), p.stdout)
+    p = ct(['sweep'], e=senv)
+    arch = set(json.load(open(senv['CLOUD_TESTS_API_FAKE'])).get('archived') or [])
+    check('sweep: a retired runner and the runner of a finished run are archived', arch >= {'cse_RET', 'cse_DONE'}, p.stdout)
+    check('sweep: the usable current runner is never archived', 'cse_CUR' not in arch, p.stdout)
+    check('sweep: a runner a sent run waits on is never archived', 'cse_BUSY' not in arch, p.stdout)
+    check('sweep: a working runner is never archived', 'cse_RUNNING' not in arch, p.stdout)
+    check('sweep: a runner quiet for less than the grace is kept (it may still publish)', 'cse_NEW' not in arch, p.stdout)
+    check('sweep: a bridge (Remote Control) session is never archived', 'cse_BRIDGE' not in arch, p.stdout)
+    check('sweep: an id from the ledger on another repository is left alone', 'cse_OTHER' not in arch, p.stdout)
+    check('sweep: a session the ledgers do not prove is left alone, whatever its title', 'cse_STRANGER' not in arch, p.stdout)
+    with open(os.path.join(senv['CLOUD_TESTS_STATE'], 'sw-1.json')) as f_:
+        d = json.load(f_)
+    check('sweep: what it archived is written in the ledger', {x['session'] for x in d.get('archived') or []} >= {'cse_RET', 'cse_DONE'},
+          json.dumps(d)[:300])
+    st_ = json.load(open(senv['CLOUD_TESTS_API_FAKE']))
+    for x in st_['sessions']:
+        if x['id'] == 'cse_CUR':
+            x['status_bucket'] = 'failed'
+    with open(senv['CLOUD_TESTS_API_FAKE'], 'w') as f_:
+        json.dump(st_, f_)
+    p = ct(['sweep'], e=senv)
+    with open(os.path.join(senv['CLOUD_TESTS_STATE'], 'sw-1.json')) as f_:
+        d = json.load(f_)
+    check('sweep: a current runner that failed is archived and marked dead, so the next run gets a fresh one',
+          'cse_CUR' in (json.load(open(senv['CLOUD_TESTS_API_FAKE'])).get('archived') or []) and d['runner'].get('dead') is True,
+          p.stdout)
+    p = ct(['sweep'], e=dict(senv, CLOUD_TESTS_API_FAKE='', CLOUD_TESTS_CREDENTIALS=os.path.join(tmp, 'no-creds.json')))
+    check('sweep: without a CLI login it skips quietly (exit 0)', p.returncode == 0 and p.stdout.startswith('SKIP'), p.stdout)
+
+    # Exclusions and slugs.
+    check('slug: github ssh alias', github_slug('git@github-work:acme/widgets.git') == 'acme/widgets')
+    check('slug: https', github_slug('https://github.com/acme/gadgets.git') == 'acme/gadgets')
+    check('slug: not github', github_slug('https://gitlab.com/a/b.git') is None if not os.environ.get('CLOUD_TESTS_ALLOW_ANY_REMOTE') else True)
+
+    class P:  # minimal stand-in
+        pass
+    saved = set(EXCLUDED_NAMES), set(EXCLUDED_OWNERS)
+    EXCLUDED_NAMES.clear(); EXCLUDED_NAMES.update({'private-app', 'team-api'})
+    EXCLUDED_OWNERS.clear(); EXCLUDED_OWNERS.update({'team-org'})
+    try:
+        for name, slug, want in [('private-app', 'acme/private-app', True), ('x', 'team-org/x', True),
+                                 ('team-api', 'Team-Org/team-api', True), ('checkout', 'acme/team-api', True),
+                                 ('widgets', 'acme/widgets', False)]:
+            p_ = P(); p_.name = name; p_.slug = slug
+            check(f'excluded: {slug} -> {want}', excluded(p_) == want)
+    finally:
+        EXCLUDED_NAMES.clear(); EXCLUDED_NAMES.update(saved[0])
+        EXCLUDED_OWNERS.clear(); EXCLUDED_OWNERS.update(saved[1])
+
+    shutil.rmtree(tmp, ignore_errors=True)
+    print(f'\n{len(failures)} failure(s)')
+    return 1 if failures else 0
+
+
+# ------------------------------------------------------------------------------------------------------------- main
+
+def main():
+    ap = argparse.ArgumentParser(prog='cloud-tests', description=__doc__.split('\n')[0])
+    ap.add_argument('--repo', help='checkout or worktree of the project (default: current directory)')
+    sub = ap.add_subparsers(dest='cmd', required=True)
+    sub.add_parser('check')
+    p = sub.add_parser('request')
+    p.add_argument('--suite', required=True)
+    p.add_argument('--ref', help='pushed branch to test (default: the current branch)')
+    p.add_argument('--requester', help='who asks (session id or label)')
+    p.add_argument('--deadline-min', type=int)
+    p.add_argument('--skip-preflight', action='store_true', help='do not run the recipe\'s preflight commands')
+    sub.add_parser('poll')
+    p = sub.add_parser('wait')
+    p.add_argument('runs', nargs='+')
+    p.add_argument('--timeout', type=int, default=3600)
+    p.add_argument('--interval', type=int, default=60)
+    p = sub.add_parser('result')
+    p.add_argument('run')
+    p = sub.add_parser('record-local')
+    p.add_argument('--suite', required=True)
+    p.add_argument('--exit', type=int, required=True)
+    p.add_argument('--summary', required=True)
+    p.add_argument('--ref')
+    p.add_argument('--run', help='the expired cloud run this replaces')
+    p.add_argument('--command')
+    sub.add_parser('status')
+    p = sub.add_parser('runner')
+    p.add_argument('--forget', action='store_true')
+    sub.add_parser('brief')
+    sub.add_parser('pump')
+    p = sub.add_parser('sweep')
+    p.add_argument('--dry-run', action='store_true')
+    sub.add_parser('self-test')
+    p = sub.add_parser('local-guard')
+    p.add_argument('--cwd')
+    p = sub.add_parser('stop-local')
+    p.add_argument('runs', nargs='*')
+    argv = sys.argv[1:]
+    after = []
+    if '--' in argv:
+        i = argv.index('--')
+        argv, after = argv[:i], argv[i + 1:]
+    args = ap.parse_args(argv)
+    args.argv = after
+    if args.cmd == 'self-test':
+        sys.exit(self_test())
+    {'check': cmd_check, 'request': cmd_request, 'poll': cmd_poll, 'wait': cmd_wait, 'result': cmd_result,
+     'record-local': cmd_record_local, 'status': cmd_status, 'runner': cmd_runner, 'brief': cmd_brief,
+     'local-guard': cmd_local_guard, 'stop-local': cmd_stop_local, 'pump': cmd_pump, 'sweep': cmd_sweep}[args.cmd](args)
+
+
+if __name__ == '__main__':
+    main()

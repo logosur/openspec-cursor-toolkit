@@ -1,7 +1,8 @@
 name: heavy-jobs
 summary: >-
   One semaphore for the heavy development jobs of every project on the machine (suites, builds,
-  installs, emulators, models) with the gate that sends those commands through it.
+  installs, emulators, models) with the gate that sends those commands through it, and cloud-tests,
+  which runs a project's declared test suites in a Claude Code cloud session instead of the local slots.
 depends: [core]
 requires:
   python: "3.10"
@@ -11,14 +12,25 @@ notes:
   - Opt-in. Its gate denies heavy commands that are not launched through heavy-job.
   - Set default_slots in the heavy-job config piece to what the machine can take.
   - Priority by the developer's order needs the supervision module; without it heavy-job refuses priority.
+  - >-
+    cloud-tests acts only in a project that commits a .claude/cloud-tests.json recipe (its suites, their commands,
+    optional preflight checks); everywhere else `check` says LOCAL and nothing changes. It launches cloud sessions
+    with the Claude Code CLI (`claude --cloud`, which needs `script` for a pseudo-terminal) and reads results back
+    from the branch cloud-tests-results of the project's remote.
+  - "Projects that must never go to the cloud are listed in the cloud-tests config piece (excluded_names, excluded_owners); by default none is."
+  - "The installer writes no timer: `cloud-tests sweep` (stops this machine's idle cloud runners) is meant to run from a periodic user unit, for example next to the supervisor watchdog."
+# Named by these pieces and installed by other modules (project-pause and supervisor-lock by supervision,
+# account-switch by accounts). Every caller works without them.
 project_provided:
-  - scripts/cloud-tests
   - scripts/project-pause
+  - scripts/supervisor-lock
+  - scripts/account-switch
 files:
   - {src: global/scripts/heavy-job, dest: scripts/heavy-job, mode: "0755"}
   - {src: global/scripts/lib/heavy_job_classifier.py, dest: scripts/lib/heavy_job_classifier.py}
   - {src: global/hooks/heavy-job-gate, dest: hooks/heavy-job-gate, mode: "0755"}
   - {src: global/rules/trabajos-pesados.md, dest: rules/trabajos-pesados.md}
+  - {src: global/scripts/cloud-tests, dest: scripts/cloud-tests, mode: "0755"}
 hooks:
   - global/settings/hooks.heavy-jobs.json
-config: [heavy-job]
+config: [heavy-job, cloud-tests]

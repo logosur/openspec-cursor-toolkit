@@ -151,8 +151,8 @@ SUPERVISION = _load_config('supervision', {'presence_min': 20})
 
 # 0 = wait as long as needed. A limit would make a queued job die and lose its place.
 DEFAULT_MAX_WAIT = 0
-# Cloud tests (optional, cloud-tests is not part of the toolkit): a suite that runs in the cloud is not run here
-# too. `cloud-tests local-guard`
+# Cloud tests (optional: cloud-tests comes with this module, and a project opts in with its .claude/cloud-tests.json):
+# a suite that runs in the cloud is not run here too. `cloud-tests local-guard`
 # says whether this same suite on this same code is already running (or already green) in the cloud; if so, the job is
 # not started (exit 76). `cloud-tests` stops a redundant local job that was already running or queued and leaves a note
 # in cloud-stopped/<wrapper pid>.txt, which the wrapper prints before exiting with 76.

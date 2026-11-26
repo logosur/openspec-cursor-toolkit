@@ -30,5 +30,12 @@ semáforo de máquina, las suites, los builds y los emuladores se amontonan hast
   hay prioridad). Lo que ya corre no se para.
 - `heavy-job status` dice quién ocupa cada hueco, la cola, la memoria y los workers huérfanos (con el `kill` que los
   para). Quien mata un runner comprueba con `heavy-job scan` que no deja workers suyos vivos.
+- **Tests en la nube:** en un proyecto con `.claude/cloud-tests.json`, las suites que declara se piden con
+  `~/.claude/scripts/cloud-tests request --suite <suite>` y se esperan con `cloud-tests wait <run>` en segundo plano.
+  Las dos cosas son ligeras, porque la suite no corre en esta máquina. Se vuelve a `heavy-job` si contesta `LOCAL`,
+  `LAUNCH_FAILED`, `EXPIRED` o `MISMATCH`, y el resultado local se anota con `record-local`. `QUEUED` es esperar turno,
+  y `PREFLIGHT_FAILED` (6) se arregla y se vuelve a pedir, nunca en local. Mientras la misma suite corre en la nube
+  para el mismo código, o si ya pasó en verde, `heavy-job` no la lanza (sale con 76): un 76 no se reintenta, se
+  espera ese run.
 - Lo impone `~/.claude/hooks/heavy-job-gate`. No se esquiva: ni mencionar `heavy-job` sin usarlo, ni esconder el comando
   en un script. Se suma a los candados de cada proyecto.

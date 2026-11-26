@@ -1,0 +1,672 @@
+#!/usr/bin/env python3
+"""project-pause: pause every Claude session of a project until the developer says otherwise, then wake them again.
+
+Pausing a project means: its local sessions stay still, with no automated wake-up, until the developer orders a resume
+(see the rule proyectos-en-pausa). Cloud sessions are never touched.
+
+A paused project has a marker, ~/.claude/state/project-pause/<key>.json (key as in `supervisor-lock project`), that never
+expires. It keeps the order, the time, a snapshot of the project's sessions and the routines this script disabled.
+While it exists:
+  * every automated prompt in a session of the project (a wake-up, a finished background task, a message from another
+    session) is blocked at UserPromptSubmit (`project-pause hook`, called from ~/.claude/hooks/ask-queue-prompt) and
+    written down; a prompt the developer types goes through, with a note that the project is paused;
+  * `supervisor-lock wait` holds instead of timing out, and prints `RESUMED` when the pause ends; the watchdog neither
+    alerts on nor nudges the project; the Stop hook lets its supervisor end a turn;
+  * `session-nudge` and the account-switch resume list leave its sessions out;
+  * its global routines stay disabled.
+
+Which sessions are "paused" (and woken on resume): those busy when the pause began, the supervisor that held the
+project's lock, and every session whose automated prompt was blocked during the pause. A session that was idle and
+nothing tried to wake had nothing in flight, so it is not disturbed on resume.
+
+  project-pause pause DIR... --order TEXT [--by SESSION]  pause; idempotent (a second pause keeps the first snapshot)
+  project-pause status [--json]                           what is paused, since when, and what resume would wake
+  project-pause check DIR                                 exit 0 and print the key if DIR's project is paused, else 1
+  project-pause resume DIR [--by SESSION]                 lift the pause, re-enable its routines, print who to wake and
+                                                          the message to send them (it starts with the
+                                                          resume marker of the config piece `supervision`)
+  project-pause delivered SESSION_ID                      record that SESSION_ID got its resume message
+  project-pause free [DIR...] [--dry-run]                 stop the processes of idle desktop sessions of paused
+                                                          projects (the app restarts one when it is opened); keeps
+                                                          busy ones, open dialogs, the supervisor and its mailbox
+  project-pause hook                                      UserPromptSubmit hook, json on stdin
+  project-pause self-test
+
+Optional pieces: supervisor-lock (project resolution and the session census; `pause`, `resume` and `free` need it) and
+routines (the global routines this script disables and enables again). Without routines nothing is disabled, and
+without supervisor-lock `check`, `status`, `hook` and the cross-project gate helpers keep working.
+
+Markers come from the config piece `supervision` (project_resume_marker, account_switch_marker).
+
+Environment (tests): PROJECT_PAUSE_HOME, SUPERVISOR_LOCK_BIN, ROUTINES_BIN, ROUTINES_REGISTRY.
+"""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime, timezone
+
+LOCK_BIN = os.path.expanduser(os.environ.get('SUPERVISOR_LOCK_BIN', '~/.claude/scripts/supervisor-lock'))
+ROUTINES_BIN = os.path.expanduser(os.environ.get('ROUTINES_BIN', '~/.claude/scripts/routines'))
+ROUTINES_REGISTRY = os.path.expanduser(os.environ.get('ROUTINES_REGISTRY', '~/.claude/routines/registry.json'))
+RESUME_WINDOW_S = 30 * 60   # the cross-project gate lets a resume message through this long after `resume`
+
+
+def _toolkit_config(piece, defaults):
+    """The config piece `piece`, checked: a wrong value keeps the default and a broken file never raises."""
+    try:
+        lib = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'lib')
+        if lib not in sys.path:
+            sys.path.insert(0, lib)
+        from toolkit_config import load_checked as checked
+        return checked(piece, defaults)
+    except Exception:
+        return dict(defaults)
+
+
+CONFIG = _toolkit_config('supervision', {'project_resume_marker': '[reanudar proyecto]',
+                                         'account_switch_marker': '[cambio de cuenta]'})
+RESUME_MARKER = CONFIG['project_resume_marker']
+NOT_HUMAN_PREFIXES = ('This session is being continued from a previous conversation', 'Background (from the session',
+                      '<task-notification', '<agent-message', '[Subagent hand-back]', '<local-command',
+                      'Another Claude session sent a message', CONFIG['account_switch_marker'],
+                      '<side-sessions-event', '<ci-monitor-event', '<cross-session-message', '[SYSTEM NOTIFICATION',
+                      RESUME_MARKER)
+
+
+def home():
+    return os.environ.get('PROJECT_PAUSE_HOME') or os.path.expanduser('~/.claude/state/project-pause')
+
+
+def now_iso():
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec='seconds')
+
+
+def parse_iso(text):
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+_LOCK = None
+
+
+def lock_module():
+    """supervisor-lock as a module: project resolution and the session census live there. Raises RuntimeError when the
+    optional script is not installed (callers that must never fail catch it; commands turn it into a message)."""
+    global _LOCK
+    if _LOCK is None:
+        if not os.path.isfile(LOCK_BIN):
+            raise RuntimeError(f'supervisor-lock is not installed ({LOCK_BIN})')
+        loader = importlib.machinery.SourceFileLoader('supervisor_lock_for_pause', LOCK_BIN)
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        _LOCK = module
+    return _LOCK
+
+
+def write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix='.tmp-')
+    with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=2)
+        fh.write('\n')
+    os.replace(tmp, path)
+
+
+def read_json(path):
+    try:
+        with open(path, encoding='utf-8') as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def markers():
+    """Every active pause marker, keyed by project key."""
+    out = {}
+    try:
+        names = os.listdir(home())
+    except OSError:
+        return out
+    for name in sorted(names):
+        if name.endswith('.json') and not name.startswith(('.', 'resume-')):
+            data = read_json(os.path.join(home(), name))
+            if data and data.get('key'):
+                out[data['key']] = data
+    return out
+
+
+def git_common_dir(path):
+    try:
+        done = subprocess.run(['git', '-C', path, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+                              capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return os.path.realpath(done.stdout.strip()) if done.returncode == 0 and done.stdout.strip() else None
+
+
+def paused_marker(path, _cache={}):
+    """The pause marker of the project `path` belongs to, or None. Cheap when nothing is paused (no git call)."""
+    found = markers()
+    if not found or not path:
+        return None
+    real = os.path.realpath(path)
+    for data in found.values():
+        root = data.get('checkout') or ''
+        if root and (real == root or real.startswith(root + '/')):
+            return data
+    if real not in _cache:
+        _cache[real] = git_common_dir(real) if os.path.isdir(real) else None
+    common = _cache[real]
+    if common:
+        for data in found.values():
+            if data.get('common_dir') and os.path.realpath(data['common_dir']) == common:
+                return data
+    return None
+
+
+def marker_path(key):
+    return os.path.join(home(), key + '.json')
+
+
+def resolve(directory):
+    try:
+        lock = lock_module()
+    except RuntimeError as err:
+        raise SystemExit(f'project-pause: {err}')
+    try:
+        return lock.resolve(directory)
+    except SystemExit:
+        raise SystemExit(f'project-pause: {directory} is neither a git repository nor a workspace')
+
+
+# ---------------------------------------------------------------- routines
+
+def routines_in(project):
+    try:
+        with open(ROUTINES_REGISTRY, encoding='utf-8') as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    rows = data.get('routines', []) if isinstance(data, dict) else data
+    root = project['checkout']
+    out = []
+    for row in rows if isinstance(rows, list) else []:
+        cwd = os.path.realpath(row.get('cwd') or '')
+        if row.get('enabled') and (cwd == root or cwd.startswith(root + '/')):
+            out.append(row['id'])
+    return out
+
+
+def set_routine(routine_id, enabled):
+    if not os.path.isfile(ROUTINES_BIN):
+        return False, f'routines is not installed ({ROUTINES_BIN})'
+    done = subprocess.run([sys.executable, ROUTINES_BIN, 'enable' if enabled else 'disable', routine_id],
+                          capture_output=True, text=True, timeout=60)
+    return done.returncode == 0, (done.stdout + done.stderr).strip()
+
+
+# ---------------------------------------------------------------- pause / resume
+
+def snapshot(project):
+    lock = lock_module()
+    rows = lock.collect_sessions(project, False, {})
+    owner = None
+    try:
+        held = lock.read_locks()
+        for local, data in held.items():
+            if data.get('key') == project['key']:
+                owner = {'session': data.get('session_id') or local, 'mailbox': data.get('mailbox'),
+                         'state': data.get('state'), 'phase': data.get('phase'), 'round': data.get('round')}
+    except Exception:
+        owner = None
+    sessions = [{'id': r.get('id'), 'cli': r.get('cli'), 'title': r.get('title'), 'cwd': r.get('cwd'),
+                 'live': bool(r.get('live')), 'status': r.get('status')} for r in rows]
+    return sessions, owner
+
+
+def cmd_pause(args):
+    code = 0
+    for directory in args.dirs:
+        project = resolve(directory)
+        path = marker_path(project['key'])
+        if os.path.exists(path):
+            print(f'ALREADY {project["key"]} since {read_json(path).get("paused_at")}')
+            continue
+        sessions, owner = snapshot(project)
+        disabled = []
+        for routine_id in routines_in(project):
+            ok, text = set_routine(routine_id, False)
+            if ok:
+                disabled.append(routine_id)
+            else:
+                code = 1
+                print(f'ROUTINE-FAILED {routine_id} {text[:200]}')
+        data = {'key': project['key'], 'name': project['name'], 'checkout': project['checkout'],
+                'common_dir': project.get('common_dir'), 'paused_at': now_iso(), 'order': args.order,
+                'by': args.by or os.environ.get('CLAUDE_CODE_HOST_SESSION_ID') or '', 'sessions': sessions,
+                'supervisor': owner, 'routines_disabled': disabled, 'blocked': []}
+        write_json(path, data)
+        busy = [s for s in sessions if s['live'] and s['status'] == 'busy']
+        print(f'PAUSED {project["key"]} sessions={len(sessions)} busy={len(busy)} routines_disabled={len(disabled)}')
+        for s in busy:
+            print(f'  STOP {s["id"]} «{s["title"]}»')
+    return code
+
+
+def rss_mb(pid):
+    try:
+        with open(f'/proc/{pid}/status') as fh:
+            for line in fh:
+                if line.startswith('VmRSS:'):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return 0
+
+
+def cmd_free(args):
+    """Stop the processes of the idle desktop sessions of paused projects, to give the memory back (a pause is there to
+    save local resources). The session stays in the app with its whole conversation, and the app
+    starts its process again when it is opened. Kept: busy sessions (stop their turn first), sessions with a dialog
+    open, the supervisor that held the lock and its questions session (an automatic resume needs them), and anything
+    that is not a desktop session (a terminal or a routine)."""
+    import signal
+    try:
+        lock = lock_module()
+    except RuntimeError as err:
+        raise SystemExit(f'project-pause: {err}')
+    found = markers()
+    keys = None
+    if args.dirs:
+        keys = {resolve(d)['key'] for d in args.dirs}
+    freed = 0
+    for rec in lock.read_json_files(os.path.join(lock.cli_dir(), '*.json')):
+        pid = rec.get('pid')
+        if not pid or not lock.pid_alive(pid) or rec.get('entrypoint') != 'claude-desktop':
+            continue
+        data = paused_marker(rec.get('cwd'))
+        if not data or (keys is not None and data['key'] not in keys):
+            continue
+        local = rec.get('hostSessionId') or ''
+        owner = data.get('supervisor') or {}
+        if local and local in (owner.get('session'), owner.get('mailbox')):
+            print(f'KEEP {local} (supervisor or its questions session)')
+            continue
+        if rec.get('status') in ('busy', 'waiting'):
+            print(f'KEEP {local} (status {rec.get("status")})')
+            continue
+        size = rss_mb(pid)
+        if args.dry_run:
+            print(f'WOULD-STOP {local} pid={pid} {size} MB')
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError as err:
+            print(f'FAILED {local} pid={pid} {err}')
+            continue
+        freed += size
+        path = marker_path(data['key'])
+        current = read_json(path) or data
+        current.setdefault('processes_stopped', []).append({'session': local, 'pid': pid, 'rss_mb': size,
+                                                            'at': now_iso()})
+        write_json(path, current)
+        print(f'STOPPED {local} pid={pid} {size} MB')
+    if not found:
+        print('Ningún proyecto en pausa.')
+    print(f'freed ~{freed} MB')
+    return 0
+
+
+def to_wake(data):
+    """Session ids to wake on resume: busy at pause time, the lock owner, and every session a blocked prompt hit."""
+    wanted = []
+    for s in data.get('sessions', []):
+        if s.get('live') and s.get('status') == 'busy':
+            wanted.append(s['id'])
+    owner = (data.get('supervisor') or {}).get('session')
+    if owner:
+        wanted.append(owner)
+    for hit in data.get('blocked', []):
+        wanted.append(hit.get('session'))
+    seen, out = set(), []
+    for sid in wanted:
+        if sid and sid not in seen:
+            seen.add(sid)
+            out.append(sid)
+    return out
+
+
+def resume_text(data, sid):
+    hits = [h for h in data.get('blocked', []) if h.get('session') == sid]
+    lines = [f'{RESUME_MARKER} El desarrollador ha levantado la pausa de {data["name"]} (pausado desde '
+             f'{data["paused_at"][:16].replace("T", " ")}). Retoma tu trabajo donde lo dejaste, con las reglas de '
+             f'siempre.']
+    if hits:
+        lines.append(f'Durante la pausa no se procesaron {len(hits)} avisos automáticos para esta sesión; los más '
+                     f'recientes empezaban así:')
+        lines += [f'- {h.get("at", "")[:16].replace("T", " ")}: {h.get("head", "")}' for h in hits[-5:]]
+        lines.append('Si eran de tareas en segundo plano, comprueba su resultado antes de seguir.')
+    return '\n'.join(lines)
+
+
+def cmd_resume(args):
+    project = resolve(args.dir)
+    data = read_json(marker_path(project['key']))
+    if not data:
+        print(f'NOT-PAUSED {project["key"]}')
+        return 1
+    for routine_id in data.get('routines_disabled', []):
+        ok, text = set_routine(routine_id, True)
+        print(f'{"ROUTINE-ON" if ok else "ROUTINE-FAILED"} {routine_id}' + ('' if ok else f' {text[:200]}'))
+    titles = {s['id']: s.get('title') for s in data.get('sessions', [])}
+    wake = to_wake(data)
+    event = {'key': data['key'], 'name': data['name'], 'resumed_at': now_iso(),
+             'by': args.by or os.environ.get('CLAUDE_CODE_HOST_SESSION_ID') or '',
+             'wake': [{'session': sid, 'title': titles.get(sid), 'text': resume_text(data, sid), 'delivered_at': None}
+                      for sid in wake]}
+    write_json(os.path.join(home(), f'resume-{data["key"]}.json'), event)
+    history = os.path.join(home(), 'history', f'{data["key"]}-{time.strftime("%Y%m%d%H%M%S")}.json')
+    write_json(history, dict(data, resumed_at=event['resumed_at']))
+    os.remove(marker_path(project['key']))
+    print(f'RESUMED {data["key"]} wake={len(wake)} (supervisors with `supervisor-lock wait` armed wake on their own)')
+    for item in event['wake']:
+        print(f'  WAKE {item["session"]} «{item["title"] or "-"}»')
+    print(f'Send each one its text with SendMessage (the cross-project gate lets {RESUME_MARKER} through for '
+          f'{RESUME_WINDOW_S // 60} min), then run `project-pause delivered <session>`. The texts are in '
+          f'{os.path.join(home(), "resume-" + data["key"] + ".json")}.')
+    return 0
+
+
+def resume_events():
+    out = []
+    try:
+        names = os.listdir(home())
+    except OSError:
+        return out
+    for name in names:
+        if name.startswith('resume-') and name.endswith('.json'):
+            data = read_json(os.path.join(home(), name))
+            if data:
+                data['_path'] = os.path.join(home(), name)
+                out.append(data)
+    return out
+
+
+def resume_allowed(target):
+    """For the cross-project gate: (True, project name) when `target` is due a resume message, else (False, why)."""
+    now = time.time()
+    for event in resume_events():
+        stamp = parse_iso(event.get('resumed_at'))
+        if stamp is None or now - stamp > RESUME_WINDOW_S:
+            continue
+        for item in event.get('wake', []):
+            if item.get('session') == target:
+                if item.get('delivered_at'):
+                    return False, f'ya recibió el aviso de reanudación de {event["name"]}'
+                return True, event['name']
+    return False, 'no hay ninguna reanudación de proyecto pendiente para esa sesión'
+
+
+def cmd_delivered(args):
+    for event in resume_events():
+        changed = False
+        for item in event.get('wake', []):
+            if item.get('session') == args.session and not item.get('delivered_at'):
+                item['delivered_at'] = now_iso()
+                changed = True
+        if changed:
+            path = event.pop('_path')
+            write_json(path, event)
+            print(f'DELIVERED {args.session} ({event["name"]})')
+            return 0
+    print(f'UNKNOWN {args.session}')
+    return 1
+
+
+def cmd_status(args):
+    found = markers()
+    if args.json:
+        print(json.dumps({k: dict(v, wake=to_wake(v)) for k, v in found.items()}, ensure_ascii=False, indent=2))
+        return 0
+    if not found:
+        print('Ningún proyecto en pausa.')
+        return 0
+    for key, data in found.items():
+        print(f'{key}: en pausa desde {data.get("paused_at")} · sesiones {len(data.get("sessions", []))} · '
+              f'avisos frenados {len(data.get("blocked", []))} · rutinas desactivadas '
+              f'{", ".join(data.get("routines_disabled", [])) or "ninguna"} · al reanudar despierta '
+              f'{len(to_wake(data))}')
+    return 0
+
+
+def cmd_check(args):
+    data = paused_marker(args.dir)
+    if data:
+        print(data['key'])
+        return 0
+    return 1
+
+
+# ---------------------------------------------------------------- hook
+
+def is_human(payload):
+    prompt = payload.get('prompt')
+    if not isinstance(prompt, str) or not prompt.strip():
+        return False
+    origin = payload.get('origin')
+    kind = origin.get('kind') if isinstance(origin, dict) else origin
+    if isinstance(kind, str) and kind and kind not in ('human', 'humanTurn'):
+        return False
+    return not prompt.lstrip().startswith(NOT_HUMAN_PREFIXES)
+
+
+def host_id(payload):
+    """The app's local_ id of the hook's session, from the CLI registry; the CLI id when there is none."""
+    sid = payload.get('session_id') or ''
+    try:
+        lock = lock_module()
+        for rec in lock.read_json_files(os.path.join(lock.cli_dir(), '*.json')):
+            if rec.get('sessionId') == sid and rec.get('hostSessionId'):
+                return rec['hostSessionId']
+    except Exception:
+        pass
+    return sid
+
+
+def record_block(data, payload):
+    head = ' '.join((payload.get('prompt') or '').split())[:240]
+    path = marker_path(data['key'])
+    current = read_json(path)
+    if not current:
+        return
+    current.setdefault('blocked', []).append({'session': host_id(payload), 'at': now_iso(), 'head': head})
+    current['blocked'] = current['blocked'][-200:]
+    write_json(path, current)
+
+
+def hook_decide(payload):
+    """'' (nothing to say) or the json the UserPromptSubmit hook prints."""
+    if payload.get('hook_event_name') not in (None, 'UserPromptSubmit'):
+        return ''
+    data = paused_marker(payload.get('cwd') or os.getcwd())
+    if not data:
+        return ''
+    since = (data.get('paused_at') or '')[:16].replace('T', ' ')
+    if is_human(payload):
+        context = (f'El proyecto {data["name"]} está en pausa por orden del desarrollador desde {since} '
+                   f'(~/.claude/rules/proyectos-en-pausa.md). Este mensaje lo ha escrito él: haz lo que pide aquí, pero '
+                   f'no reactives supervisoras, vigilantes, rutinas ni otras sesiones del proyecto, salvo que él diga '
+                   f'que se reanude; entonces, `~/.claude/scripts/project-pause resume <dir>`.')
+        return json.dumps({'hookSpecificOutput': {'hookEventName': 'UserPromptSubmit', 'additionalContext': context}})
+    record_block(data, payload)
+    return json.dumps({'decision': 'block',
+                       'reason': f'Proyecto {data["name"]} en pausa desde {since} por orden del desarrollador: este '
+                                 f'aviso automático no se procesa. La sesión se reactivará cuando él ordene '
+                                 f'reanudar el proyecto.'})
+
+
+def cmd_hook(_args):
+    try:
+        raw = sys.stdin.read()
+        payload = json.loads(raw) if raw.strip() else {}
+        out = hook_decide(payload) if isinstance(payload, dict) else ''
+    except (Exception, SystemExit) as err:  # a broken hook never stops a session
+        try:
+            os.makedirs(home(), exist_ok=True)
+            with open(os.path.join(home(), 'hook-errors.log'), 'a', encoding='utf-8') as fh:
+                fh.write(f'{now_iso()} {type(err).__name__}: {err}\n')
+        except OSError:
+            pass
+        return 0
+    if out:
+        print(out)
+    return 0
+
+
+# ---------------------------------------------------------------- self-test
+
+class _SkipCycle(Exception):
+    pass
+
+
+def cmd_self_test(_args):
+    import shutil
+    failures = []
+
+    def check(name, ok):
+        print(('ok   ' if ok else 'FAIL ') + name)
+        if not ok:
+            failures.append(name)
+
+    tmp = tempfile.mkdtemp(prefix='project-pause-test-')
+    old = os.environ.get('PROJECT_PAUSE_HOME')
+    os.environ['PROJECT_PAUSE_HOME'] = os.path.join(tmp, 'state')
+    try:
+        repo = os.path.join(tmp, 'repo')
+        os.makedirs(repo)
+        subprocess.run(['git', 'init', '-q', repo], check=True)
+        sub = os.path.join(repo, 'src')
+        os.makedirs(sub)
+        other = os.path.join(tmp, 'other')
+        os.makedirs(other)
+        subprocess.run(['git', 'init', '-q', other], check=True)
+        check('nothing paused: no marker', paused_marker(repo) is None)
+        common = git_common_dir(repo)
+        write_json(marker_path('repo-test'), {'key': 'repo-test', 'name': 'repo', 'checkout': os.path.realpath(repo),
+                                              'common_dir': common, 'paused_at': now_iso(), 'sessions': [
+                                                  {'id': 'local_busy', 'live': True, 'status': 'busy'},
+                                                  {'id': 'local_idle', 'live': True, 'status': 'idle'}],
+                                              'supervisor': {'session': 'local_sup'}, 'blocked': []})
+        check('paused: the checkout and a subfolder', paused_marker(repo) and paused_marker(sub))
+        check('paused: another repo is not', paused_marker(other) is None)
+        wt = os.path.join(tmp, 'wt')
+        subprocess.run(['git', '-C', repo, 'commit', '-q', '--allow-empty', '-m', 'x'], check=True,
+                       env=dict(os.environ, GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@t', GIT_COMMITTER_NAME='t',
+                                GIT_COMMITTER_EMAIL='t@t'))
+        subprocess.run(['git', '-C', repo, 'worktree', 'add', '-q', '--detach', wt], check=True)
+        check('paused: a worktree outside the checkout', paused_marker(wt) is not None)
+        auto = {'hook_event_name': 'UserPromptSubmit', 'cwd': sub, 'session_id': 'cli-x',
+                'prompt': '<task-notification>\n<task-id>abc</task-id>'}
+        out = json.loads(hook_decide(auto))
+        check('hook: an automated prompt is blocked', out.get('decision') == 'block')
+        data = read_json(marker_path('repo-test'))
+        check('hook: the blocked prompt is recorded', len(data['blocked']) == 1 and data['blocked'][0]['session'] == 'cli-x')
+        human = dict(auto, prompt='mira el log de ayer')
+        out = json.loads(hook_decide(human))
+        check('hook: the developer goes through, with a note',
+              'decision' not in out and 'en pausa' in out['hookSpecificOutput']['additionalContext'])
+        check('hook: another project is untouched', hook_decide(dict(auto, cwd=other)) == '')
+        check('hook: a resume message is not human', not is_human(dict(auto, prompt=RESUME_MARKER + ' sigue')))
+        check('wake: busy, supervisor and blocked, once each',
+              to_wake(read_json(marker_path('repo-test'))) == ['local_busy', 'local_sup', 'cli-x'])
+        write_json(os.path.join(home(), 'resume-repo-test.json'),
+                   {'key': 'repo-test', 'name': 'repo', 'resumed_at': now_iso(),
+                    'wake': [{'session': 'local_busy', 'delivered_at': None}]})
+        check('gate: a listed session may get the resume message', resume_allowed('local_busy')[0])
+        check('gate: an unlisted one may not', not resume_allowed('local_idle')[0])
+        cmd_delivered(argparse.Namespace(session='local_busy'))
+        check('gate: only once', not resume_allowed('local_busy')[0])
+        old_event = read_json(os.path.join(home(), 'resume-repo-test.json'))
+        old_event['resumed_at'] = datetime.fromtimestamp(time.time() - RESUME_WINDOW_S - 60).astimezone().isoformat()
+        old_event['wake'][0]['delivered_at'] = None
+        write_json(os.path.join(home(), 'resume-repo-test.json'), old_event)
+        check('gate: not after the window', not resume_allowed('local_busy')[0])
+        # a whole cycle through the commands: pause, a blocked prompt, resume, delivered (needs supervisor-lock)
+        if not os.path.isfile(LOCK_BIN):
+            print(f'skip cycle: supervisor-lock is not installed ({LOCK_BIN})')
+            raise _SkipCycle()
+        cycle = os.path.join(tmp, 'cycle')
+        os.makedirs(cycle)
+        subprocess.run(['git', 'init', '-q', cycle], check=True)
+        cmd_pause(argparse.Namespace(dirs=[cycle], order='test', by='local_me'))
+        key = resolve(cycle)['key']
+        check('cycle: pause writes the marker', read_json(marker_path(key)) is not None and cmd_check(
+            argparse.Namespace(dir=cycle)) == 0)
+        hook_decide({'hook_event_name': 'UserPromptSubmit', 'cwd': cycle, 'session_id': 'local_woken',
+                     'prompt': '<task-notification> done'})
+        check('cycle: the blocked session is due a wake-up', to_wake(read_json(marker_path(key))) == ['local_woken'])
+        check('cycle: no resume message before resume', not resume_allowed('local_woken')[0])
+        code = cmd_resume(argparse.Namespace(dir=cycle, by='local_me'))
+        history = os.listdir(os.path.join(home(), 'history'))
+        check('cycle: resume lifts the marker and keeps a copy',
+              code == 0 and not os.path.exists(marker_path(key)) and any(n.startswith(key) for n in history))
+        event = read_json(os.path.join(home(), f'resume-{key}.json'))
+        check('cycle: the resume text names the project and the blocked notice',
+              event['wake'][0]['session'] == 'local_woken' and RESUME_MARKER in event['wake'][0]['text']
+              and 'task-notification' in event['wake'][0]['text'])
+        check('cycle: the gate lets the resume message through once', resume_allowed('local_woken')[0])
+        cmd_delivered(argparse.Namespace(session='local_woken'))
+        check('cycle: and not twice', not resume_allowed('local_woken')[0])
+        check('cycle: the project is no longer paused', paused_marker(cycle) is None
+              and hook_decide({'hook_event_name': 'UserPromptSubmit', 'cwd': cycle, 'prompt': '<task-notification>'}) == '')
+    except _SkipCycle:
+        pass
+    finally:
+        if old is None:
+            os.environ.pop('PROJECT_PAUSE_HOME', None)
+        else:
+            os.environ['PROJECT_PAUSE_HOME'] = old
+        shutil.rmtree(tmp, ignore_errors=True)
+    print(f'{"FAILED " + str(len(failures)) if failures else "all passed"}')
+    return 1 if failures else 0
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog='project-pause', description=__doc__.split('\n\n')[0])
+    sub = p.add_subparsers(dest='cmd', required=True)
+    s = sub.add_parser('pause')
+    s.add_argument('dirs', nargs='+')
+    s.add_argument('--order', required=True)
+    s.add_argument('--by')
+    s = sub.add_parser('status')
+    s.add_argument('--json', action='store_true')
+    s = sub.add_parser('check')
+    s.add_argument('dir')
+    s = sub.add_parser('resume')
+    s.add_argument('dir')
+    s.add_argument('--by')
+    s = sub.add_parser('delivered')
+    s.add_argument('session')
+    s = sub.add_parser('free')
+    s.add_argument('dirs', nargs='*')
+    s.add_argument('--dry-run', action='store_true')
+    sub.add_parser('hook')
+    sub.add_parser('self-test')
+    args = p.parse_args(argv)
+    return {'pause': cmd_pause, 'status': cmd_status, 'check': cmd_check, 'resume': cmd_resume,
+            'delivered': cmd_delivered, 'free': cmd_free, 'hook': cmd_hook,
+            'self-test': cmd_self_test}[args.cmd](args)
+
+
+if __name__ == '__main__':
+    sys.exit(main())

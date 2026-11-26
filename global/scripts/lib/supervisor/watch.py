@@ -7,7 +7,7 @@ import traceback
 from . import (
     backlog, census, closable, cloud, human_turns, interrupted,
     lint, lock as lock_mod, machine_queue, projects, providers, transcripts,
-    util, verdicts,
+    settings, util, verdicts,
 )
 
 
@@ -78,6 +78,60 @@ def hold_while_paused(project, interval):
 # it hundreds of times a day.
 GUARD_EVENTS = ('NEW', 'GONE', 'AWAITING', 'CRASH', 'HUNG', 'MODE', 'WAITING', 'MODELSTALL', 'HANDOFF', 'IDLE',
                 'CLOSABLE', 'CUT', 'SUBAGENT_SILENT', 'REF', 'CLOUD', 'QUEUED', 'SLOTHELD', 'BACKLOG')
+
+
+ALLIDLE_ACTIVITY_TOLERANCE_S = 5   # idle_s is an integer: the same last activity reads a second apart between polls
+ALLIDLE_QUEUE_CHECK_S = 30
+
+
+def allidle_path(key):
+    return os.path.join(util.home(), 'announced', f'{key}.allidle.json')
+
+
+def allidle_line(key, rows, now, base_s, cap_s, started, blocked=None):
+    """`ALLIDLE <s>s` when nobody of the project works and the quiet time has reached the current threshold, else None.
+
+    The quiet time runs from the project's last activity (now minus the smallest idle_s), so re-arming the watcher does
+    not restart it. The first report of a quiet stretch comes `base_s` after the watcher first saw the project quiet
+    (a project already idle for hours is not reported at the first poll). Each report after that needs twice the quiet
+    time (up to `cap_s`) and also waits as long as the previous threshold after the last report, so a long stretch
+    cannot repeat at once. Any newer activity starts a new stretch. The state lives in
+    <home>/announced/<key>.allidle.json. `blocked()` (a job of the project holds a slot or waits in the machine queue)
+    is asked only once the threshold is reached, and a blocked report is not recorded."""
+    if base_s <= 0 or any(r['live'] and r['status'] == 'busy' for r in rows):
+        return None
+    idles = [r['idle_s'] for r in rows if r['idle_s'] is not None]
+    activity = now - min(idles) if idles else None
+    cap_s = max(cap_s, base_s)
+    path = allidle_path(key)
+    with lock_mod.Store():
+        state = util.read_json(path, {})
+        state = state if isinstance(state, dict) else {}
+        last_activity, last_at = util.num(state.get('activity')), util.num(state.get('at'))
+        seen, count = util.num(state.get('seen')), int(util.num(state.get('count')) or 0)
+        if activity is None:
+            activity = last_activity if last_activity is not None else started
+        elif last_activity is not None and activity <= last_activity + ALLIDLE_ACTIVITY_TOLERANCE_S:
+            activity = last_activity   # the same last activity: keep the recorded one
+        if last_activity is None or activity != last_activity or seen is None:
+            # a new stretch: nothing has been reported for this activity yet
+            count, seen, last_at = 0, now, None
+            util.write_json_atomic(path, {'activity': activity, 'seen': seen, 'at': None, 'count': 0})
+        count = min(count, 30)
+        need = min(base_s * 2 ** count, cap_s)
+        quiet = now - activity
+        if count:
+            previous = min(base_s * 2 ** (count - 1), cap_s)
+            due = quiet >= need and now - (last_at or 0) >= previous
+        else:
+            due = quiet >= need and now - seen >= need
+        if not due:
+            return None
+    if blocked is not None and blocked():   # outside the lock: it runs `heavy-job`
+        return None
+    with lock_mod.Store():
+        util.write_json_atomic(path, {'activity': activity, 'seen': seen, 'at': now, 'count': count + 1})
+    return f'ALLIDLE {int(quiet)}s'
 
 
 def wait_events(args):
@@ -159,15 +213,22 @@ def wait_events(args):
                     out[('SUBAGENT_SILENT', path)] = f'SUBAGENT_SILENT {os.path.basename(path)} {silent}s'
         return out
 
+    queue_check = {'at': -1e9, 'queued': False}
+
+    def project_queued():
+        """A job of the project waits in the machine queue (checked at most every 30 s: `heavy-job` is a process)."""
+        if time.monotonic() - queue_check['at'] >= ALLIDLE_QUEUE_CHECK_S:
+            queue_check['at'] = time.monotonic()
+            try:
+                queue_check['queued'] = machine_queue.project_job_queued(project)
+            except Exception:
+                queue_check['queued'] = False
+        return queue_check['queued']
+
     def all_idle(after):
-        if args.all_idle_after <= 0 or any(r['live'] and r['status'] == 'busy' for r in after.values()):
-            return None
-        idles = [r['idle_s'] for r in after.values() if r['idle_s'] is not None]
-        since = max(started, time.time() - min(idles)) if idles else started
-        quiet_for = time.time() - since
-        if quiet_for < args.all_idle_after or providers.heavy_job_busy(project):
-            return None
-        return f'ALLIDLE {int(quiet_for)}s'
+        return allidle_line(project['key'], list(after.values()), time.time(), args.all_idle_after,
+                            settings.ALL_IDLE_BACKOFF_MAX_MIN * 60, started,
+                            lambda: providers.heavy_job_busy(project) or project_queued())
 
     def ref_target(name):
         """(repo dir, branch): in a workspace `<subdir>:<branch>` names a nested repo."""

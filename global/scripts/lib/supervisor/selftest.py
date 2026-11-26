@@ -813,12 +813,27 @@ def cmd_self_test(args):
           transcripts.subagent_silent_age(unit([result_rec(10, 'k')], age=2000), time.time()) in range(1999, 2004)
           and transcripts.subagent_silent_age(unit([text_rec(10)], age=2000), time.time()) is None)
 
+    def forget_allidle():
+        for name in glob.glob(os.path.join(lock_home, 'announced', '*.allidle.json')):
+            os.remove(name)
+
     reset()
-    cli('local_i1', sessionId='cli-i1', updatedAt=int(time.time() * 1000) - 3600000)
+    forget_allidle()
+    cli('local_i1', sessionId='cli-i1', updatedAt=int(time.time() * 1000) - 1000)
     started = time.time()
     code, lines = timed('--all-idle-after', '2', timeout='8', settle=0)
-    check('wait: ALLIDLE after the threshold counted from the wait start', code == 0 and len(lines) == 1
-          and re.fullmatch(r'ALLIDLE [23]s', lines[0]) is not None and 1.8 <= time.time() - started <= 5)
+    check('wait: the first ALLIDLE comes the threshold after the watcher first saw the project quiet', code == 0
+          and len(lines) == 1 and re.fullmatch(r'ALLIDLE [23]s', lines[0]) is not None and 1.8 <= time.time() - started <= 5)
+    started = time.time()
+    code, lines = timed('--all-idle-after', '2', timeout='10', settle=0)
+    check('wait: re-arming does not restart the quiet clock, and the next ALLIDLE needs twice the quiet time',
+          code == 0 and len(lines) == 1 and re.fullmatch(r'ALLIDLE [45]s', lines[0]) is not None
+          and 1.5 <= time.time() - started <= 6)
+    cli('local_i1', sessionId='cli-i1', updatedAt=int(time.time() * 1000) - 500)
+    code, lines = timed('--all-idle-after', '2', timeout='8', settle=0)
+    check('wait: any activity resets the ALLIDLE back-off to the base threshold',
+          code == 0 and len(lines) == 1 and re.fullmatch(r'ALLIDLE [23]s', lines[0]) is not None)
+    forget_allidle()
     code, lines = timed('--all-idle-after', '0', timeout='3', settle=0)
     check('wait: --all-idle-after 0 disables ALLIDLE', lines == ['TIMEOUT 3s'])
     cli('local_i2', status='busy', updatedAt=int(time.time() * 1000) - 3600000)
@@ -838,6 +853,7 @@ def cmd_self_test(args):
     code, lines = timed('--all-idle-after', '2', timeout='8', settle=0)
     check('wait: ALLIDLE ignores other projects\' slots and free lines', len(lines) == 1 and lines[0].startswith('ALLIDLE '))
     open(heavy_txt, 'w').close()
+    forget_allidle()
 
     reset()
     sh('git', 'branch', 'refa', cwd=repo)

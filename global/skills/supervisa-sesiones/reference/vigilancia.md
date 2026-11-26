@@ -51,9 +51,14 @@ Cada despertar es un tick. No cuenta como ronda de F4.
    qué evento despierta y que no necesita nada. La caja de fin de turno lleva esa frase, sin preguntas ni botones.
 9. El parte, cuando toca.
 
-Un tick es barato: lee la salida del script y el registro. Las transcripciones solo se leen de las sesiones sospechosas,
-con `list_events` y un límite corto. Tras dos ticks seguidos sin cambios, el `wait` siguiente lleva el doble de
-`--timeout`, hasta 1800 s; el primer evento lo devuelve a 600.
+Lo que cuesta un tick es despertar: cada despertar vuelve a leer todo tu contexto, unas cuantas llamadas al modelo de
+cientos de miles de tokens cada una, aunque solo mires la salida del script y el registro. Por eso las transcripciones
+solo se leen de las sesiones sospechosas, con `list_events` y un límite corto, y por eso no se despierta sin motivo:
+tras dos ticks seguidos sin cambios, el `wait` siguiente lleva el doble de `--timeout`, hasta 7200 s, pero nunca más
+allá del plazo más cercano de **Trabajo en vuelo**; el primer evento lo devuelve a 600. `ALLIDLE`, `QUEUED` y `SLOTHELD`
+ya no se repiten si nada ha cambiado: el vigilante espera cada vez más entre dos `ALLIDLE` seguidos y repite un mismo
+trabajo en cola o con hueco cada dos horas (`all_idle_backoff_max_min`, `queued_reannounce_min` y
+`slotheld_reannounce_min` en la pieza de configuración `supervision`).
 
 ### Parte: qué pasa y la prueba de que está controlado
 
@@ -89,7 +94,7 @@ empiezo la escalera.
 | Señal | Qué indica | Qué se hace |
 |-------|------------|-------------|
 | `TURN`, `STATUS busy->idle` | Terminó un turno | Verificar en disco; después F4b o la siguiente micro-tarea, en ese tick |
-| `ALLIDLE` | Nadie del proyecto trabaja | Siguiente turno o micro-tarea autorizada; si no queda nada, F9 |
+| `ALLIDLE` | Nadie del proyecto trabaja ni tiene un trabajo pesado con hueco o en cola. Mientras nada se mueve, cada aviso tarda más que el anterior, hasta 2 h | Siguiente turno o micro-tarea autorizada; si no queda nada, F9 |
 | `HUNG` | Una sesión ocupada lleva demasiado sin actividad | Escalera |
 | `MODELSTALL` | Espera al modelo más de 10 min | Escalera desde el paso 3 |
 | `WAITING`, `AWAITING` | Espera a una persona: una pregunta o un permiso. `WAITING` no salta mientras el desarrollador la lleva (`--away-after`, 20 min) | «Permisos y preguntas». Con `AWAITING`, miras antes si el desarrollador le escribió hace poco |
@@ -110,7 +115,7 @@ empiezo la escalera.
 | El hook cita mensajes del desarrollador en tu sesión | El desarrollador te escribió | Contestar eso primero, en prosa; si pide un cambio, decir qué haces y cuándo |
 | `SKILL_CHANGED` | La skill cambió en disco | Volver a invocarla, `--skill-seen` y seguir |
 | `RESUMED` | El proyecto salió de una pausa (si hay pieza de pausa) | Tick completo |
-| `TIMEOUT` | Sin eventos | Barrer **Trabajo en vuelo** y rearmar |
+| `TIMEOUT` | Pasó el `--timeout` sin eventos | Barrer **Trabajo en vuelo** y rearmar |
 
 ### La escalera, sin preguntar al desarrollador
 

@@ -5,6 +5,7 @@ real ones. A missing, corrupt or mistyped file gives these defaults (toolkit_con
 permission. Environment variables keep their priority where a piece reads one. Nothing else in the package imports
 from the package at import time, so this module can be read first by any of them.
 """
+import math
 import os
 import sys
 
@@ -23,6 +24,9 @@ DEFAULTS = {
     'supervisor_revive_valid_s': 1800,
     'presence_min': 20,
     'fresh_min': 3,
+    'queued_reannounce_min': 120,
+    'slotheld_reannounce_min': 120,
+    'all_idle_backoff_max_min': 120,
     'app_sessions_dir': '~/.config/Claude/claude-code-sessions',
     'questions_session_titles': ['sesión de preguntas', 'preguntas de la supervisión', 'buzón de preguntas'],
     'questions_session_title': 'Sesión de preguntas de {project}',
@@ -50,6 +54,19 @@ REVIVE_VALID_S = CONFIG['supervisor_revive_valid_s']   # how long a revive plan 
 # presence: minutes of the developer's input that count as "here", and how fresh a message alone allows a question
 PRESENCE_MIN = CONFIG['presence_min']
 FRESH_MIN = CONFIG['fresh_min']
+
+
+
+def _positive(key):
+    """A positive finite number of the piece, else the default (load_checked already refused other shapes)."""
+    value = CONFIG[key]
+    return value if math.isfinite(value) and value > 0 else DEFAULTS[key]
+
+
+# how often the watcher repeats an unchanged item, and how far ALLIDLE backs off while nothing moves (minutes)
+QUEUED_REANNOUNCE_MIN = _positive('queued_reannounce_min')
+SLOTHELD_REANNOUNCE_MIN = _positive('slotheld_reannounce_min')
+ALL_IDLE_BACKOFF_MAX_MIN = _positive('all_idle_backoff_max_min')
 
 # the app's session records (one json per session under <dir>/<account>/<org>/)
 APP_SESSIONS_GLOB = os.path.join(CONFIG['app_sessions_dir'], '*', '*', 'local_*.json')

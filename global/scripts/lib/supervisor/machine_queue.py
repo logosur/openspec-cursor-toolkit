@@ -2,13 +2,13 @@
 import os
 import time
 
-from . import census, cloud, projects, util
+from . import census, cloud, projects, providers, settings, util
 
 
 QUEUED_AFTER_S = 20 * 60       # a job of the project waiting this long in the machine queue
-QUEUED_REANNOUNCE_S = 30 * 60
+QUEUED_REANNOUNCE_S = settings.QUEUED_REANNOUNCE_MIN * 60   # config `queued_reannounce_min`
 SLOTHELD_AFTER_S = 60 * 60     # a job of the project holding a slot this long while others queue
-SLOTHELD_REANNOUNCE_S = 60 * 60
+SLOTHELD_REANNOUNCE_S = settings.SLOTHELD_REANNOUNCE_MIN * 60   # config `slotheld_reannounce_min`
 HEAVY_POLL_S = 60
 
 
@@ -39,6 +39,18 @@ def heavy_job_items(project, state, now=None):
             if match(j.get('cwd')):
                 holders.append((j, held))
     return queued, holders, slots_text, waiting
+
+
+def project_job_queued(project, state=None):
+    """True when a job of the project waits in the machine queue (heavy-job's JSON). Fails safe: without heavy-job, or
+    when its answer cannot be read, False."""
+    state = providers.heavy_job_state() if state is None else state
+    if not isinstance(state, dict):
+        return False
+    try:
+        return bool(heavy_job_items(project, state)[0])
+    except Exception:
+        return False
 
 
 def heavy_events(project, state, now=None):

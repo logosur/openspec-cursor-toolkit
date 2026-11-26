@@ -23,7 +23,8 @@ notes:
   - "In the account-switch config piece, task_cwd is the folder the resume task's session runs in (default: your home) and task_name its title in the app."
   - "account-switch reads the CLI's own login (~/.claude/.credentials.json) to ask Claude for the account's organisation, usage and connectors; it never writes it."
   - "The routines engine and project pauses are optional: without scripts/routines no routines login is asked, and without scripts/project-pause no project counts as paused."
-# Named by these pieces and not installed by this module: optional, or (cross-project-message-gate) installed by supervision.
+# Named by these pieces and not installed by this module: optional, installed by other modules (routines by routines;
+# project-pause and cross-project-message-gate by supervision), or (open-in-developer-chrome) the machine's own.
 project_provided:
   - scripts/routines
   - scripts/project-pause

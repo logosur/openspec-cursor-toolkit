@@ -11,6 +11,9 @@
   "message_exceptions": [],
   "config_session_dirs": [],
   "fresh_min": 3,
+  "queued_reannounce_min": 120,
+  "slotheld_reannounce_min": 120,
+  "all_idle_backoff_max_min": 120,
   "questions_session_titles": [
     "sesión de preguntas",
     "preguntas de la supervisión",

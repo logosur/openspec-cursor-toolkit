@@ -23,7 +23,8 @@ DEAD_ALERT_GRACE_S = 50 * 60  # a DEAD supervisor reaches the developer only aft
 # A supervisor whose turn was cut (the account's usage limit, an API error) keeps its process alive and idle: it is not
 # dead, and nothing wakes it once the account has usage again. `revive` wakes a live, idle supervisor whose lock is
 # running in a working phase (not `guardia`, where a still heartbeat is normal) and whose heartbeat is older than
-# STALLED_AFTER_S, the 45 min the skill allows without attending; only while the account has usage.
+# STALLED_AFTER_S, the 45 min the skill allows without attending; only while the account has usage. A turn cut by the
+# usage limit (its newest record is the limit's error) counts after LIMIT_CUT_AFTER_S instead.
 STALLED_AFTER_S = 45 * 60
 
 
@@ -92,8 +93,9 @@ def revive_text(owner):
 
 def stalled_supervisors(stalled_after, now=None):
     """[(key, owner, verdict)] of live owners (project not paused) whose lock is running in a phase other than
-    `guardia` with a heartbeat older than `stalled_after` s. verdict is ('busy', None, '') when the session works now
-    (its CLI status, or a transcript touched within `stalled_after`), else the watchdog's (reason, epoch, detail)."""
+    `guardia` with a heartbeat older than `stalled_after` s, or older than LIMIT_CUT_AFTER_S when its main transcript
+    ends in the usage limit's error (limit_cut). verdict is ('busy', None, '') when the session works now (its CLI
+    status, or a transcript touched within `stalled_after`), else the watchdog's (reason, epoch, detail)."""
     from . import backlog, watchdog  # imported here: both import this module
     now = time.time() if now is None else now
     live = live_hosts()
@@ -103,12 +105,42 @@ def stalled_supervisors(stalled_after, now=None):
         key = os.path.basename(path)[:-5]
         owner = store.read(key)
         rec = live.get((owner or {}).get('session_id'))
+        short = min(LIMIT_CUT_AFTER_S, stalled_after)
         if (not owner or not rec or owner.get('state') != 'running' or backlog.on_guard(owner)
-                or util.age_seconds(owner.get('heartbeat')) <= stalled_after or providers.pause_of(owner.get('checkout'))):
+                or util.age_seconds(owner.get('heartbeat')) <= short or providers.pause_of(owner.get('checkout'))):
+            continue
+        # a turn cut by the usage limit shows at once in the main transcript (its newest record is the limit's error),
+        # so it needs no 45 min of silence, and neither the CLI's busy status nor the transcripts of background
+        # subagents hide it: they work through the limit while the supervisor itself stays cut. Without this, a cut
+        # shortly before the window renews, a watcher cut again just before it, or subagents still at work kept the
+        # supervisor still for up to 45 min (or until a subagent finished) after the account had usage again
+        cut = limit_cut(rec, now, short)
+        if cut:
+            out.append((key, owner, cut))
+            continue
+        if util.age_seconds(owner.get('heartbeat')) <= stalled_after:
             continue
         verdict = None if rec.get('status') == 'busy' else watchdog.stale_reason(rec, now, stalled_after)
         out.append((key, owner, verdict or ('busy', None, '')))
     return out
+
+
+LIMIT_CUT_AFTER_S = 5 * 60  # quiet time after which a turn cut by the usage limit counts as stalled
+
+
+def limit_cut(rec, now, quiet):
+    """('limit', event epoch, detail) when the main transcript of CLI record `rec` ends in the usage limit's error and
+    has been quiet `quiet` s, else None. Subagent transcripts and the CLI status do not count (see stalled_supervisors)."""
+    from . import transcripts  # imported here, as backlog and watchdog in stalled_supervisors
+    main, _ = transcripts.session_files(rec.get('sessionId'), rec.get('cwd')) if rec else (None, [])
+    if not main or now - util.file_mtime(main) <= quiet:
+        return None
+    recs = transcripts.conv_records(main)
+    last = recs[-1] if recs else {}
+    if last.get('type') != 'assistant' or not last.get('isApiErrorMessage') or last.get('error') != 'rate_limit':
+        return None
+    text = next((it.get('text') for it in transcripts.content_items(last) if it.get('type') == 'text'), '')
+    return 'limit', last['_ts'], str(text or '').strip()[:100]
 
 
 def stalled_text(owner, reason, ts, detail):

@@ -1276,12 +1276,18 @@ def cmd_self_test(args):
     wd_session('local_sg', 'k-guard', cut_recs, ago=3600)
     put(os.path.join(lock_home, 'locks'), 'k-guard.json',
         dict(json.load(open(os.path.join(lock_home, 'locks', 'k-guard.json'))), phase='guardia'))
-    wd_session('local_sb', 'k-sbusy', cut_recs, ago=3600)
+    wd_session('local_sb', 'k-sbusy', [text_rec(4100), tool_rec(4000, 'Bash', 'sb')], ago=3600)  # busy, not cut
     cli('local_sb', sessionId='cli-local_sb', status='busy')                 # the CLI says it is working now
     wd_session('local_sp', 'k-spaused', cut_recs, ago=3600)
     put(os.path.join(lock_home, 'locks'), 'k-spaused.json',
         dict(json.load(open(os.path.join(lock_home, 'locks', 'k-spaused.json'))), checkout=os.path.join(tmp, 'paused-proj')))
-    wd_session('local_sy', 'k-syoung', cut_recs, ago=1200)                   # silent 20 min: within the 45 allowed
+    wd_session('local_sy', 'k-syoung', [text_rec(1300)], age=1200, ago=1200)  # quiet 20 min, not cut: within the 45
+    young_cut = [text_rec(1300), api_rec(1200, 'rate_limit', lim_text)]
+    wd_session('local_sl', 'k-slimit', young_cut, age=1200, ago=1200)         # cut by the limit 20 min ago: no 45 min wait
+    wd_session('local_sn', 'k-snew', young_cut, age=120, ago=120)             # cut 2 min ago: within LIMIT_CUT_AFTER_S
+    wd_session('local_sw', 'k-swork', young_cut, age=1200, ago=1200)         # cut, but its subagents work on:
+    cli('local_sw', sessionId='cli-local_sw', status='busy')                 # the CLI says busy and a subagent
+    write_jsonl(spath('cli-local_sw', 'agent-w.jsonl'), [text_rec(5)], age=5)  # transcript moves: still cut
     wd_session('local_sh', 'k-shuman', [text_rec(4100), tool_rec(4000, 'AskUserQuestion', 'qs')], ago=3600)
     rv_file = os.path.join(lock_home, 'revive.json')
     if os.path.exists(rv_file):
@@ -1295,9 +1301,9 @@ def cmd_self_test(args):
     plan = json.loads(srevive('yes', '--json').stdout or '{}')
     named = sorted(t['session_id'] for t in plan.get('targets') or [])
     msg = next((t['message'] for t in plan.get('targets') or [] if t['session_id'] == 'local_sc'), '')
-    check('revive: cut by the limit and usage back -> the live, idle supervisor is woken, and only it',
-          named == ['local_sc'] and plan['targets'][0]['reason'] == 'stalled' and plan['targets'][0]['cause'] == 'limit'
-          and plan['targets'][0]['attempt'] == 1)
+    check('revive: cut by the limit and usage back -> woken, also one cut 20 min ago and one whose subagents still work',
+          named == ['local_sc', 'local_sl', 'local_sw'] and all(t['reason'] == 'stalled' and t['cause'] == 'limit' and t['attempt'] == 1
+                                                    for t in plan['targets']))
     check('revive: its text says the truth (turn cut by the limit, process alive), with the marker and the F1 census',
           msg.startswith('[reanimar supervisora] ') and 'sigue vivo' in msg and 'límite de uso' in msg
           and lim_text in msg and 'murió hacia' not in msg and 'censo' in msg and 'supervisor-lock wait' in msg
@@ -1306,10 +1312,11 @@ def cmd_self_test(args):
     check('revive: its plan entry lets the cross-project gate pass the marker (session, fresh planned_at)',
           rv['k-cut']['session'] == 'local_sc' and rv['k-cut']['kind'] == 'stalled' and time.time() - rv['k-cut']['planned_at'] < 60)
     notes = '\n'.join(plan.get('notes') or [])
-    check('revive: on guard, paused, silent less than 45 min -> not woken; busy and waiting on the developer -> said, not woken',
-          not any(k in rv for k in ('k-guard', 'k-sbusy', 'k-spaused', 'k-syoung', 'k-shuman'))
+    check('revive: on guard, paused, quiet less than 45 min without a cut, cut less than 5 min ago -> not woken; busy and '
+          'waiting on the developer -> said, not woken',
+          not any(k in rv for k in ('k-guard', 'k-sbusy', 'k-spaused', 'k-syoung', 'k-shuman', 'k-snew'))
           and 'BUSY local_sb k-sbusy' in notes and 'HUMAN local_sh k-shuman' in notes
-          and not any(x in notes for x in ('k-guard', 'k-spaused', 'k-syoung')))
+          and not any(x in notes for x in ('k-guard', 'k-spaused', 'k-syoung', 'k-snew')))
     r = srevive('yes')
     check('revive: within REVIVE_RETRY_S the same cut waits', 'WAIT-STALLED local_sc k-cut' in r.stdout
           and not re.search(r'^STALLED ', r.stdout, re.M))

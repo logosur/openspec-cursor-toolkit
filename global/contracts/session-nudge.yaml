@@ -1,0 +1,28 @@
+piece: session-nudge
+dest: scripts/session-nudge
+kind: cli
+config: supervision
+# Safe probes only: no probe sends to a session, and a throwaway HOME has no live session to find.
+probes:
+  - name: help lists the subcommands
+    args: [--help]
+    exit: [0]
+    contains: stuck
+  - name: with no sessions, scan plans nothing and writes nothing
+    args: [scan]
+    exit: [0]
+    contains: "nothing sent or written"
+  - name: with no sessions, scan --json is an empty plan
+    args: [scan, --json]
+    exit: [0]
+    stdout: json
+    contains: '"candidates"'
+  - name: an unknown target is refused with exit 2
+    args: [send, no-such-session, --text, ping, --dry-run]
+    exit: [2]
+    stdout: empty
+  - name: a corrupt config does not crash
+    args: [scan]
+    corrupt_config: true
+    exit: [0]
+    contains: "nothing sent or written"

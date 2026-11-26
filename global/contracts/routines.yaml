@@ -1,0 +1,31 @@
+piece: routines
+dest: scripts/routines
+kind: cli
+probes:
+  - name: help lists the subcommands
+    args: [--help]
+    exit: [0]
+    stdout: any
+    contains: "routines tick"
+  - name: an unknown routine is refused
+    args: [perms, no-such-routine]
+    exit: [1]
+    stdout: empty
+  - name: tick with no routines starts nothing
+    args: [tick]
+    exit: [0]
+    stdout: empty
+  - name: import with no app folder adopts nothing
+    args: [import]
+    exit: [0]
+    stdout: any
+    contains: "0 imported"
+  - name: a corrupt config does not crash
+    args: [import]
+    corrupt_config: true
+    exit: [0]
+    stdout: any
+    contains: "0 imported"
+  - name: a profile the config does not define is refused
+    args: [add, --id, probe, --cron, "0 * * * *", --cwd, ".", --prompt-file, "/dev/null", --profile, no-such-profile]
+    exit: [2]

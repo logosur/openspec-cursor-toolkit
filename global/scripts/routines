@@ -1,0 +1,1194 @@
+#!/usr/bin/env python3
+"""Global scheduled routines, independent of the Claude account logged into any app or IDE.
+
+The desktop app keeps its schedule per account (~/.config/Claude/claude-code-sessions/<account>/<org>/),
+so a routine registered under one account silently stops when another account is active. This tool keeps
+the schedule here instead and fires it from a systemd user timer with the Claude Code CLI, using
+whichever login the CLI has at that moment.
+
+  routines import            adopt the tasks registered in every account of the desktop app (idempotent)
+  routines add ...           register a new routine
+  routines list|status       what exists, when it fires next, how the last run ended
+  routines tick              what the timer runs: start every routine that is due
+  routines run <id> [--test] run one routine now (--test: no vault writes, no notifications)
+  routines enable|disable <id>
+  routines notify <title> <text>
+  routines login [--cli]     give the routines their own one-year token (--cli: sign the CLI in instead), with
+                             the browser step in the browser `browser_opener` names, and start what is due now
+  routines auth-alert <title> <text>   an auth alert with its «Iniciar sesión» button (started by tick/run)
+  routines perms <id>        show the allow/deny list a routine runs with
+
+Layout: registry and state in ~/.claude/routines/, prompts in ~/.claude/scheduled-tasks/<id>/SKILL.md
+(the same files the desktop app uses), reports in ~/.claude/routines/runs/<id>/.
+
+Configuration (toolkit config piece `routines`, ~/.claude/toolkit/config/routines.json; a missing or wrong value
+keeps the default): vault_dir, time_label, browser_opener, import_skip_ids, and the permission tables profiles,
+profile_deny, profile_lift and default_profiles (see the permissions section below). The desktop app's session
+folder is `app_sessions_dir` of the `supervision` piece.
+
+The systemd user timer that runs `routines tick` every few minutes is not installed by this script.
+"""
+import argparse
+import fcntl
+import getpass
+import glob
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import date, datetime, timedelta, time as dtime
+from urllib.parse import urlparse
+
+HOME = os.path.expanduser("~")
+
+
+def _toolkit_config(piece, defaults):
+    try:
+        lib = os.path.join(os.path.dirname(os.path.realpath(__file__)), "lib")
+        if lib not in sys.path:
+            sys.path.insert(0, lib)
+        from toolkit_config import load_checked as checked
+        return checked(piece, defaults)
+    except Exception:
+        return dict(defaults)
+
+
+CONFIG = _toolkit_config("routines", {
+    "vault_dir": "",                  # notes vault: when set, runs read the project's notes and may edit Estado.md
+    "time_label": "hora local",       # how the run prompt names the time zone of the scheduled time
+    "browser_opener": "",             # executable that opens a URL in the user's own browser (login steps)
+    "import_skip_ids": [],            # app task ids `routines import` leaves in the app on purpose
+    "profiles": {}, "profile_deny": {}, "profile_lift": {}, "default_profiles": {},
+})
+APP_SESSIONS = os.path.expanduser(_toolkit_config("supervision", {
+    "app_sessions_dir": "~/.config/Claude/claude-code-sessions",
+})["app_sessions_dir"])
+ROOT = os.path.join(HOME, ".claude", "routines")
+REGISTRY = os.path.join(ROOT, "registry.json")
+STATE_DIR = os.path.join(ROOT, "state")
+RUNS_DIR = os.path.join(ROOT, "runs")
+LOCK_DIR = os.path.join(ROOT, "locks")
+NOTIFY_LOG = os.path.join(ROOT, "notifications.log")
+PROMPTS = os.path.join(HOME, ".claude", "scheduled-tasks")
+VAULT_RAW = CONFIG["vault_dir"].rstrip("/")   # as written in the config: permission rules keep the "~" spelling
+VAULT = os.path.expanduser(VAULT_RAW) if VAULT_RAW else ""
+SELF = os.path.abspath(__file__)
+CLI_PATH = HOME + "/.local/bin:/usr/local/bin:/usr/bin:/bin"
+NESTING_ENV = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_CHILD_SESSION")
+
+
+# ---------------------------------------------------------------- time helpers
+
+def now_local():
+    return datetime.now().astimezone().replace(second=0, microsecond=0)
+
+
+def parse_iso(value):
+    if not value:
+        return None
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value / 1000).astimezone()
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone()
+
+
+def iso(dt):
+    return dt.astimezone().isoformat(timespec="seconds") if dt else None
+
+
+# ------------------------------------------------------------------- cron spec
+
+def _field(text, lo, hi, dow=False):
+    values = set()
+    for part in text.split(","):
+        step = 1
+        if "/" in part:
+            part, raw = part.split("/")
+            step = int(raw)
+        if part == "*":
+            a, b = lo, hi
+        elif "-" in part:
+            a, b = (int(x) for x in part.split("-"))
+        else:
+            a = int(part)
+            b = hi if step != 1 else a
+        values.update(range(a, b + 1, step))
+    if dow:
+        values = {v % 7 for v in values}
+    return values
+
+
+def parse_cron(expr):
+    parts = expr.split()
+    if len(parts) != 5:
+        raise ValueError(f"cron needs 5 fields: {expr!r}")
+    minute, hour, dom, month, dow = parts
+    return {
+        "minutes": sorted(_field(minute, 0, 59)),
+        "hours": sorted(_field(hour, 0, 23)),
+        "doms": _field(dom, 1, 31),
+        "months": _field(month, 1, 12),
+        "dows": _field(dow, 0, 7, dow=True),
+        "dom_star": dom.startswith("*"),
+        "dow_star": dow.startswith("*"),
+    }
+
+
+def _day_matches(spec, day):
+    if day.month not in spec["months"]:
+        return False
+    dom_ok = day.day in spec["doms"]
+    dow_ok = (day.weekday() + 1) % 7 in spec["dows"]
+    if not spec["dom_star"] and not spec["dow_star"]:
+        return dom_ok or dow_ok
+    return dom_ok and dow_ok
+
+
+def _occurrences_on(spec, day):
+    if not _day_matches(spec, day):
+        return []
+    return [datetime.combine(day, dtime(h, m)).astimezone()
+            for h in spec["hours"] for m in spec["minutes"]]
+
+
+def latest_occurrence(expr, now, window):
+    spec = parse_cron(expr)
+    floor = now - window
+    for back in range(int(window.total_seconds() // 86400) + 2):
+        for occ in reversed(_occurrences_on(spec, now.date() - timedelta(days=back))):
+            if floor <= occ <= now:
+                return occ
+    return None
+
+
+def next_occurrence(expr, now):
+    spec = parse_cron(expr)
+    for ahead in range(0, 800):
+        for occ in _occurrences_on(spec, now.date() + timedelta(days=ahead)):
+            if occ > now:
+                return occ
+    return None
+
+
+def default_catchup_hours(expr):
+    """Daily and hourly jobs may still run a few hours late; monthly or yearly ones a few days."""
+    spec = parse_cron(expr)
+    return 72 if (not spec["dom_star"] or len(spec["months"]) < 12) else 12
+
+
+# ---------------------------------------------------------------- registry I/O
+
+def load_registry():
+    if not os.path.exists(REGISTRY):
+        return {"routines": []}
+    with open(REGISTRY) as fh:
+        return json.load(fh)
+
+
+def save_registry(reg):
+    os.makedirs(ROOT, exist_ok=True)
+    tmp = REGISTRY + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(reg, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+    os.replace(tmp, REGISTRY)
+
+
+def find(reg, rid):
+    for r in reg["routines"]:
+        if r["id"] == rid:
+            return r
+    sys.exit(f"routines: unknown routine {rid!r}")
+
+
+def load_state(rid):
+    path = os.path.join(STATE_DIR, rid + ".json")
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(rid, state):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    path = os.path.join(STATE_DIR, rid + ".json")
+    with open(path + ".tmp", "w") as fh:
+        json.dump(state, fh, indent=2)
+    os.replace(path + ".tmp", path)
+
+
+def prompt_file(r):
+    return r.get("prompt_file") or os.path.join(PROMPTS, r["id"], "SKILL.md")
+
+
+# ---------------------------------------------------------------------- notify
+
+def log_notification(title, text):
+    os.makedirs(ROOT, exist_ok=True)
+    with open(NOTIFY_LOG, "a") as fh:
+        fh.write(f"{iso(now_local())}\t{title}\t{text}\n")
+
+
+def desktop_env():
+    env = dict(os.environ)
+    env.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path=/run/user/{os.getuid()}/bus")
+    return env
+
+
+def notify(title, text, urgency="normal"):
+    log_notification(title, text)
+    if shutil.which("notify-send"):
+        subprocess.run(["notify-send", "-u", urgency, "-a", "routines", title, text],
+                       env=desktop_env(), check=False, timeout=10)
+
+
+# ---------------------------------------------------------------- permissions
+# Unattended runs use --permission-mode dontAsk: whatever a routine's list does not allow is denied, never
+# asked. COMMON_* applies to every routine; each routine adds the PROFILES it needs (registry "profiles").
+# The user's own allow rules (git *, make:*, python *...) still merge in, which is why COMMON_DENY closes
+# the ones that could publish or deploy.
+#
+# The profiles themselves are machine configuration, not code: the toolkit config piece `routines` holds
+#   profiles          {name: [allow rule, ...]}  what a routine that lists the profile may also do
+#   profile_deny      {name: [deny rule, ...]}   extra denies the profile brings along (deny beats allow, so each
+#                                                must not match any of that profile's own allows)
+#   profile_lift      {name: [rule, ...]}        COMMON_DENY entries the profile takes back because its narrower
+#                                                allows could not win against them
+#   default_profiles  {routine id: [name, ...]}  the profiles `routines import` gives an adopted routine
+# Anything of the wrong shape is ignored, and a profile name a routine lists but the config does not define adds
+# nothing (a dontAsk run is then only narrower, never wider).
+# Bash rules are not a security boundary (`sh -c`, an interpreter's `-c`): keep a publishing gate of your own as the
+# backstop for any profile that lets a routine commit or push, and write its denies for any position and any
+# `git ... push` spelling. A pattern ending in `:*` is the legacy prefix form: a colon rule that must deny a
+# refspec ends in `**` instead.
+COMMON_ALLOW = [
+    "Read", "Grep", "Glob",
+    "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(grep:*)", "Bash(find:*)",
+    "Bash(sort:*)", "Bash(uniq:*)", "Bash(date:*)", "Bash(echo:*)", "Bash(diff:*)", "Bash(jq:*)",
+    "Bash(sed -n:*)", "Bash(git log:*)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(mkdir:*)",
+    f"Bash({SELF} notify:*)", f"Bash({SELF} disable:*)",
+]
+COMMON_DENY = [
+    "Bash(git commit:*)", "Bash(git push:*)", "Bash(git merge:*)", "Bash(git rebase:*)", "Bash(git reset:*)",
+    "Bash(git checkout:*)", "Bash(git add:*)", "Bash(make:*)", "Bash(npm:*)", "Bash(npx:*)", "Bash(sudo:*)",
+    "Bash(crontab:*)", "Bash(ssh:*)", "Bash(scp:*)", "Bash(rm -rf:*)", "Read(~/.claude/routines/oauth-token*)",
+    "Edit(~/.claude/hooks/**)", "Edit(~/.claude/rules/**)", "Edit(~/.claude/scripts/**)",
+    "Edit(~/.claude/CLAUDE.md)", "Edit(~/.claude/routines/registry.json)",
+]
+
+
+def _rule_table(value):
+    """{name: [str, ...]} from a config value; entries of any other shape are dropped."""
+    if not isinstance(value, dict):
+        return {}
+    return {str(k): [x for x in v if isinstance(x, str) and x.strip()]
+            for k, v in value.items() if isinstance(v, list)}
+
+
+PROFILES = _rule_table(CONFIG["profiles"])
+PROFILE_DENY = _rule_table(CONFIG["profile_deny"])
+PROFILE_LIFT = _rule_table(CONFIG["profile_lift"])
+DEFAULT_PROFILES = _rule_table(CONFIG["default_profiles"])
+
+
+def unknown_profiles(r):
+    return [name for name in r.get("profiles", []) if name not in PROFILES]
+
+
+def permissions_for(r):
+    project = os.path.basename(r["cwd"].rstrip("/"))
+    allow = list(COMMON_ALLOW)
+    if VAULT_RAW:
+        allow.append(f"Edit({VAULT_RAW}/10-Projects/{project}/Estado.md)")
+    extra_deny, lifted = [], set()
+    for name in r.get("profiles", []):
+        allow += PROFILES.get(name, [])
+        extra_deny += PROFILE_DENY.get(name, [])
+        lifted.update(PROFILE_LIFT.get(name, []))
+    allow += r.get("allow_extra", [])
+    deny = [d for d in COMMON_DENY + extra_deny + r.get("deny_extra", []) if d not in allow and d not in lifted]
+    return allow, deny
+
+
+# ------------------------------------------------------------------ due checks
+
+def due_occurrence(r, st, now):
+    if not r.get("enabled"):
+        return None
+    if r.get("cron"):
+        hours = r.get("catchup_hours") or default_catchup_hours(r["cron"])
+        occ = latest_occurrence(r["cron"], now, timedelta(hours=hours))
+        last = parse_iso(st.get("last_scheduled_for"))
+        return occ if occ and (last is None or occ > last) else None
+    if r.get("at"):
+        if st.get("done") or st.get("overdue"):
+            return None
+        at = parse_iso(r["at"])
+        hours = r.get("catchup_hours") or 72
+        if at <= now <= at + timedelta(hours=hours):
+            return at
+    return None
+
+
+# Routines authenticate with a long-lived token of their own (`claude setup-token`, one year), stored by
+# `routines login`, so a CLI login that expires overnight no longer stops them (2026-11-02: it expired at
+# 00:13 and nothing ran until 10:43). Without that token they fall back to the CLI's login, as before.
+TOKEN_FILE = os.path.join(ROOT, "oauth-token.json")
+TOKEN_LIFETIME = timedelta(days=365)
+TOKEN_WARN = timedelta(days=14)
+TOKEN_SHAPE = re.compile(r"sk-ant-oat\d\d-[A-Za-z0-9_-]{20,}")
+AUTH_REJECTED = re.compile(r"Failed to authenticate|OAuth (access )?token (is invalid|has expired)"
+                           r"|OAuth session expired|Invalid API key", re.I)
+ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[@-_]")
+CURSOR_MOVE = re.compile(r"\x1b\[\d*[CG]")  # how the CLI's screen draws the spaces between words
+TOKEN_END = re.compile(r"Store\s+this\s+token|Use\s+this\s+token")
+
+
+def load_routine_token():
+    try:
+        with open(TOKEN_FILE) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return data if data.get("token") else None
+
+
+def save_routine_token(token):
+    tmp = TOKEN_FILE + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump({"token": token, "created": iso(now_local())}, fh)
+    os.replace(tmp, TOKEN_FILE)
+    if os.path.exists(TOKEN_FILE + ".rejected"):
+        os.remove(TOKEN_FILE + ".rejected")
+    clear_usage_pause()   # a new login may be another account, with its own usage
+
+
+def reject_routine_token():
+    """Set a token Claude refused aside (kept for diagnosis, still 0600) so the next runs use the CLI's login."""
+    if os.path.exists(TOKEN_FILE):
+        os.replace(TOKEN_FILE, TOKEN_FILE + ".rejected")
+
+
+def token_expires(token):
+    return parse_iso(token["created"]) + TOKEN_LIFETIME
+
+
+def claude_env(use_token=True):
+    env = {k: v for k, v in os.environ.items() if k not in NESTING_ENV}
+    env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+    token = load_routine_token() if use_token else None
+    if token:
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = token["token"]
+    return env
+
+
+def auth_ok(use_token=True):
+    """Whether a run would have credentials. A stored token counts without a call: `claude auth status` cannot
+    validate one either, so a token Claude refuses is caught by the run itself (auth_rejected)."""
+    if os.environ.get("ANTHROPIC_API_KEY") or (use_token and load_routine_token()):
+        return True
+    try:
+        out = subprocess.run(["claude", "auth", "status"], capture_output=True, text=True, timeout=60,
+                             env=claude_env(use_token=False))
+        return bool(json.loads(out.stdout).get("loggedIn"))
+    except Exception:
+        return False
+
+
+def auth_rejected(code, out, err):
+    """True when the CLI failed before doing any work because Claude refused its credentials."""
+    return code != 0 and len((out or "").strip()) < 600 and bool(AUTH_REJECTED.search(f"{out}\n{err}"))
+
+
+# An auth problem gets one alert per occurrence (again every AUTH_REMIND while it lasts), and the alert carries
+# the fix: its button opens a terminal running `routines login`. Each kind ("logout": no credentials at all,
+# "token": the routines' token was refused or is about to expire) has its own stamp and unit, so clearing one
+# never re-arms or closes the other. The alert lives in its own unit so the button can wait for a click without
+# holding up the tick.
+AUTH_REMIND = timedelta(hours=12)
+CHROME_OPENER = os.path.expanduser(CONFIG["browser_opener"]) if CONFIG["browser_opener"] else ""
+LOGIN_HINT = "~/.claude/scripts/routines login"
+LOGIN_FIX = (f"Pulsa «Iniciar sesión»: se abre una terminal y tu Chrome para autorizar un token de un año para las "
+             f"rutinas; al terminar se lanzan solas. Sin el botón: {LOGIN_HINT}")
+
+
+def auth_alert_paths(kind):
+    return os.path.join(ROOT, f".auth-alert-{kind}"), f"routines-auth-alert-{kind}"
+
+
+def unit_active(unit):
+    return subprocess.run(["systemctl", "--user", "is-active", "--quiet", unit]).returncode == 0
+
+
+def alert_auth(kind, title, text):
+    stamp, unit = auth_alert_paths(kind)
+    if unit_active(unit):
+        return
+    if os.path.exists(stamp) and time.time() - os.path.getmtime(stamp) < AUTH_REMIND.total_seconds():
+        return
+    open(stamp, "w").close()
+    cmd = ["systemd-run", "--user", "--collect", "--quiet", f"--unit={unit}",
+           f"--description=Claude routines: auth alert ({kind})", "--property=KillSignal=SIGINT",
+           "--setenv=HOME=" + HOME, "--setenv=PATH=" + CLI_PATH, sys.executable, SELF, "auth-alert", title, text]
+    if subprocess.run(cmd, capture_output=True, text=True).returncode != 0:
+        notify(title, text, "critical")
+
+
+def clear_auth_alert(kind):
+    """Back to normal: forget the problem and take an alert still on screen away."""
+    stamp, unit = auth_alert_paths(kind)
+    if not os.path.exists(stamp):
+        return
+    os.remove(stamp)
+    subprocess.run(["systemctl", "--user", "stop", unit], capture_output=True, check=False)
+
+
+def check_token_expiry():
+    token = load_routine_token()
+    if token and now_local() >= token_expires(token) - TOKEN_WARN:
+        alert_auth("token", "El token de las rutinas caduca pronto",
+                   f"Caduca el {token_expires(token):%d-%m-%Y}; después se usará el login del CLI, que puede "
+                   f"caducar cualquier noche. {LOGIN_FIX}")
+
+
+def cmd_auth_alert(args):
+    log_notification(args.title, args.text)
+    out = subprocess.run(["notify-send", "-u", "critical", "-a", "routines", "-A", "login=Iniciar sesión",
+                          "-A", "default=Iniciar sesión", args.title, args.text],
+                         env=desktop_env(), capture_output=True, text=True)
+    if out.stdout.strip() not in ("login", "default"):
+        return 0
+    terminal = shutil.which("gnome-terminal")
+    if not terminal:
+        notify(args.title, f"No encuentro gnome-terminal. Abre una terminal y ejecuta: {LOGIN_HINT}", "critical")
+        return 1
+    subprocess.run([terminal, "--geometry=160x40", "--title=Claude: iniciar sesión para las rutinas", "--",
+                    sys.executable, SELF, "login", "--pause"], env=desktop_env(), check=False, timeout=30)
+    return 0
+
+
+def token_from_screen(path):
+    """The token `claude setup-token` printed, read back from what `script` recorded of the terminal. The line
+    may wrap, so everything between the token's start and the sentence after it is joined without whitespace."""
+    with open(path, errors="replace") as fh:
+        text = ANSI.sub("", CURSOR_MOVE.sub(" ", fh.read()))
+    start = text.rfind("sk-ant-oat")
+    if start < 0:
+        return None
+    end = TOKEN_END.search(text, start)
+    token = re.sub(r"\s+", "", text[start:end.start() if end else start + 400])
+    return token if TOKEN_SHAPE.fullmatch(token) else None
+
+
+def token_works(token):
+    """True/False when Claude accepted/refused a one-line call with the token; None when it could not tell."""
+    env = claude_env(use_token=False)
+    env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    try:
+        res = subprocess.run(["claude", "-p", "--output-format", "text", "--permission-mode", "dontAsk"],
+                             input="Responde solo: OK", cwd=ROOT, env=env, capture_output=True, text=True,
+                             timeout=180)
+    except subprocess.TimeoutExpired:
+        return None
+    if res.returncode == 0:
+        return True
+    return False if auth_rejected(res.returncode, res.stdout, res.stderr) else None
+
+
+def login_token():
+    env = claude_env(use_token=False)
+    if CHROME_OPENER and os.access(CHROME_OPENER, os.X_OK):
+        env["BROWSER"] = CHROME_OPENER
+    print("Se abre tu Chrome para autorizar un token de un año, solo para las rutinas. Autorízalo: la página te da\n"
+          "un código; cópialo y pégalo aquí cuando lo pida. El token que sale después lo guardo yo.\n"
+          "Si Chrome no se abre, abre la dirección que aparece abajo.\n")
+    capture = tempfile.mkdtemp(prefix=".setup-token-", dir=ROOT)
+    try:
+        screen = os.path.join(capture, "screen.log")
+        subprocess.run(["script", "-q", "-e", "-c", "claude setup-token", screen], env=env, check=False)
+        token = token_from_screen(screen) if os.path.exists(screen) else None
+    finally:
+        shutil.rmtree(capture, ignore_errors=True)
+    if not token:
+        pasted = getpass.getpass("\nNo he podido leer el token de la pantalla. Cópialo de arriba (empieza por "
+                                 "sk-ant-oat) y pégalo aquí; no se verá al pegarlo: ")
+        token = re.sub(r"\s+", "", pasted)
+        if not TOKEN_SHAPE.fullmatch(token):
+            print(f"\nEso no parece un token. Vuelve a intentarlo con: {LOGIN_HINT}")
+            return 1
+    print("\nComprobando el token con Claude…")
+    works = token_works(token)
+    if works is False:
+        print(f"\nClaude ha rechazado el token. Vuelve a intentarlo con: {LOGIN_HINT}")
+        return 1
+    save_routine_token(token)
+    expires = token_expires(load_routine_token())
+    if works is None:
+        print("No he podido comprobarlo (¿sin red?); lo guardo igualmente y lo probará la próxima rutina.")
+    print(f"Token guardado. Caduca el {expires:%d-%m-%Y}; dos semanas antes te avisaré para renovarlo.")
+    return 0
+
+
+def login_cli():
+    if auth_ok(use_token=False):
+        print("El CLI de Claude ya tiene sesión iniciada.")
+        return 0
+    env = claude_env(use_token=False)
+    if CHROME_OPENER and os.access(CHROME_OPENER, os.X_OK):
+        env["BROWSER"] = CHROME_OPENER
+    print("Se abre tu Chrome para entrar en Claude. Si no se abre, copia la dirección que aparece abajo.\n")
+    subprocess.run(["claude", "auth", "login"], env=env, check=False)
+    if not auth_ok(use_token=False):
+        print(f"\nNo se ha iniciado sesión. Vuelve a intentarlo con: {LOGIN_HINT} --cli")
+        return 1
+    print("\nSesión iniciada.")
+    return 0
+
+
+def cmd_login(args):
+    """Give the routines credentials (by default their own one-year token; --cli: the CLI's regular login), with
+    the browser step in the developer's own Chrome, then start what is due right away."""
+    os.environ["PATH"] = CLI_PATH + ":" + os.environ.get("PATH", "")
+    try:
+        code = login_cli() if args.cli else login_token()
+        if code:
+            return code
+        clear_auth_alert("token")
+        clear_auth_alert("logout")
+        clear_usage_pause()
+        print("Lanzando las rutinas pendientes…")
+        cmd_tick(args)
+        print("Hecho. Estado: ~/.claude/scripts/routines status")
+        return 0
+    finally:
+        if args.pause:
+            input("\nPulsa Intro para cerrar esta ventana.")
+
+
+# ------------------------------------------------------------------------ tick
+
+def cmd_tick(args):
+    reg = load_registry()
+    now = now_local()
+    due = []
+    for r in reg["routines"]:
+        st = load_state(r["id"])
+        occ = due_occurrence(r, st, now)
+        if occ:
+            due.append((r, st, occ))
+    check_token_expiry()
+    if not due:
+        return 0
+    paused = usage_paused_until(now)
+    if paused:
+        print(f"routines: {len(due)} due, paused by the usage limit until {paused:%H:%M}")
+        return 0
+    if not api_reachable():
+        print(f"routines: {len(due)} due, waiting for the network ({API_HOST} unreachable)")
+        return 0
+    if not auth_ok():
+        alert_auth("logout", "Rutinas paradas: Claude no tiene sesión", f"{len(due)} rutina(s) esperando. {LOGIN_FIX}")
+        return 0
+    clear_auth_alert("logout")
+    for r, st, occ in due:
+        unit = "routine-" + re.sub(r"[^A-Za-z0-9_.-]", "-", r["id"])
+        cmd = ["systemd-run", "--user", "--collect", "--quiet", f"--unit={unit}",
+               f"--description=Claude routine {r['id']}", "--setenv=HOME=" + HOME,
+               "--setenv=PATH=" + CLI_PATH,
+               sys.executable, SELF, "run", r["id"], "--scheduled-for", iso(occ)]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0:
+            print(f"routines: could not start {r['id']}: {res.stderr.strip()}", file=sys.stderr)
+            continue
+        st["previous_scheduled_for"] = st.get("last_scheduled_for")
+        st["last_scheduled_for"] = iso(occ)
+        st["last_started_at"] = iso(now_local())
+        save_state(r["id"], st)
+        print(f"routines: started {r['id']} (scheduled {iso(occ)})")
+    return 0
+
+
+# ------------------------------------------------------------------------- run
+
+PREAMBLE = """Ejecución desatendida de la rutina «{id}» (prevista {when}, {time_label}), lanzada por el temporizador \
+global `claude-routines` sin la app de escritorio y sin nadie delante. Responde en español.
+
+Antes de actuar:
+1. {context}
+   Los CLAUDE.md, reglas y memorias del proyecto se cargan solos desde el directorio de trabajo ({cwd}); \
+la tarea de abajo nombra los ficheros concretos que además debes leer. Lo que contradiga la tarea y sea más \
+reciente, con evidencia, gana: dilo en el resumen.
+2. En esta modalidad NO existen SendUserFile, PushNotification, AskUserQuestion ni update_scheduled_task. Sustitutos:
+   - Avisar al desarrollador: `{self} notify "<título>" "<texto en una línea>"` (notificación de escritorio).
+   - Entregar un informe: déjalo en la ruta que indica la tarea y cita la ruta en el resumen final.
+   - Si la tarea te manda preguntar: no preguntes. Escribe la pregunta en el resumen bajo «Necesita decisión» y \
+no ejecutes lo que dependa de la respuesta.
+   - Desactivar esta rutina: `{self} disable {id}`.
+{notes_step}{last}. Termina con un resumen de 3 a 6 líneas: qué has hecho, qué has verificado, qué no se ha podido \
+comprobar y si algo requiere acción.
+{test_line}
+=== TAREA ===
+"""
+
+NOTES_STEP = """3. Si hay un resultado que merezca anotarse (cambio hecho, hallazgo, decisión), añádelo a \
+`{vault}/10-Projects/{project}/Estado.md` según las reglas del vault (entrada con fecha arriba, sin inventar, \
+lo no verificado marcado como tal). Si no hay novedad, no escribas nada en el vault.
+"""
+
+TEST_LINE = ("\nMODO PRUEBA: ejecuta solo lectura. No escribas en el vault, no envíes notificaciones, no modifiques "
+             "ficheros del proyecto ni ningún sistema externo, no muevas correo. Si la tarea pide hacerlo, di qué "
+             "habrías hecho. Cuenta qué herramientas y accesos te han faltado.\n")
+TEST_LINE_NO_VAULT = TEST_LINE.replace("No escribas en el vault, no envíes", "No envíes")
+
+
+def build_prompt(r, scheduled_for, test):
+    with open(prompt_file(r)) as fh:
+        body = fh.read()
+    body = re.sub(r"\A---\n.*?\n---\n", "", body, count=1, flags=re.S)
+    project = os.path.basename(r["cwd"].rstrip("/"))
+    if not VAULT:
+        context = "Lee el contexto del proyecto: sus CLAUDE.md, reglas y memorias."
+        notes_step = ""
+    else:
+        vault_dir = os.path.join(VAULT, "10-Projects", project)
+        if os.path.isdir(vault_dir):
+            names = [n for n in ("README.md", "Estado.md", "Decisiones.md", "Errores-resueltos.md", "Rutinas.md")
+                     if os.path.exists(os.path.join(vault_dir, n))]
+            vault_lines = f"{vault_dir}/ ({', '.join(names)}); empieza por README.md y Estado.md."
+        else:
+            vault_lines = f"no hay carpeta del proyecto en {VAULT}/10-Projects/{project}; búscalo en el vault por nombre."
+        context = f"Lee el contexto del proyecto en el vault: {vault_lines}"
+        notes_step = NOTES_STEP.format(vault=VAULT, project=project)
+    head = PREAMBLE.format(id=r["id"], when=scheduled_for or "ahora", time_label=CONFIG["time_label"],
+                           context=context, cwd=r["cwd"], self=SELF, notes_step=notes_step,
+                           last=4 if notes_step else 3,
+                           test_line=(TEST_LINE if VAULT else TEST_LINE_NO_VAULT) if test else "")
+    return head + body
+
+
+RETRY_DELAYS_MIN = (2, 5, 15)
+API_UNREACHABLE = re.compile(r"Can't reach the API server|EAI_AGAIN|ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT"
+                             r"|API Error: Connection error", re.I)
+
+
+# Without network nothing is started and nothing is notified: the occurrence stays due and runs when the
+# network is back, inside its catch-up window. 2026-11-03: the Wi-Fi dropped from 07:06 to the 10:36 suspend;
+# the 08:00 and 09:00 runs burned their retries, were counted as done, sent «falló» alerts every 40 min and
+# never ran when the network came back at 13:53.
+API_URL = urlparse(os.environ.get("ANTHROPIC_BASE_URL") or "https://api.anthropic.com")
+API_HOST = API_URL.hostname
+API_PORT = API_URL.port or (80 if API_URL.scheme == "http" else 443)
+
+
+def api_reachable():
+    try:
+        socket.create_connection((API_HOST, API_PORT), timeout=10).close()
+        return True
+    except OSError:
+        return False
+
+
+def api_unreachable(code, out, err):
+    """True when the CLI failed before doing any work because it could not reach the API."""
+    return code != 0 and len((out or "").strip()) < 600 and bool(API_UNREACHABLE.search(f"{out}\n{err}"))
+
+
+# An account at its usage limit answers every run with a one-line "hit your ... limit, resets <time>" message and exit 1.
+# 2026-11-04/05: each of those went through the generic «falló» alert, so the */15 routine sent 63 critical alerts
+# in two days. Now a limited run is not counted as done (like a run without network), the tick starts nothing
+# until the limit resets, and the developer gets one normal notice per limit period. The pause lasts USAGE_PROBE at
+# most, so after an account switch the routines are back within the hour; a probe that hits the limit again just
+# pauses again, without a notice. A successful run or `routines login` ends the period.
+USAGE_LIMIT = re.compile(r"hit your [\w -]{0,30}limit|usage limit reached", re.I)
+USAGE_RESETS = re.compile(r"resets?\s+(?:at\s+)?(?:(?P<mon>[A-Za-z]{3})[a-z]*\.?\s+(?P<day>\d{1,2}),?\s+(?:at\s+)?)?"
+                          r"(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ap>[ap]m)", re.I)
+MONTHS = {m: i for i, m in enumerate(("jan feb mar apr may jun jul aug sep oct nov dec").split(), 1)}
+USAGE_PROBE = timedelta(hours=1)
+USAGE_STALE = timedelta(hours=6)
+
+
+def usage_limited(code, out, err):
+    """True when the CLI did no work because the account is at its usage limit."""
+    return code != 0 and len((out or "").strip()) < 600 and bool(USAGE_LIMIT.search(f"{out}\n{err}"))
+
+
+def usage_resets_at(text, now):
+    """When the limit in the CLI's message resets (local time, which is the zone the CLI prints), or None."""
+    m = USAGE_RESETS.search(text or "")
+    if not m:
+        return None
+    hour = int(m["h"]) % 12 + (12 if m["ap"].lower() == "pm" else 0)
+    try:
+        if m["mon"]:
+            at = now.replace(month=MONTHS[m["mon"].lower()], day=int(m["day"]), hour=hour, minute=int(m["m"] or 0))
+            return at if at > now - timedelta(days=1) else at.replace(year=at.year + 1)
+        at = now.replace(hour=hour, minute=int(m["m"] or 0))
+    except (KeyError, ValueError):
+        return None
+    return at if at > now else at + timedelta(days=1)
+
+
+def usage_pause_path():
+    return os.path.join(ROOT, ".usage-limit")
+
+
+def load_usage_pause():
+    try:
+        with open(usage_pause_path()) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def usage_paused_until(now):
+    """The time the tick may start routines again, or None when nothing is paused."""
+    pause = load_usage_pause()
+    until = parse_iso(pause.get("not_before")) if pause else None
+    return until if until and now < until else None
+
+
+def pause_for_usage(resets, line, now):
+    """Pause the routines until the limit resets (USAGE_PROBE at most). True when this starts a new limit period,
+    i.e. the developer has not been told yet. Routines started by the same tick hit the limit together: the
+    stamp is created with O_EXCL so only one of them tells him."""
+    old = load_usage_pause()
+    old_until = parse_iso(old.get("not_before")) if old else None
+    if old is not None and (old_until is None or now - old_until > USAGE_STALE):
+        clear_usage_pause()   # left by an earlier limit period that no successful run closed
+        old = None
+    try:
+        os.close(os.open(usage_pause_path(), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644))
+        new = True
+    except FileExistsError:
+        new = False
+    not_before = min(resets, now + USAGE_PROBE) if resets else now + USAGE_PROBE
+    data = {"resets": iso(resets) if resets else None, "not_before": iso(not_before), "line": line[:200],
+            "since": (old or {}).get("since") or iso(now)}
+    tmp = f"{usage_pause_path()}.{os.getpid()}.tmp"   # one per process: the runs of one tick write together
+    with open(tmp, "w") as fh:
+        json.dump(data, fh)
+    os.replace(tmp, usage_pause_path())
+    return new
+
+
+def clear_usage_pause():
+    if os.path.exists(usage_pause_path()):
+        os.remove(usage_pause_path())
+
+
+# One critical «falló» alert per run of failures, again every FAILURE_REMIND while they last; the rest are written
+# in the report. A run that ends well, or a precheck with nothing to do, ends the run of failures.
+FAILURE_REMIND = timedelta(hours=12)
+
+
+def failure_notice_due(st, now):
+    last = parse_iso(st.get("failure_notified_at"))
+    return last is None or now - last >= FAILURE_REMIND
+
+
+PRECHECK_TIMEOUT = 300
+PRECHECK_MAX_CHARS = 20000
+
+
+def run_precheck(r, scheduled_for, test):
+    """Run the routine's `precheck` shell command in its cwd. Returns (verdict, stdout, stderr_tail):
+    verdict "go" (exit 0), "skip" (exit 1: nothing to do) or "fail" (any other exit, or the timeout)."""
+    env = dict(os.environ)
+    env["ROUTINE_ID"] = r["id"]
+    env["ROUTINE_SCHEDULED_FOR"] = scheduled_for or iso(now_local())
+    if test:
+        env["ROUTINE_TEST"] = "1"
+    try:
+        res = subprocess.run(["bash", "-c", r["precheck"]], cwd=r["cwd"], env=env, capture_output=True, text=True,
+                             timeout=PRECHECK_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        out = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        return "fail", out, f"precheck timed out after {PRECHECK_TIMEOUT} s"
+    except OSError as exc:
+        return "fail", "", f"precheck could not start: {exc}"
+    tail = res.stderr.strip()[-1000:]
+    if res.returncode == 0:
+        return "go", res.stdout, tail
+    if res.returncode == 1:
+        return "skip", res.stdout, tail
+    return "fail", res.stdout, f"precheck exit {res.returncode}: {tail}"
+
+
+def claude_command(r, allow, deny):
+    cmd = ["claude", "-p", "--permission-mode", "dontAsk", "--output-format", "text",
+           "--allowedTools", ",".join(allow), "--disallowedTools", ",".join(deny)]
+    if r.get("model"):
+        cmd += ["--model", str(r["model"])]
+    if r.get("effort"):
+        cmd += ["--effort", str(r["effort"])]
+    for d in r.get("add_dirs", []):
+        cmd += ["--add-dir", os.path.expanduser(d)]
+    if r.get("chrome"):
+        cmd.append("--chrome")
+    return cmd
+
+
+def cmd_run(args):
+    reg = load_registry()
+    r = find(reg, args.id)
+    os.makedirs(LOCK_DIR, exist_ok=True)
+    # Overlap lock: held (open file + flock) until this process ends, so a second run of the same routine
+    # (a manual one, or a tick while the previous occurrence is still going) skips without notifying.
+    lock = open(os.path.join(LOCK_DIR, r["id"] + ".lock"), "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print(f"routines: {r['id']} is already running", file=sys.stderr)
+        return 0
+    stamp = now_local().strftime("%Y%m%d-%H%M%S") + ("-test" if args.test else "")
+    out_dir = os.path.join(RUNS_DIR, r["id"])
+    os.makedirs(out_dir, exist_ok=True)
+    report = os.path.join(out_dir, stamp + ".md")
+    started = now_local()
+
+    # Precheck: a cheap shell test of "is there anything to do?", before any claude call. Exit 0 goes on and its
+    # stdout rides along in the prompt; exit 1 is a finished run with nothing to do (no claude, no notification);
+    # anything else is a failed run through the normal failure path below.
+    precheck_out, precheck_failed = "", None
+    if r.get("precheck"):
+        verdict, pre_out, pre_err = run_precheck(r, args.scheduled_for, args.test)
+        if verdict == "skip":
+            last_line = next((ln for ln in reversed(pre_out.strip().splitlines()) if ln.strip()), "")
+            result = "skipped: precheck found nothing to do" + (f" ({last_line.strip()[:200]})" if last_line else "")
+            if not args.test:
+                with open(os.path.join(out_dir, "skips.log"), "a") as fh:
+                    fh.write(f"{iso(started)}\t{args.scheduled_for or 'manual'}\t{result}\n")
+                st = load_state(r["id"])
+                st.update({"last_run_at": iso(started), "last_exit": 0, "last_result": result})
+                st.pop("waiting_network", None)
+                st.pop("waiting_usage", None)
+                st.pop("failure_notified_at", None)
+                if r.get("at"):
+                    st["done"] = True
+                save_state(r["id"], st)
+            print(f"routines: {r['id']} {result}")
+            return 0
+        if verdict == "fail":
+            precheck_failed = pre_err
+        else:
+            precheck_out = pre_out
+            if len(precheck_out) > PRECHECK_MAX_CHARS:
+                precheck_out = precheck_out[:PRECHECK_MAX_CHARS] + (
+                    f"\n[precheck output truncated at {PRECHECK_MAX_CHARS} characters]")
+
+    prompt = ""
+    if precheck_failed is None:
+        prompt = build_prompt(r, args.scheduled_for, args.test)
+        if precheck_out.strip():
+            prompt += "\n\n=== PRECHECK ===\n" + precheck_out
+    allow, deny = permissions_for(r)
+    cmd = claude_command(r, allow, deny)
+    env = claude_env()
+    env["ROUTINE_ID"] = r["id"]
+    # A routine that waits on a long command (a full test suite through heavy-job) needs Bash calls longer than
+    # the CLI's 10-minute cap; claude reads that cap from BASH_MAX_TIMEOUT_MS.
+    if r.get("bash_timeout_min"):
+        env["BASH_MAX_TIMEOUT_MS"] = str(60_000 * int(r["bash_timeout_min"]))
+
+    def attempt():
+        try:
+            res = subprocess.run(cmd, input=prompt, cwd=r["cwd"], env=env, capture_output=True, text=True,
+                                 timeout=60 * int(r.get("timeout_min", 120)))
+            return res.returncode, res.stdout, res.stderr
+        except subprocess.TimeoutExpired as exc:
+            return 124, (exc.stdout or b"").decode() if isinstance(exc.stdout, bytes) else (exc.stdout or ""), "timeout"
+
+    # A run that never reached the API (network not up yet after resume, DNS hiccup) did nothing, so it is
+    # safe to repeat (a morning run once died with EAI_AGAIN and sent no email).
+    # The same holds for a run whose token Claude refused: it is repeated at once with the CLI's login.
+    retries, refused = [], []
+    if precheck_failed is not None:
+        code, out, err = 125, "", precheck_failed
+    else:
+        for delay_min in (0,) + RETRY_DELAYS_MIN:
+            if delay_min:
+                time.sleep(60 * delay_min)
+            code, out, err = attempt()
+            if env.get("CLAUDE_CODE_OAUTH_TOKEN") and auth_rejected(code, out, err):
+                refused.append(f"{now_local().strftime('%H:%M')} {(out or err).strip()[:120]}")
+                reject_routine_token()
+                del env["CLAUDE_CODE_OAUTH_TOKEN"]
+                if not args.test:
+                    alert_auth("token", "Claude ha rechazado el token de las rutinas",
+                               f"Siguen con el login del CLI, que puede caducar cualquier noche. {LOGIN_FIX}")
+                code, out, err = attempt()
+            if not api_unreachable(code, out, err):
+                break
+            retries.append(f"{now_local().strftime('%H:%M')} {(out or err).strip()[:120]}")
+    # A failed precheck's stderr is the script's, not Claude's: never read it as an auth or network problem.
+    no_credentials = precheck_failed is None and auth_rejected(code, out, err)
+    offline = precheck_failed is None and api_unreachable(code, out, err)
+    limited = precheck_failed is None and not offline and usage_limited(code, out, err)
+    give_back = (offline or limited) and bool(args.scheduled_for) and not args.test
+    resets = usage_resets_at(f"{out}\n{err}", now_local()) if limited else None
+    failed = not (offline or limited or no_credentials) and code != 0
+    with open(report, "w") as fh:
+        fh.write(f"# {r['id']} — {iso(started)}{' (prueba)' if args.test else ''}\n\n")
+        fh.write(f"- Exit: {code}\n- Prevista: {args.scheduled_for or 'manual'}\n")
+        if precheck_failed is not None:
+            fh.write("- El precheck falló: no se llamó a Claude.\n")
+        for name in unknown_profiles(r):
+            fh.write(f"- Perfil de permisos desconocido, no se aplica: {name}\n")
+        for line in refused:
+            fh.write(f"- Token de las rutinas rechazado (repetido con el login del CLI): {line}\n")
+        for line in retries:
+            fh.write(f"- Sin conexión con la API (reintentado): {line}\n")
+        if give_back and offline:
+            fh.write("- Sin red durante todos los reintentos: no cuenta como hecha; se lanzará cuando vuelva la red, "
+                     "dentro de su margen de recuperación.\n")
+        if limited:
+            when = f" (vuelve a las {resets:%H:%M})" if resets else ""
+            fh.write(f"- Límite de uso de la cuenta{when}: no se avisa como fallo"
+                     + ("; no cuenta como hecha y se lanzará después, dentro de su margen de recuperación" if give_back
+                        else "") + ".\n")
+        fh.write(f"\n{out}\n")
+        if err.strip():
+            fh.write(f"\n## stderr\n\n```\n{err.strip()[-4000:]}\n```\n")
+    latest = os.path.join(out_dir, "latest.md")
+    if os.path.lexists(latest):
+        os.remove(latest)
+    os.symlink(os.path.basename(report), latest)
+
+    if not args.test:
+        st = load_state(r["id"])
+        st.update({"last_run_at": iso(started), "last_exit": code, "last_report": report})
+        st.pop("last_result", None)
+        st.pop("waiting_network", None)
+        st.pop("waiting_usage", None)
+        if give_back and st.get("last_scheduled_for") == args.scheduled_for:
+            st["last_scheduled_for"] = st.get("previous_scheduled_for")
+            st["waiting_usage" if limited else "waiting_network"] = args.scheduled_for
+        if r.get("at") and code == 0:
+            st["done"] = True
+        now = now_local()
+        remind = failed and failure_notice_due(st, now)
+        if remind:
+            st["failure_notified_at"] = iso(now)
+        elif code == 0:
+            st.pop("failure_notified_at", None)
+        save_state(r["id"], st)
+        if code == 0:
+            clear_usage_pause()
+        if offline:
+            pass   # nothing the developer can fix from a notification; the run is retried with the network
+        elif limited:
+            line = next((ln.strip() for ln in f"{out}\n{err}".splitlines() if USAGE_LIMIT.search(ln)), "")
+            if pause_for_usage(resets, line, now):
+                when = f" (vuelve a las {resets:%H:%M})" if resets else ""
+                notify("Rutinas en pausa por el límite de uso",
+                       f"La cuenta de Claude ha llegado a su límite de uso{when}. Las rutinas esperan y se lanzan "
+                       "solas después; no tienes que hacer nada. Si cambias de cuenta, vuelven a probar en menos "
+                       "de una hora.")
+        elif no_credentials:
+            alert_auth("logout", "Rutinas paradas: Claude no tiene sesión",
+                       f"Claude ha rechazado las credenciales de «{r['id']}». {LOGIN_FIX}")
+        elif remind and precheck_failed is not None:
+            notify(f"Rutina {r['id']} falló", f"El precheck falló. {precheck_failed[-300:]} Informe: {report}", "critical")
+        elif remind:
+            notify(f"Rutina {r['id']} falló", f"Salida {code}. Informe: {report}", "critical")
+        elif failed:
+            last = parse_iso(st.get("failure_notified_at"))
+            with open(report, "a") as fh:
+                fh.write(f"\n- Aviso no repetido: ya se avisó de un fallo de esta rutina el {last:%d-%m} a las {last:%H:%M}; "
+                         "se repite cada 12 h mientras siga fallando.\n")
+    print(f"routines: {r['id']} exit={code} report={report}")
+    return code
+
+
+# ------------------------------------------------------------- import/list etc.
+
+def cmd_import(args):
+    reg = load_registry()
+    known = {r["id"] for r in reg["routines"]}
+    now = now_local()
+    added = []
+    for path in sorted(glob.glob(os.path.join(APP_SESSIONS, "*", "*", "scheduled-tasks.json"))):
+        account = path.split(os.sep)[-3][:8]
+        with open(path) as fh:
+            tasks = json.load(fh).get("scheduledTasks", [])
+        for t in tasks:
+            # Tasks listed in `import_skip_ids` live in the app on purpose, one per account.
+            if t["id"] in known or t["id"] in CONFIG["import_skip_ids"]:
+                continue
+            r = {"id": t["id"], "enabled": bool(t.get("enabled")), "cwd": t.get("cwd") or HOME,
+                 "prompt_file": t.get("filePath") or os.path.join(PROMPTS, t["id"], "SKILL.md"),
+                 "source": f"desktop-app account {account}"}
+            if t.get("cronExpression"):
+                r["cron"] = t["cronExpression"]
+            elif t.get("fireAt"):
+                r["at"] = iso(parse_iso(t["fireAt"]))
+            r["profiles"] = DEFAULT_PROFILES.get(r["id"], [])
+            try:
+                with open(r["prompt_file"]) as fh:
+                    r["chrome"] = "claude-in-chrome" in fh.read()
+            except OSError:
+                sys.exit(f"routines: no prompt file for {t['id']}: {r['prompt_file']}")
+            reg["routines"].append(r)
+            known.add(r["id"])
+            st = {"last_run_at": iso(parse_iso(t.get("lastRunAt")))}
+            if r.get("cron"):
+                st["last_scheduled_for"] = iso(now)   # nothing fires retroactively on import
+            elif parse_iso(r["at"]) < now and not t.get("lastRunAt"):
+                st["overdue"] = True                  # one-shot whose date passed unrun: manual only
+            save_state(r["id"], st)
+            added.append((r, st))
+    save_registry(reg)
+    for r, st in added:
+        flag = " [overdue one-shot: run by hand]" if st.get("overdue") else ""
+        print(f"imported {r['id']} ({r.get('cron') or r.get('at')}, {'on' if r['enabled'] else 'off'}){flag}")
+    print(f"{len(added)} imported, {len(reg['routines'])} in registry")
+    return 0
+
+
+def cmd_add(args):
+    reg = load_registry()
+    if any(r["id"] == args.id for r in reg["routines"]):
+        sys.exit(f"routines: {args.id} already exists")
+    if bool(args.cron) == bool(args.at):
+        sys.exit("routines: give exactly one of --cron or --at")
+    pf = os.path.abspath(args.prompt_file)
+    with open(pf) as fh:
+        text = fh.read()
+    r = {"id": args.id, "enabled": not args.disabled, "cwd": os.path.abspath(args.cwd), "prompt_file": pf,
+         "chrome": "claude-in-chrome" in text or args.chrome, "source": "routines add",
+         "profiles": args.profile or []}
+    for field, value in (("model", args.model), ("effort", args.effort), ("timeout_min", args.timeout_min),
+                         ("precheck", args.precheck), ("add_dirs", args.add_dir),
+                         ("bash_timeout_min", args.bash_timeout_min)):
+        if value:
+            r[field] = value
+    if args.cron:
+        parse_cron(args.cron)
+        r["cron"] = args.cron
+    else:
+        r["at"] = iso(parse_iso(args.at))
+    reg["routines"].append(r)
+    save_registry(reg)
+    st = {"last_scheduled_for": iso(now_local())} if r.get("cron") else {}
+    save_state(args.id, st)
+    print(f"added {args.id}")
+    return 0
+
+
+def cmd_set_enabled(args, value):
+    reg = load_registry()
+    r = find(reg, args.id)
+    r["enabled"] = value
+    save_registry(reg)
+    if value and r.get("cron"):
+        st = load_state(r["id"])
+        st["last_scheduled_for"] = iso(now_local())
+        save_state(r["id"], st)
+    print(f"{args.id}: {'enabled' if value else 'disabled'}")
+    return 0
+
+
+def cmd_perms(args):
+    r = find(load_registry(), args.id)
+    for name in unknown_profiles(r):
+        print(f"routines: profile {name!r} is not defined in the config piece `routines`; it adds nothing",
+              file=sys.stderr)
+    allow, deny = permissions_for(r)
+    print("ALLOW\n  " + "\n  ".join(allow) + "\nDENY\n  " + "\n  ".join(deny))
+    return 0
+
+
+def cmd_list(args):
+    reg = load_registry()
+    now = now_local()
+    token = load_routine_token()
+    if token:
+        print(f"Credenciales: token de las rutinas, caduca el {token_expires(token):%d-%m-%Y}.\n")
+    elif auth_ok():
+        print(f"Credenciales: login del CLI, que puede caducar. Token de un año: {LOGIN_HINT}\n")
+    else:
+        print(f"Sin credenciales: las rutinas no se lanzan. Arréglalo con: {LOGIN_HINT}\n")
+    paused = usage_paused_until(now)
+    if paused:
+        print(f"Límite de uso: rutinas en pausa hasta las {paused:%H:%M}.\n")
+    rows = [("ID", "ON", "CUÁNDO", "PRÓXIMA", "ÚLTIMA", "EXIT")]
+    for r in reg["routines"]:
+        st = load_state(r["id"])
+        when = r.get("cron") or ("una vez " + r["at"][:16].replace("T", " "))
+        if st.get("overdue"):
+            nxt = "vencida (manual)"
+        elif r.get("at"):
+            nxt = "hecha" if st.get("done") else r["at"][:16].replace("T", " ")
+        else:
+            nxt = next_occurrence(r["cron"], now).strftime("%Y-%m-%d %H:%M") if r["enabled"] else "-"
+        last = (st.get("last_run_at") or "-")[:16].replace("T", " ")
+        exit_text = ("sin red" if st.get("waiting_network") else "sin uso" if st.get("waiting_usage")
+                     else str(st.get("last_exit", "-")))
+        if st.get("last_result", "").startswith("skipped") and not (st.get("waiting_network") or st.get("waiting_usage")):
+            exit_text = "omitida"   # the precheck found nothing to do
+        rows.append((r["id"], "sí" if r["enabled"] else "no", when, nxt, last, exit_text))
+    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+    for row in rows:
+        print("  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)))
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="routines", description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("import")
+    sub.add_parser("list")
+    sub.add_parser("status")
+    sub.add_parser("tick")
+    p = sub.add_parser("run")
+    p.add_argument("id")
+    p.add_argument("--test", action="store_true")
+    p.add_argument("--scheduled-for")
+    for name in ("enable", "disable"):
+        sub.add_parser(name).add_argument("id")
+    sub.add_parser("perms").add_argument("id")
+    p = sub.add_parser("notify")
+    p.add_argument("title")
+    p.add_argument("text")
+    p = sub.add_parser("login")
+    p.add_argument("--cli", action="store_true")
+    p.add_argument("--pause", action="store_true")
+    p = sub.add_parser("auth-alert")
+    p.add_argument("title")
+    p.add_argument("text")
+    p = sub.add_parser("add")
+    p.add_argument("--id", required=True)
+    p.add_argument("--cron")
+    p.add_argument("--at")
+    p.add_argument("--cwd", required=True)
+    p.add_argument("--prompt-file", required=True)
+    p.add_argument("--chrome", action="store_true")
+    p.add_argument("--profile", action="append", choices=sorted(PROFILES),
+                   help="permission profile from the config piece `routines` (repeatable)")
+    p.add_argument("--disabled", action="store_true")
+    p.add_argument("--model", help="alias or full model name for `claude --model` (default: the CLI's)")
+    p.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "max"))
+    p.add_argument("--timeout-min", type=int, help="kill the claude call after N minutes (default 120)")
+    p.add_argument("--precheck", help="shell command run first in the cwd: exit 0 goes on (stdout joins the prompt), "
+                                      "exit 1 skips the run, anything else fails it")
+    p.add_argument("--add-dir", action="append", help="extra directory for `claude --add-dir` (repeatable)")
+    p.add_argument("--bash-timeout-min", type=int,
+                   help="let one Bash call of the run last up to N minutes (BASH_MAX_TIMEOUT_MS; the CLI caps at 10)")
+    args = ap.parse_args()
+    handlers = {
+        "import": cmd_import, "list": cmd_list, "status": cmd_list, "tick": cmd_tick, "run": cmd_run,
+        "enable": lambda a: cmd_set_enabled(a, True), "disable": lambda a: cmd_set_enabled(a, False),
+        "notify": lambda a: (notify(a.title, a.text), 0)[1], "add": cmd_add, "perms": cmd_perms,
+        "login": cmd_login, "auth-alert": cmd_auth_alert,
+    }
+    return handlers[args.cmd](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

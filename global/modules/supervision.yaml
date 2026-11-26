@@ -3,7 +3,9 @@ summary: >-
   Supervision of the sessions of a project on one machine: the session supervisor (supervisor-lock: one
   live supervisor per project, its census, watcher, question gate and Stop hook), a per-project queue for
   the decisions only the developer can take, the hook that presents each one in the session it belongs
-  to, and the gate that keeps a session from messaging sessions of other projects.
+  to, the gate that keeps a session from messaging sessions of other projects, project pauses, the nudges
+  that wake stuck sessions, the guard against handing work back to the developer, and the app task that
+  revives supervisors.
 depends: [core]
 requires:
   python: "3.10"
@@ -12,19 +14,30 @@ requires:
 notes:
   - Opt-in, never a default. It is built for unattended work in the Claude desktop app.
   - No message exception is on until the supervision config piece lists it (message_exceptions).
-  - account-switch and project-pause are not part of the toolkit; without them their exceptions and pauses do nothing.
+  - account-switch comes with the accounts module; without it the account-switch exception and resumes do nothing.
   - >-
-    supervisor-lock works without its optional pieces (cloud-tests, session-nudge, handoff-guard, routines notify):
-    cloud actions say the provider is unavailable, and alerts, nudges and handoff checks do nothing.
+    project-pause keeps a paused project's local sessions still: its automatic notices are held, its supervisor is
+    not woken and its routines (module routines) are switched off until `project-pause resume`. Only the developer
+    pauses or resumes a project.
+  - >-
+    session-nudge is what `supervisor-lock watchdog --nudge` runs to wake sessions that are stuck or that handed
+    their work back to the developer; handoff-guard is the second step of supervisor-stop-gate and catches a
+    session that stops or asks while it still has work it can do. Their wording comes from the session-nudge and
+    handoff-guard config pieces, and the rule they cite from deploy_rule in the supervision piece.
+  - >-
+    The app task scheduled-tasks/reanimar-supervisoras/SKILL.md wakes supervisors whose process died, whose turn the
+    usage limit cut, or that left sessions unattended. The installer only writes its prompt: create the task in the
+    desktop app every 15 minutes with that prompt, in each account (account-switch arm copies it to the inactive
+    accounts).
+  - >-
+    supervisor-lock works without its optional pieces (cloud-tests, routines notify): cloud actions say the provider
+    is unavailable and alerts do nothing.
   - "Deploys are never pre-authorised by default: only deploy_preauthorised in the supervision config says so."
-# Named by these pieces and not installed by this module or its dependencies: absent from the toolkit, or (heavy-job)
-# installed by another module. Every caller works without them.
+# Named by these pieces and not installed by this module or its dependencies: installed by another module
+# (account-switch, routines, heavy-job) or absent from the toolkit. Every caller works without them.
 project_provided:
   - scripts/account-switch
-  - scripts/project-pause
   - scripts/cloud-tests
-  - scripts/session-nudge
-  - scripts/handoff-guard
   - scripts/routines
   - scripts/heavy-job
 files:
@@ -34,6 +47,11 @@ files:
   - {src: global/hooks/supervisor-stop-gate, dest: hooks/supervisor-stop-gate, mode: "0755"}
   - {src: global/hooks/ask-queue-prompt, dest: hooks/ask-queue-prompt, mode: "0755"}
   - {src: global/hooks/cross-project-message-gate, dest: hooks/cross-project-message-gate, mode: "0755"}
+  - {src: global/scripts/project-pause, dest: scripts/project-pause, mode: "0755"}
+  - {src: global/scripts/session-nudge, dest: scripts/session-nudge, mode: "0755"}
+  - {src: global/scripts/handoff-guard, dest: scripts/handoff-guard, mode: "0755"}
+  - {src: global/rules/proyectos-en-pausa.md, dest: rules/proyectos-en-pausa.md}
+  - {src: global/scheduled-tasks/reanimar-supervisoras/SKILL.md, dest: scheduled-tasks/reanimar-supervisoras/SKILL.md}
   - {src: global/rules/mensajes-entre-sesiones-solo-mismo-proyecto.md, dest: rules/mensajes-entre-sesiones-solo-mismo-proyecto.md}
   - {src: global/rules/dialogos-de-preguntas-legibles.md, dest: rules/dialogos-de-preguntas-legibles.md}
   - {src: global/skills/supervisa-sesiones/SKILL.md, dest: skills/supervisa-sesiones/SKILL.md}
@@ -56,4 +74,4 @@ files:
   - {src: global/rules/modelo-por-rol.md, dest: rules/modelo-por-rol.md}
 hooks:
   - global/settings/hooks.supervision.json
-config: [supervision]
+config: [supervision, session-nudge, handoff-guard]

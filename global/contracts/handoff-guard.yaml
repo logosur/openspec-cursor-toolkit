@@ -1,0 +1,43 @@
+piece: handoff-guard
+dest: scripts/handoff-guard
+kind: cli
+probes:
+  - name: self-test passes from the installed copy
+    args: [self-test]
+    exit: [0]
+    stdout: any
+    contains: " 0 failed"
+    timeout: 120
+  - name: match quotes a fragment that hands work back
+    args: [match]
+    stdin_raw: "Todo desplegado. La prueba final queda para ti."
+    exit: [0]
+    contains: handoff
+  - name: match exits 1 on a normal closing
+    args: [match]
+    stdin_raw: "Hecho: cambios integrados y verificados en el navegador."
+    exit: [1]
+    stdout: empty
+  - name: a Stop hook blocks a final message that hands work back
+    args: [hook]
+    stdin: {hook_event_name: Stop, session_id: probe-handoff, last_assistant_message: "Cuando puedas, dime qué cuenta usar."}
+    exit: [0]
+    stdout: json
+    contains: block
+  - name: malformed hook input never fails the session
+    args: [hook]
+    stdin_raw: not json
+    exit: [0]
+    stdout: empty
+  - name: an unrelated event passes silently
+    args: [hook]
+    stdin: {hook_event_name: PreToolUse, tool_name: Bash, session_id: probe-handoff, tool_input: {command: ls}}
+    exit: [0]
+    stdout: empty
+  - name: a corrupt config keeps the guard working
+    args: [hook]
+    stdin: {hook_event_name: Stop, session_id: probe-corrupt, last_assistant_message: "Esto queda para ti."}
+    corrupt_config: true
+    exit: [0]
+    stdout: json
+    contains: block

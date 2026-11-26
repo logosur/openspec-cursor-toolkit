@@ -1,0 +1,29 @@
+piece: cloud-tests
+dest: scripts/cloud-tests
+kind: cli
+probes:
+  - name: help lists local-guard
+    args: [--help]
+    exit: [0]
+    contains: local-guard
+  - name: local-guard with no ledger lets the job run
+    args: [local-guard, --, make, ci]
+    env: {CLOUD_TESTS_STATE: probe-state}
+    exit: [0]
+    stdout: empty
+  - name: check outside a repository says LOCAL
+    args: [check]
+    env: {CLOUD_TESTS_OWN_KEY: "1"}
+    exit: [3]
+    contains: LOCAL
+  - name: sweep without a CLI login skips quietly
+    args: [sweep, --dry-run]
+    env: {CLOUD_TESTS_STATE: probe-state, CLOUD_TESTS_API_FAKE: "", CLOUD_TESTS_CREDENTIALS: no-login.json, CLOUD_TESTS_API: "http://127.0.0.1:9"}
+    exit: [0]
+    contains: SKIP
+  - name: a corrupt config keeps local-guard working
+    args: [local-guard, --, make, ci]
+    corrupt_config: true
+    env: {CLOUD_TESTS_STATE: probe-state}
+    exit: [0]
+    stdout: empty

@@ -1,0 +1,10 @@
+{
+  "watched_rules": [
+    "desatencion-sin-preguntas.md",
+    "cierre-con-todo-publicado.md",
+    "supervisor-decide-lo-documentado.md"
+  ],
+  "stop_policy": "Lo que falte por probar o verificar lo compruebas tú con los medios de prueba del proyecto, sin esperar al desarrollador ({rule}).",
+  "hard_limits": "dinero fuera de un presupuesto escrito, credenciales o cuentas nuevas, borrar datos sin copia, mensajes o publicaciones a terceros, permisos, infraestructura compartida o un dato que solo sabe el desarrollador",
+  "ask_examples": "probar con usuarios de prueba, emuladores o navegador, etc."
+}

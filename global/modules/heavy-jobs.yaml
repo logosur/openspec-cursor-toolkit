@@ -31,6 +31,7 @@ files:
   - {src: global/hooks/heavy-job-gate, dest: hooks/heavy-job-gate, mode: "0755"}
   - {src: global/rules/trabajos-pesados.md, dest: rules/trabajos-pesados.md}
   - {src: global/scripts/cloud-tests, dest: scripts/cloud-tests, mode: "0755"}
+  - {src: global/scripts/lib/cloud_tests_kit.py, dest: scripts/lib/cloud_tests_kit.py}
 hooks:
   - global/settings/hooks.heavy-jobs.json
 config: [heavy-job, cloud-tests]

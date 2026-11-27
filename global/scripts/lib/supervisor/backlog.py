@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import traceback
@@ -34,9 +35,106 @@ def on_guard(owner):
     return str((owner or {}).get('phase') or '').strip().lower().startswith('guardia')
 
 
+_RE_ARCHIVED = re.compile(r'^\d{4}-\d{2}-\d{2}-(.+)$')
+_GIT_TIMEOUT_S = 10
+
+
+def _git(base, *args, stdin=None):
+    """stdout of a local git command in `base`, or None (never fetches, never raises)."""
+    try:
+        out = subprocess.run(['git', '-C', base, *args], input=stdin, capture_output=True, timeout=_GIT_TIMEOUT_S,
+                             env=dict(os.environ, GIT_OPTIONAL_LOCKS='0', GIT_TERMINAL_PROMPT='0'))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout if out.returncode == 0 else None
+
+
+def integration_ref(base):
+    """The branch the project integrates into: what origin/HEAD points at, else local main, else master; None if
+    `base` is not a repository or has none of them."""
+    out = _git(base, 'rev-parse', '--abbrev-ref', 'origin/HEAD')
+    ref = (out or b'').decode(errors='replace').strip()
+    if ref and ref != 'origin/HEAD':
+        return ref
+    for name in ('main', 'master'):
+        if _git(base, 'rev-parse', '--verify', '-q', f'refs/heads/{name}^{{commit}}') is not None:
+            return name
+    return None
+
+
+def _open_lines(text):
+    return [' '.join(m.split()) for m in _RE_OPEN_TASK.findall(text)]
+
+
+def _tree_changes(base):
+    """{name: open task lines} for the changes in the working tree of `base` (the archive folder excluded)."""
+    out = {}
+    for tasks in sorted(glob.glob(os.path.join(glob.escape(base), 'openspec', 'changes', '*', 'tasks.md'))):
+        name = os.path.basename(os.path.dirname(tasks))
+        if name == 'archive':
+            continue
+        try:
+            with open(tasks, encoding='utf-8', errors='replace') as fh:
+                out[name] = _open_lines(fh.read())
+        except OSError:
+            continue
+    return out
+
+
+def _ref_changes(base, ref):
+    """({name: open task lines}, {archived names}) for the changes on `ref`, read with local git; None on failure."""
+    listing = _git(base, 'ls-tree', '-r', '--name-only', ref, '--', 'openspec/changes')
+    if listing is None:
+        return None
+    paths, archived = [], set()
+    for path in listing.decode(errors='replace').splitlines():
+        parts = path.split('/')
+        if len(parts) >= 4 and parts[2] == 'archive':
+            m = _RE_ARCHIVED.match(parts[3])
+            archived.add(m.group(1) if m else parts[3])
+        elif len(parts) == 4 and parts[3] == 'tasks.md':
+            paths.append(path)
+    changes = {}
+    if paths:
+        blob = _git(base, 'cat-file', '--batch', stdin=''.join(f'{ref}:{p}\n' for p in paths).encode())
+        if blob is None:
+            return None
+        pos = 0
+        for path in paths:
+            nl = blob.index(b'\n', pos)
+            header = blob[pos:nl].split()
+            if len(header) < 3 or header[1] != b'blob':
+                pos = nl + 1
+                continue
+            size = int(header[2])
+            text = blob[nl + 1:nl + 1 + size].decode('utf-8', errors='replace')
+            pos = nl + 1 + size + 1
+            changes[path.split('/')[2]] = _open_lines(text)
+    return changes, archived
+
+
+def _base_changes(base):
+    """{name: open task lines} of one repository. A checkout whose HEAD does not contain its integration branch reads
+    the changes of that branch (no fetch), plus the working-tree changes the branch neither has nor archived; any other
+    checkout (up to date, ahead, no repository or no integration branch) reads its working tree as before."""
+    tree = _tree_changes(base)
+    ref = integration_ref(base)
+    if ref is None or _git(base, 'merge-base', '--is-ancestor', ref, 'HEAD') is not None:
+        return tree
+    read = _ref_changes(base, ref)
+    if read is None:
+        return tree
+    changes, archived = read
+    for name, lines in tree.items():
+        if name not in changes and name not in archived:
+            changes[name] = lines
+    return changes
+
+
 def backlog_items(checkout):
     """[{id, open, first, digest}] for every OpenSpec change with unchecked tasks under `checkout` (or, for a folder
-    that groups repositories, under its direct subfolders). Archived changes do not count. Never raises."""
+    that groups repositories, under its direct subfolders). Archived changes do not count. A checkout that lags behind
+    its integration branch is read from that branch (`_base_changes`). Never raises."""
     out = []
     try:
         root = os.path.realpath(checkout or '')
@@ -45,15 +143,7 @@ def backlog_items(checkout):
             bases = [(name + ':', os.path.join(root, name)) for name in sorted(os.listdir(root))
                      if os.path.isdir(os.path.join(root, name, 'openspec', 'changes'))]
         for prefix, base in bases:
-            for tasks in sorted(glob.glob(os.path.join(glob.escape(base), 'openspec', 'changes', '*', 'tasks.md'))):
-                name = os.path.basename(os.path.dirname(tasks))
-                if name == 'archive':
-                    continue
-                try:
-                    with open(tasks, encoding='utf-8', errors='replace') as fh:
-                        lines = [' '.join(m.split()) for m in _RE_OPEN_TASK.findall(fh.read())]
-                except OSError:
-                    continue
+            for name, lines in sorted(_base_changes(base).items()):
                 if lines:
                     digest = hashlib.sha1('\n'.join(lines).encode()).hexdigest()[:12]
                     out.append({'id': prefix + name, 'open': len(lines), 'first': lines[0][:120], 'digest': digest})

@@ -3690,6 +3690,40 @@ def cmd_self_test(args):
     check('backlog: a park is void once the open tasks of the change are not the ones it was written for',
           r.returncode == 7 and 'WORK ranking-page open=2' in r.stdout and 'PARKED eval-suite' in r.stdout)
 
+    # a checkout that lags behind its integration branch (change cloud-per-test-and-backlog-ref, D6)
+    lrepo = os.path.realpath(os.path.join(tmp, 'lagproj'))
+    sh('git', 'init', '-q', '-b', 'main', lrepo)
+
+    def lcommit(msg):
+        sh('git', 'add', '-A', cwd=lrepo)
+        sh('git', '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', msg, cwd=lrepo)
+
+    def ltasks(change, body):
+        d = os.path.join(lrepo, 'openspec', 'changes', change)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, 'tasks.md'), 'w') as fh:
+            fh.write(body)
+
+    ltasks('kept', '- [ ] 1.1 sigue abierta\n')
+    ltasks('gone', '- [ ] 1.1 se archiva en main\n')
+    lcommit('one')
+    sh('git', 'branch', 'develop', cwd=lrepo)
+    ltasks('newer', '- [ ] 2.1 solo en main\n')
+    os.makedirs(os.path.join(lrepo, 'openspec', 'changes', 'archive'))
+    os.rename(os.path.join(lrepo, 'openspec', 'changes', 'gone'),
+              os.path.join(lrepo, 'openspec', 'changes', 'archive', '2026-11-01-gone'))
+    lcommit('two')
+    sh('git', 'checkout', '-q', 'develop', cwd=lrepo)
+    ltasks('local-only', '- [ ] 3.1 sin commitear\n')
+    lids = sorted(i['id'] for i in backlog.backlog_items(lrepo))
+    check('backlog: a checkout behind its integration branch reads that branch (no fetch): its changes count, the ones '
+          'it archived do not, and changes only in the working tree are added', lids == ['kept', 'local-only', 'newer'])
+    sh('git', 'checkout', '-q', 'main', cwd=lrepo)
+    ltasks('newer', '- [x] 2.1 marcada en el árbol\n')
+    lids = sorted(i['id'] for i in backlog.backlog_items(lrepo))
+    check('backlog: a checkout that contains its integration branch reads its working tree as before',
+          lids == ['kept', 'local-only'])
+
     put(app_dir, 'local_g.json', {'sessionId': 'local_g', 'cliSessionId': 'cli-g', 'cwd': grepo, 'title': 'Sup g'})
     garmed = dict(armed_task, command='~/.claude/scripts/supervisor-lock wait --owner local_g --guard --timeout 21600')
     quiet = os.path.join(tmp, 'quiet.jsonl')

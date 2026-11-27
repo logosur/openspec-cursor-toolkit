@@ -1,0 +1,14 @@
+{
+  "accounts": {
+    "work": {
+      "address": "you@example.com",
+      "backends": ["imap", "local"],
+      "imap": {"host": "mail.example.com", "credentials_file": "~/.config/example/mail.env", "password_var": "MAIL_PASSWORD"}
+    },
+    "personal": {
+      "address": "you@example.org",
+      "backends": ["connector"],
+      "connector": {"kind": "gmail"}
+    }
+  }
+}

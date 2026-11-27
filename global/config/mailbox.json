@@ -1,0 +1,11 @@
+{
+  "accounts": {},
+  "defaults": {
+    "limit": 20,
+    "body_chars": 1500,
+    "line_width": 160,
+    "auth_cooldown_minutes": 30,
+    "text_scan_max": 1000,
+    "imap_scan_max": 2000
+  }
+}

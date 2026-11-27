@@ -81,7 +81,7 @@ def status_line(s: dict) -> str:
     budget = f', {round(s["week_budget_share"] * 100)}% of budget' if s['week_budget_share'] is not None else ''
     f = s['findings']
     line = (f'usage-watch: week {round(s["week_elapsed_share"] * 100)}% elapsed, {s["week_units"]:g} {s["unit_label"]}'
-            f'{budget}, pace {s["pace"]} · findings new {f["new"]}, asked {f["asked"]}, authorized {f["authorized"]}'
+            f'{budget}, pace {s["pace"]} · findings new {f["new"]}, minor {f["minor"]}, asked {f["asked"]}, authorized {f["authorized"]}'
             f' · unpriced {len(s["unpriced_models"])} · skipped {s["skipped_lines"]}')
     if s.get('warning'):
         line += f' · warning: {s["warning"]}'
@@ -114,7 +114,7 @@ section.card { background: var(--card); border: 1px solid var(--line); border-ra
 table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 td, th { padding: 4px 6px; border-bottom: 1px solid var(--line); text-align: left; overflow-wrap: anywhere; }
 td.n { text-align: right; width: 7em; font-variant-numeric: tabular-nums; }
-.state { color: var(--accent); font-weight: 600; } .muted { color: var(--muted); }
+.state { color: var(--accent); font-weight: 600; } .muted { color: var(--muted); } details.minor { margin-top: 8px; color: var(--muted); }
 section.card h2 { margin-top: 0; }
 @media (max-width: 600px) {
   table.findings tr { display: block; padding: 6px 0; border-bottom: 1px solid var(--line); }
@@ -139,12 +139,19 @@ def render_page(cfg: dict, now_ts: float) -> str:
         f'<section class="card"><h2>{html.escape(labels[key])}</h2>{_table(rank[dim], labels["none"])}</section>'
         for key, dim in (('by_session', 'session'), ('by_project', 'project'), ('by_model', 'model'),
                          ('by_origin', 'origin')))
-    findings = sorted(store.read(cfg).values(), key=lambda f: f.get('last_seen') or '', reverse=True)
+    stored = store.read(cfg).values()
+    findings = sorted((f for f in stored if f.get('state') != 'minor'), key=lambda f: f.get('last_seen') or '',
+                      reverse=True)
+    minor = [f for f in stored if f.get('state') == 'minor']
     rows = ''.join(
         f'<tr><td>{html.escape(f["id"])}</td><td class="state">{html.escape(str(f.get("state")))}</td>'
         f'<td>{html.escape(str((f.get("scope") or {}).get("kind")))}: {html.escape(str(f.get("project") or ""))}</td>'
         f'<td>{html.escape(str((f.get("proposal") or {}).get("text") or ""))}</td></tr>' for f in findings)
     findings_html = f'<table class="findings">{rows}</table>' if rows else f'<p class="muted">{html.escape(labels["none"])}</p>'
+    if minor:   # one collapsed block: how many and how much, never a row each
+        total = sum(f.get('saving_units_per_day') or 0 for f in minor if not f.get('folded_into'))
+        findings_html += (f'<details class="minor"><summary>{html.escape(labels["minor"])}: {len(minor)} '
+                          f'({total:.2f} {html.escape(labels["saving"])})</summary></details>')
     unpriced = ''
     if s['unpriced_models']:
         items = ''.join(f'<tr><td>{html.escape(m)}</td><td class="n">{n}</td></tr>' for m, n in s['unpriced_models'].items())
@@ -184,7 +191,10 @@ def matches(f: dict, project=None, state=None, applier=None) -> bool:
 
 
 def list_findings(cfg: dict, project=None, state=None, applier=None) -> list[dict]:
-    return [f for _, f in sorted(store.read(cfg).items()) if matches(f, project, state, applier)]
+    found = [f for _, f in sorted(store.read(cfg).items()) if matches(f, project, state, applier)]
+    if state == 'new':   # the largest saving first: what is worth asking about comes first
+        found.sort(key=lambda f: -(f.get('saving_units_per_day') or 0))
+    return found
 
 
 def list_line(f: dict) -> str:

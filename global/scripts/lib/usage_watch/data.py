@@ -80,10 +80,13 @@ class Data:
                 turn = self.turns.get(call.get('turn')) if call.get('turn') else None
                 call['origin'] = turn['origin'] if turn else 'other'
         self.calls = sorted(calls.values(), key=lambda c: (c['ts'], c['id']))
+        self.last_call = {}
+        for call in self.calls:
+            self.last_call[call['session']] = call['ts']
 
     def session(self, sid: str) -> dict:
         return self.info.get(sid) or {'project': 'unknown', 'project_root': '', 'role': 'worker', 'app_id': None,
-                                      'cwd': None, 'routine': False}
+                                      'cwd': None, 'routine': False, 'open': False}
 
     def since(self, start: float, end: float | None = None):
         end = self.now if end is None else end

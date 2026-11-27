@@ -87,5 +87,15 @@ Part A (sections 1 to 5) must be complete and checked before Part B (sections 6 
 
 ## Field verification (real machine, after the supervisor installs)
 
-- [ ] 12.1 After install, run `usage-watch timer install` and confirm one `tick` ran and the page and status line show real totals. [prod-verify]
+- [x] 12.1 After install, run `usage-watch timer install` and confirm one `tick` ran and the page and status line show real totals. [prod-verify] Evidence (field run, no figures kept here): the timer was installed with `usage-watch timer install`; `usage-watch timer status` reported both units installed; one `tick` ran through the timer with `Result=success` and exit status 0; the next run was scheduled one interval later; the status line and the page showed real totals.
 - [ ] 12.2 Walk one real finding through ask, answer, apply and measure, and record the before and after figures outside this repository. [prod-verify]
+
+## What reaches the developer: floor, grouping, live sessions and a cap (design D16)
+
+- [x] 13.1 Materiality floor: the `minor` state, `min_saving_units_per_day` and `min_saving_share`, re-evaluation on each `detect`, `minor` kept out of the watcher, `ask`, the page rows and `list --state new`, `status` showing `minor` next to `new` (UW: a finding under the materiality floor is stored as minor). Check: `MaterialityFloorTest` (at the floor, just under it, re-evaluation, untouched states, out of sight) and the self-test floor checks.
+- [x] 13.2 Grouping: session findings of one rule and project fold into one project-scoped note for the project's supervisor (routine, not live, or `group_min_sessions`), with its own proposal and undo texts and the floor applied after grouping (UW: session findings of one rule and project fold into one note). Check: `GroupingTest` with fifty one-run routine sessions, its healthy counterpart, three against two sessions, and the floor after grouping; the self-test grouping checks.
+- [x] 13.3 A session-model proposal needs a live session: open in the app and active inside `session_active_window_h` (UW: a session-model proposal needs a live session). Check: `GroupingTest` closed, quiet and live sessions; the self-test live-session checks.
+- [x] 13.4 Pace without duplicates with `pace_dedupe_share` (UW: one pace finding where a session is most of its project's pace). Check: `PaceDedupeTest` (not live, live, share out of reach); the self-test pace checks.
+- [x] 13.5 Cap on open questions: `max_open_questions`, `FINDING` for the largest savings up to the free slots, `ANSWER` never held back, `list --state new` largest first (US: open questions are capped). Check: `OpenQuestionsCapTest` and the self-test cap checks.
+- [x] 13.6 Existing state: a findings file of the previous version loads and its `new` session findings are folded or made `minor` on the next `detect`, asked ones untouched (UW: a findings file from the previous version is migrated). Check: `OldStateTest` and the self-test old-file check.
+- [x] 13.7 Generic reference text of the role: what `minor` is, that grouped findings are notes for the project's supervisor, and the cap on open questions. Check: `python3 scripts/validate-toolkit.py` and `python3 scripts/privacy-check.py --range origin/main..HEAD` exit 0.

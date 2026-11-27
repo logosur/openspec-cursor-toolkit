@@ -241,3 +241,22 @@ The repository SHALL ship a generic reference `global/skills/supervisa-sesiones/
 #### Scenario: Contract probes
 - **WHEN** the toolkit runs the `usage-apply-gate` contract in a temporary `HOME`
 - **THEN** every probe passes and nothing outside the temporary `HOME` changes
+
+### Requirement: Open questions are capped
+`usage-watch wait` SHALL print `FINDING` lines only while fewer than `max_open_questions` (default 4) findings are `asked` with a queue item that is neither answered nor closed, and then only for the `new` findings with the largest saving, up to the free slots, largest first. `ANSWER` lines SHALL never be held back. `usage-watch list --state new` SHALL list the largest saving first.
+
+#### Scenario: Four unanswered
+- **WHEN** four findings are asked and unanswered and others are `new`
+- **THEN** `wait` prints no `FINDING`
+
+#### Scenario: One answer frees one slot
+- **WHEN** one of the four is answered
+- **THEN** `wait` prints the `ANSWER` and one `FINDING`, the `new` finding with the largest saving
+
+#### Scenario: Largest first
+- **WHEN** several slots are free and more `new` findings exist than slots
+- **THEN** the `FINDING` lines are the largest savings, in descending order
+
+#### Scenario: Answers are not held back
+- **WHEN** four asked findings are all answered while the cap is reached
+- **THEN** `wait` prints four `ANSWER` lines

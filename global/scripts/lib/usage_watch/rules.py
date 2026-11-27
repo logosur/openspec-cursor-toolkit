@@ -24,6 +24,8 @@ HOUR = 3600
 NOTE_RULES = ('loop', 'empty-wakes', 'large-context', 'idle-rewrite', 'pace')
 MODEL_RULES = ('role-model', 'expensive-automation')
 CONFIG_RULES = ('expensive-subagents', 'advisor-excess')
+GROUPABLE = ('loop', 'empty-wakes', 'role-model', 'large-context', 'idle-rewrite', 'expensive-automation')
+TOP_SESSIONS, TOP_LOCATIONS = 5, 10
 ALL_RULES = ('loop', 'empty-wakes', 'role-model', 'expensive-subagents', 'advisor-excess', 'large-context',
              'idle-rewrite', 'pace', 'expensive-automation')
 GATE_PIECE, GATE_KEY, GATE_VALUE = 'agent-model-gate', 'enabled', True
@@ -67,6 +69,25 @@ class Detector:
         for info in self.d.info.values():
             if info.get('project_root'):
                 self.project_roots.setdefault(info['project'], info['project_root'])
+        self.floor = self.materiality_floor()
+        self.folded = {}            # (rule, session id) -> id of the grouped finding that took its place
+        self.dropped = {}           # finding id -> why this run no longer raises it
+
+    # ------------------------------------------------------------------ materiality, liveness
+    def materiality_floor(self) -> float:
+        """The larger of the absolute floor and the share of the mean daily units over the baseline's active days."""
+        days = defaultdict(float)
+        for c in self.d.since(self.now - self.cfg['pace_baseline_days'] * DAY):
+            days[int((self.now - c['ts']) // DAY)] += c['units']
+        active = [u for u in days.values() if u > 0]
+        mean = sum(active) / len(active) if active else 0.0
+        return max(float(self.cfg['min_saving_units_per_day']), self.cfg['min_saving_share'] * mean)
+
+    def is_live(self, sid) -> bool:
+        """Open in the app (a record that is not archived) and with a call inside the active window."""
+        last = self.d.last_call.get(sid)
+        return bool(self.d.session(sid).get('open')) and last is not None \
+            and self.now - last <= self.cfg['session_active_window_h'] * HOUR
 
     # ------------------------------------------------------------------ candidates
     def candidate(self, rule, scope_kind, scope_id, disc, evidence, calls, saving=None, session=None):
@@ -262,6 +283,76 @@ class Detector:
                                        recent, saving=(used - limit) * 24 / window_h, session=session)]
         return []
 
+    def group(self, found: list[dict]) -> list[dict]:
+        """Fold session-scoped findings of one rule and project into one project-scoped note (design D16)."""
+        grouped, keep = defaultdict(lambda: defaultdict(list)), []
+        for c in found:
+            if c['scope']['kind'] == 'session' and c['rule'] in GROUPABLE:
+                grouped[(c['rule'], str(c['project']))][c['scope']['id']].append(c)
+            else:
+                keep.append(c)
+        for (rule, project), sessions in sorted(grouped.items()):
+            folded = {}
+            for sid, cs in sessions.items():
+                if (self.d.session(sid)['role'] == 'routine' or not self.is_live(sid)
+                        or len(sessions) >= self.cfg['group_min_sessions']):
+                    folded[sid] = cs
+                else:
+                    keep += cs
+            if folded:
+                group = self.group_candidate(rule, project, folded)
+                keep.append(group)
+                for sid in folded:
+                    self.folded[(rule, sid)] = group['id']
+        return keep
+
+    def group_candidate(self, rule, project, folded: dict) -> dict:
+        per = []
+        for sid, cs in folded.items():
+            figures = {k: v for k, v in cs[0]['evidence'].items() if k != 'locations'}
+            per.append({'session': sid, 'saving_units_per_day': round(sum(c['saving_units_per_day'] for c in cs), 4),
+                        **figures, '_locations': [loc for c in cs for loc in c['evidence'].get('locations') or []]})
+        per.sort(key=lambda p: (-p['saving_units_per_day'], p['session']))
+        top = per[:TOP_SESSIONS]
+        locations = [loc for p in top for loc in p['_locations'][-2:]][:TOP_LOCATIONS]
+        roots = [c['project_root'] for cs in folded.values() for c in cs if c.get('project_root')]
+        text = self.cfg['proposals'][rule + '-group']
+        return {
+            'id': finding_id(rule, 'project', project, 'group'), 'rule': rule,
+            'scope': {'kind': 'project', 'id': project}, 'project': project, 'project_root': roots[0] if roots else None,
+            'role': None,
+            'evidence': {'sessions': len(per), 'top_sessions': [{k: v for k, v in p.items() if k != '_locations'}
+                                                                for p in top], 'locations': locations},
+            'saving_units_per_day': round(sum(p['saving_units_per_day'] for p in per), 4),
+            'proposal': {'kind': 'note', 'text': text['proposal']}, 'applier': 'project-supervisor',
+            'undo': text['undo'], 'target_app_id': None,
+        }
+
+    def dedupe_pace(self, sessions: list[dict], projects: list[dict]) -> list[dict]:
+        """A session's pace finding that is most of its project's: keep the session's when live, else the project's."""
+        share, gone = self.cfg['pace_dedupe_share'], set()
+        for p in projects:
+            near = [s for s in sessions if s['project'] == p['project']
+                    and p['saving_units_per_day'] > 0 and s['saving_units_per_day'] >= share * p['saving_units_per_day']]
+            live = [s for s in near if self.is_live(s['scope']['id'])]
+            gone |= {s['id'] for s in near if s not in live} | ({p['id']} if live else set())
+        self.dropped.update({fid: 'duplicate' for fid in gone})
+        return [c for c in sessions + projects if c['id'] not in gone]
+
+    def retire(self, f: dict) -> tuple[str, str | None] | None:
+        """Why a stored `new` finding this run no longer raises should stop being one: (reason, folded into) or None."""
+        if f.get('id') in self.dropped:
+            return self.dropped[f['id']], None
+        scope = f.get('scope') or {}
+        if scope.get('kind') != 'session' or f.get('rule') not in GROUPABLE:
+            return None
+        sid = scope.get('id')
+        if (f['rule'], sid) in self.folded:
+            return 'folded', self.folded[(f['rule'], sid)]
+        if self.d.session(sid)['role'] == 'routine' or not self.is_live(sid):
+            return 'not-live', None
+        return None
+
     def machine_config(self):
         if not self.config_triggers:
             return []
@@ -297,17 +388,26 @@ class Detector:
             out += self.large_context(sid)
             out += self.idle_rewrite(sid)
             out += self.expensive_automation(sid)
+        out = self.group(out)
         by_session, by_project = defaultdict(list), defaultdict(list)
         for c in self.d.calls:
             by_session[c['session']].append(c)
             by_project[self.d.session(c['session'])['project']].append(c)
+        session_pace, project_pace = [], []
         for sid in sorted(by_session):
-            out += self.pace('session', sid, by_session[sid], session=sid)
+            session_pace += self.pace('session', sid, by_session[sid], session=sid)
         for project in sorted(by_project):
-            out += self.pace('project', project, by_project[project])
+            project_pace += self.pace('project', project, by_project[project])
+        out += self.dedupe_pace(session_pace, project_pace)
         out += self.machine_config()
         return out
 
 
 def detect(cfg: dict, now_ts: float) -> list[dict]:
     return Detector(cfg, now_ts).run()
+
+
+def plan(cfg: dict, now_ts: float) -> dict:
+    """What `store.merge` needs: the candidates, the materiality floor and the retire hook for stored findings."""
+    det = Detector(cfg, now_ts)
+    return {'candidates': det.run(), 'floor': det.floor, 'retire': det.retire}

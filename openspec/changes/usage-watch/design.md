@@ -188,9 +188,38 @@ This turns the procedural step of the first draft into a mechanical one: the rol
 - **Self-tests.** `usage-watch self-test` runs the role checks only when `ask-queue` and `supervisor-lock` sit next to
   it (an install with `supervision`); otherwise it says so in one line and runs the measuring half.
 
+### D16. What reaches the developer: floor, grouping, live sessions, pace duplicates and a cap
+
+Observed after the first real run: detection was right, but most findings were worth almost nothing each, and many were
+the same proposal repeated once per run of a scheduled routine (every run is a new session). Nothing is detected
+differently; what changes is what is stored as work and what is asked.
+
+- **Materiality floor.** `max(min_saving_units_per_day, min_saving_share × mean daily units over the active days of the
+  last pace_baseline_days)`. Below it a finding is stored in the state `minor`: never announced, never asked, shown on the
+  page as one collapsed block (count and summed saving), counted in `status`. Each `detect` re-evaluates it; only `new`
+  and `minor` move, so a finding already asked is never touched. A saving exactly at the floor is not below it.
+- **Grouping.** A session finding is folded into one project-scoped note (applier `project-supervisor`, id from rule,
+  project and the discriminator `group`) when its session is a routine, is not live, or its project has at least
+  `group_min_sessions` sessions raising that rule. The saving is the sum; evidence is the count, the five largest
+  sessions and a few locations. The floor applies after grouping. `pace` is not grouped (it already has a project scope);
+  the machine-wide config finding is not either.
+- **Live session.** Open in the app means an app record that is not archived (`isArchived`); active means a call inside
+  `session_active_window_h`. A `session-model` proposal needs both, so it never targets a closed session; the same
+  condition folds a session (a closed session's fix lives in its project, not in it).
+- **Pace.** A session pace finding that is at least `pace_dedupe_share` of its project's is a duplicate: the session's
+  survives when live, the project's otherwise.
+- **Migration.** `store.merge` takes the floor and the detector's `retire` hook: a stored `new` finding that this run no
+  longer raises because it was folded, because its session is no longer live, or because it was the pace duplicate
+  becomes `minor` (`reason`, and `folded_into` when folded). A store without any of this loads unchanged.
+- **Cap.** The watcher counts the `asked` findings whose queue item is neither answered nor closed. It announces
+  `FINDING` only while that count is under `max_open_questions`, for the `new` findings with the largest saving, as many
+  as there are free slots. A finding announced and not yet asked takes no slot until the role asks it.
+- **Observation, not a task:** the first `collect` on a machine with a large transcript history is a one-off long pass
+  (it reads everything once); later passes are incremental.
+
 ## Configuration (`global/config/usage-watch.json`, all defaults generic)
 
-`projects_dir`, `app_sessions_dir`, `supervisor_home`, `state_dir`, `page_path`, `page_refresh_s`, `retention_days`, `prices`, `unit_label`, `expensive_model_pattern` (`opus|fable`, like `agent-model-gate`), `escalation_mark_pattern`, `panel_pattern`, `cheap_roles` (`questions`, `closer`, `usage`, `routine`, after the rule table of `modelo-por-rol.md`), `cheap_model` (the value a `session-model` proposal sets; empty turns those proposals into notes), `origin_text_prefixes` (text prefixes that mark an automatic turn, e.g. `<task-notification>` → `task`), every threshold of D5, `measure_window_h`, `weekly_budget_units` (0), `week_start_weekday`, `week_start_hour`, `pace_amber_ratio`, `timer_interval_min`, `order_text` (empty), `no_default`, `authorize_answers`, `authorize_hint`, `ticket_ttl_s`, `proposals`, `labels`. The exact default values are written in task 1.1 and are provisional; none is a figure observed on any machine.
+`projects_dir`, `app_sessions_dir`, `supervisor_home`, `state_dir`, `page_path`, `page_refresh_s`, `retention_days`, `prices`, `unit_label`, `expensive_model_pattern` (`opus|fable`, like `agent-model-gate`), `escalation_mark_pattern`, `panel_pattern`, `cheap_roles` (`questions`, `closer`, `usage`, `routine`, after the rule table of `modelo-por-rol.md`), `cheap_model` (the value a `session-model` proposal sets; empty turns those proposals into notes), `origin_text_prefixes` (text prefixes that mark an automatic turn, e.g. `<task-notification>` → `task`), every threshold of D5, `measure_window_h`, `weekly_budget_units` (0), `week_start_weekday`, `week_start_hour`, `pace_amber_ratio`, `timer_interval_min`, `order_text` (empty), `no_default`, `authorize_answers`, `authorize_hint`, `ticket_ttl_s`, `proposals` (the six grouped notes are `<rule>-group`), `labels`, and the keys of D16: `min_saving_units_per_day` (0), `min_saving_share` (0.01), `session_active_window_h` (48), `group_min_sessions` (3), `pace_dedupe_share` (0.8), `max_open_questions` (4). The exact default values are written in task 1.1 and are provisional; none is a figure observed on any machine.
 
 Shapes (G-08). Top-level keys go through `toolkit_config.load_checked`, which checks only the top-level type, so the nested ones are checked entry by entry: a `prices` entry counts only when its key compiles as a regular expression and its value is a list of five numbers ≥ 0 (if no entry is valid, the default table is used); `proposals` maps a rule id to `{proposal, undo}` strings and `labels` maps a key to a string, and an entry of the wrong shape keeps that entry's default; a regular-expression key (`expensive_model_pattern`, `escalation_mark_pattern`, `panel_pattern`) that does not compile keeps its default.
 

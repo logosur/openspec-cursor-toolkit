@@ -98,6 +98,7 @@ def advisor_healthy(home: Home, now):
 
 
 def large_fire(home: Home, now):
+    home.live('s-ctx')
     tr = home.transcript('s-ctx')
     tr.user(now - 3 * H, 'go')
     for i in range(25):
@@ -153,6 +154,49 @@ def automation_healthy(home: Home, now):
     for i in range(9):
         tr.turn(now - 10 * H + i * 600, text=f'typed {i}', model=EXPENSIVE, out=100)
     tr.turn(now - H, text='notice', origin='task-notification', model=EXPENSIVE, out=100)
+
+
+def routines(home: Home, now, model=EXPENSIVE, runs=50):
+    """`runs` one-run sessions of a scheduled routine in one project: each run is a new session with its own record."""
+    repo = home.git_repo('proj-routine')
+    for i in range(runs):
+        sid = f's-run-{i:02d}'
+        home.app_record(f'local_{sid}', sid, repo, scheduled='task-1')
+        home.transcript(sid, cwd=repo).turn(now - 6 * H + i * 60, model=model, out=100 + i)
+    return repo
+
+
+def routines_fire(home: Home, now):
+    routines(home, now)
+
+
+def routines_healthy(home: Home, now):
+    routines(home, now, model=CHEAP)
+
+
+def automation_session(home: Home, now, archived=False, last=None):
+    """One worker answering notices on the expensive model, with an app record (archived or not)."""
+    repo = home.git_repo('proj-auto')
+    home.app_record('local_auto', 's-auto', repo, archived=archived)
+    tr = home.transcript('s-auto', cwd=repo)
+    last = now - 2 * H if last is None else last
+    for i in range(9):
+        tr.turn(last - (9 - i) * 600, text='notice', origin='task-notification', model=EXPENSIVE, out=100)
+    return repo
+
+
+def large_sessions(home: Home, now, count, live=True):
+    """`count` sessions of one project, each holding a large context for many calls."""
+    repo = home.git_repo('proj-ctx')
+    for k in range(count):
+        sid = f's-big-{k}'
+        if live:
+            home.app_record(f'local_{sid}', sid, repo)
+        tr = home.transcript(sid, cwd=repo)
+        tr.user(now - 3 * H, 'go')
+        for i in range(25):
+            tr.assistant(now - 3 * H + i * 60, cr=200000 + k * 1000)
+    return repo
 
 
 CASES = [

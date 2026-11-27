@@ -36,7 +36,7 @@ def _history(finding: dict, state: str, now_ts: float, ref=None, **extra) -> Non
 
 
 def evidence_line(cfg: dict, f: dict) -> str:
-    figures = {k: v for k, v in (f.get('evidence') or {}).items() if k not in ('locations', 'per_session')}
+    figures = {k: v for k, v in (f.get('evidence') or {}).items() if k not in ('locations', 'per_session', 'top_sessions')}
     return (f'usage-watch {f.get("rule")} ({(f.get("scope") or {}).get("kind")}): '
             f'{json.dumps(figures, ensure_ascii=False, sort_keys=True)}; '
             f'saving about {f.get("saving_units_per_day")} {cfg["unit_label"]} per day')

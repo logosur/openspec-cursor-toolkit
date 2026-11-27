@@ -131,7 +131,7 @@ class Home:
                 tr.assistant(ts + 1 + i, model=model, text='sub done')
         return tr
 
-    def app_record(self, app_id: str, cli_id: str, cwd: str, title='', scheduled=None, model=None) -> str:
+    def app_record(self, app_id: str, cli_id: str, cwd: str, title='', scheduled=None, model=None, archived=False) -> str:
         folder = os.path.join(self.app, 'acct', 'org')
         os.makedirs(folder, exist_ok=True)
         rec = {'sessionId': app_id, 'cliSessionId': cli_id, 'cwd': cwd, 'title': title}
@@ -139,10 +139,16 @@ class Home:
             rec['scheduledTaskId'] = scheduled
         if model:
             rec['model'] = model
+        if archived:
+            rec['isArchived'] = True
         path = os.path.join(folder, f'{app_id}.json')
         with open(path, 'w', encoding='utf-8') as fh:
             json.dump(rec, fh)
         return path
+
+    def live(self, session: str, cwd=None, **kw) -> str:
+        """An app record for a CLI session, so the session counts as open in the app."""
+        return self.app_record(f'local_{session}', session, cwd or self.root, **kw)
 
     def lock(self, key: str, checkout: str, session_id: str, mailbox=None, closer=None, released=False) -> str:
         folder = os.path.join(self.supervisor, 'locks')

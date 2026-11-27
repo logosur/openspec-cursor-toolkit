@@ -29,6 +29,8 @@ from scripts.toolkit.paths import REPO_ROOT
 SCRIPT = os.environ.get('CLOUD_TESTS_SCRIPT') or str(REPO_ROOT / 'global/scripts/cloud-tests')
 HEAVY_JOB = str(REPO_ROOT / 'global/scripts/heavy-job')
 LIB = str(REPO_ROOT / 'global/scripts/lib')
+with open(os.path.join(LIB, 'cloud_tests_kit.py'), encoding='utf-8') as _kit:
+    KIT_SHA = __import__('hashlib').sha256((_kit.read().rstrip('\n') + '\n').encode()).hexdigest()
 SCRUB_PREFIXES = ('CLOUD_TESTS_', 'HEAVY_JOB_', 'SUPERVISOR_', 'ACCOUNT_SWITCH', 'PROJECT_PAUSE', 'CLAUDE_TOOLKIT_',
                   'FAKE_CLAUDE', 'GIT_')
 REFUSING_CLAUDE = '#!/bin/sh\necho "fake claude: refused" >&2\nexit 1\n'
@@ -407,7 +409,8 @@ class TestRunnerTitles(Base):
     def write_ledger_named(self, key, name, runner='session_CUR'):
         os.makedirs(self.state, exist_ok=True)
         data = {'project': key, 'repo': 'acme/proj',
-                'runner': {'session': runner, 'created': time.time() - 600, 'runs': 1, 'brief_version': 99},
+                'runner': {'session': runner, 'created': time.time() - 600, 'runs': 1, 'brief_version': 99,
+                           'kit_sha': KIT_SHA},
                 'retired': [{'session': 'session_RET'}], 'results_seen': None,
                 'runs': {'a': {'state': 'sent', 'session': 'session_BUSY'}, 'b': {'state': 'done', 'session': 'session_DONE'},
                          'c': {'state': 'done', 'session': 'session_OTHER'}}}
@@ -512,12 +515,12 @@ class TestPerTestResults(Base):
                                      'command': 'make ci', 'timeout_min': 30, 'created': time.time()}, **extra)},
                 'runner': None}
 
-    def test_the_brief_asks_for_junit_and_the_tests_file(self):
+    def test_the_brief_runs_the_kit_and_asks_for_the_tests_file(self):
         m = self.module()
-        self.assertEqual(m.BRIEF_VERSION, 2)
+        self.assertEqual(m.BRIEF_VERSION, 3)
         brief = m.brief_for(m.Project(self.proj))
-        for text in ('CLOUD_TESTS_JUNIT=/tmp/<run>.junit.xml', 'PYTEST_ADDOPTS', '--junitxml=$CLOUD_TESTS_JUNIT',
-                     'runs/<run>.tests.tsv', 'tests_file', 'tests_counts', 'xml.etree.ElementTree', 'junit'):
+        for text in ('/tmp/<run>.request.json', '/tmp/<run>.result.json', 'runs/<run>.tests.tsv', 'tests_file',
+                     'tests_counts', 'xml.etree.ElementTree', 'junit', 'pytest11', 'NODE_OPTIONS'):
             self.assertIn(text, brief)
         brief.encode('ascii')   # the brief stays plain ASCII
 
@@ -548,7 +551,8 @@ class TestPerTestResults(Base):
             self.assertEqual([x['session'] for x in data['retired']], ['session_OLD'])
             self.assertTrue(m.runner_usable(data['runner'], now))
         data = self.queued(m)
-        data['runner'] = {'session': 'session_CUR', 'created': now, 'runs': 1, 'brief_version': m.BRIEF_VERSION}
+        data['runner'] = {'session': 'session_CUR', 'created': now, 'runs': 1, 'brief_version': m.BRIEF_VERSION,
+                          'kit_sha': m.kit_sha()}
         self.assertEqual(m.dispatch(mock.Mock(), data, now), 'r1')
         m.send_followup.assert_called_once()
         self.assertEqual(data['runs']['r1']['session'], 'session_CUR')
@@ -562,8 +566,29 @@ class TestPerTestResults(Base):
                      'config': {'sources': [{'url': 'https://github.com/acme/proj'}]}}]
         old = {'repo': 'acme/proj', 'runs': {}, 'runner': {'session': 'session_OLD', 'created': now - 600, 'runs': 1}}
         self.assertEqual([s['id'] for s in m.sweep_targets(old, sessions, now)], ['cse_OLD'])
-        new = dict(old, runner=dict(old['runner'], brief_version=m.BRIEF_VERSION))
+        new = dict(old, runner=dict(old['runner'], brief_version=m.BRIEF_VERSION, kit_sha=m.kit_sha()))
         self.assertEqual(m.sweep_targets(new, sessions, now), [])
+
+    def test_runner_of_another_kit_is_not_reused(self):
+        m = self.module()
+        now = time.time()
+        r = {'session': 'session_X', 'created': now, 'runs': 1, 'brief_version': m.BRIEF_VERSION, 'kit_sha': 'f' * 64}
+        self.assertFalse(m.runner_usable(r, now))
+        self.assertTrue(m.runner_usable(dict(r, kit_sha=KIT_SHA), now))
+        self.assertEqual(m.kit_sha(), KIT_SHA)
+
+    def test_brief_embeds_the_kit_and_its_digest(self):
+        m = self.module()
+        proj = mock.Mock()
+        proj.name, proj.slug = 'demo', 'acme/demo'
+        brief = m.brief_for(proj)
+        self.assertIn(KIT_SHA, brief)
+        self.assertIn('cloud-tests-kit.py run /tmp/<run>.request.json', brief)
+        self.assertNotIn('PYTEST_ADDOPTS', brief.split(m.KIT_BEGIN)[0])
+        kit = brief.split(m.KIT_BEGIN + '\n', 1)[1].split(m.KIT_END, 1)[0]
+        # what the runner's heredoc writes back (the text between the markers) has the announced digest
+        self.assertEqual(__import__('hashlib').sha256(kit.encode()).hexdigest(), KIT_SHA)
+        self.assertNotIn('CLOUD_TESTS_KIT_EOF', kit)
 
     def test_per_test_lines(self):
         lines = 'passed\ttests/test_a.py::test_x\nfailed\ttests/test_b.py::test_y\nskipped\ttests/test_a.py::test_z\n'

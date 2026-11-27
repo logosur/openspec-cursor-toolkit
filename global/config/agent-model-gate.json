@@ -1,5 +1,5 @@
 {
-  "enabled": true,
+  "enabled": false,
   "require_explicit_model": true,
   "opus_needs_marker": true,
   "panel_pattern": "^Panel",

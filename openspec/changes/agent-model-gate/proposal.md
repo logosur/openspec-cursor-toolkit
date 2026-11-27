@@ -9,7 +9,9 @@ A deterministic gate in front of those tools is the only control that does not d
 
 ## What Changes
 
-- New hook `agent-model-gate` (module `core`, `PreToolUse`) with its config piece, contract, rule and tests.
+- New hook `agent-model-gate` (module `core`, `PreToolUse`) with its config piece, contract, rule and tests. It ships
+  **disabled** (`enabled: false`): every optimisation is authorised by the developer before it applies, so the hook allows
+  everything and writes no state until the private config sets `enabled: true`.
 - `Agent` / `Task` calls need an explicit `model`, except a `fork`; Opus and Fable need a written reason or the decision panel.
 - `start_session` calls that carry a `prompt` need an explicit `model`; Opus and Fable ids need the same written reason.
 - `advisor` calls are capped per session in a rolling 24 hours.

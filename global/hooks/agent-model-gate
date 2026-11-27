@@ -18,13 +18,15 @@ What it checks, per tool (every deny is a plain PreToolUse deny with the way out
     run by the client, so the host may never fire PreToolUse for it. The matcher is registered anyway: if the host
     does call it, the cap applies, and if it does not, nothing is lost.
 
-Config piece `agent-model-gate` (a wrong or missing value keeps the default below):
-  enabled true, require_explicit_model true, opus_needs_marker true, panel_pattern "^Panel" (regex, case
+Config piece `agent-model-gate` (a wrong or missing value keeps the default below). The gate ships OFF: with
+`enabled` false (the default) the hook allows every call and writes no state, and it only acts once the private config
+sets `enabled` to true.
+  enabled false, require_explicit_model true, opus_needs_marker true, panel_pattern "^Panel" (regex, case
   insensitive, searched in `description`), advisor_max_per_day 4, exempt_paths [] (folder prefixes of the session's
   cwd where nothing applies), austerity false. With austerity on, Opus and Fable are denied even with the mark (the
   panel excepted; `opus_needs_marker` does not matter then) and the advisor cap drops to 1.
 
-Never breaks a session: any exception, a malformed input or a broken config lets the call through with no output
+Never breaks a session (and, while off, does nothing at all): any exception, a malformed input or a broken config lets the call through with no output
 and a line in <state>/errors.log. No network, no subprocess. Denies are logged in <state>/decisions.log.
 State dir: ~/.cache/claude-toolkit/agent-model-gate (override: AGENT_MODEL_GATE_STATE).
 Rule: ~/.claude/rules/subagentes-con-modelo-explicito.md.
@@ -46,7 +48,7 @@ except ImportError:  # no helper, or one older than load_checked: the code's def
         return dict(defaults)
 
 DEFAULTS = {
-    'enabled': True,
+    'enabled': False,
     'require_explicit_model': True,
     'opus_needs_marker': True,
     'panel_pattern': '^Panel',

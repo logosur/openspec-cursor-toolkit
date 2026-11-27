@@ -10,7 +10,8 @@
 - **`start_session` con `prompt`:** `model` explícito; un id de Opus o Fable lleva la marca en `prompt` o `background`.
   Una oferta de solo título o un `proposal_id` no se tocan.
 - **Asesor:** como mucho `advisor_max_per_day` llamadas por sesión en 24 horas móviles. Pasado el tope se sigue sin él.
-- **Lo impone `~/.claude/hooks/agent-model-gate`** (deniega antes de ejecutar y dice cómo reenviar). Es un hook
+- **Lo impone `~/.claude/hooks/agent-model-gate`, que se instala desactivado** (`enabled: false`: permite todo y no
+  escribe nada hasta que la pieza de config privada ponga `enabled: true`) (deniega antes de ejecutar y dice cómo reenviar). Es un hook
   `PreToolUse`: el asesor es una herramienta del servidor y puede que el cliente no la anuncie al hook; en ese caso su
   tope no actúa.
 - **Austeridad:** con `austerity: true` en la pieza de config `agent-model-gate` se deniegan Opus y Fable aunque lleven

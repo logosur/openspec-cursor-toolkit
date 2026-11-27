@@ -26,10 +26,12 @@ class GateTest(unittest.TestCase):
         self.state = os.path.join(self.tmp, 'state')
         self.config = os.path.join(self.tmp, 'config')
         os.makedirs(self.config)
+        self.set_config()
 
     def set_config(self, **values):
+        """Write the private config piece. The gate ships off, so tests turn it on unless they say otherwise."""
         with open(os.path.join(self.config, 'agent-model-gate.json'), 'w') as fh:
-            json.dump(values, fh)
+            json.dump(dict({'enabled': True}, **values), fh)
 
     def run_hook(self, stdin):
         env = dict(os.environ, HOME=self.tmp, AGENT_MODEL_GATE_STATE=self.state,
@@ -205,9 +207,27 @@ class GateTest(unittest.TestCase):
         self.assert_denied(self.agent(description='x', prompt='y', model='opus'))
         self.set_config(opus_needs_marker=False)
         self.assert_allowed(self.agent(description='x', prompt='y', model='opus'))
-        self.set_config(enabled=False)
+
+    def test_disabled_allows_everything_and_writes_no_state(self):
+        calls = (lambda: self.agent(description='explore', prompt='look'),
+                 lambda: self.agent(description='x', prompt='y', model='opus'),
+                 lambda: self.start(initiation='user_asked', title='t', prompt='do it'),
+                 lambda: self.advisor(), lambda: self.advisor(), lambda: self.advisor(), lambda: self.advisor(),
+                 lambda: self.advisor())
+        for config in ({'enabled': False}, {'enabled': False, 'austerity': True, 'advisor_max_per_day': 0}):
+            with self.subTest(config=config):
+                self.set_config(**config)
+                for call in calls:
+                    self.assert_allowed(call())
+                self.assertFalse(os.path.exists(self.state), 'a disabled gate must not create its state folder')
+
+    def test_disabled_by_default_without_any_config_file(self):
+        os.unlink(os.path.join(self.config, 'agent-model-gate.json'))
         self.assert_allowed(self.agent(description='explore', prompt='look'))
-        self.assert_allowed(self.advisor())
+        self.assert_allowed(self.agent(description='x', prompt='y', model='opus'))
+        self.assertFalse(os.path.exists(self.state))
+        shipped = json.loads((REPO_ROOT / 'global/config/agent-model-gate.json').read_text())
+        self.assertIs(shipped['enabled'], False)
 
     def test_exempt_folder_prefixes(self):
         self.set_config(exempt_paths=['/work/scratch'])
@@ -217,14 +237,18 @@ class GateTest(unittest.TestCase):
         self.assert_denied(self.agent(cwd='/work/proj', description='x', prompt='y'))
 
     def test_a_wrong_config_value_keeps_the_default(self):
-        self.set_config(enabled='no', advisor_max_per_day=-3, panel_pattern='', exempt_paths='/work/proj')
+        self.set_config(advisor_max_per_day=-3, panel_pattern='', exempt_paths='/work/proj')
         self.assert_denied(self.agent(description='explore', prompt='look'))
-        self.assert_allowed(self.advisor())
+        for _ in range(4):
+            self.assert_allowed(self.advisor())
+        self.assert_denied(self.advisor(), 'cap is 4')
+        self.set_config(enabled='yes')   # not a boolean: the default (off) stays
+        self.assert_allowed(self.agent(description='explore', prompt='look'))
 
     def test_a_corrupt_config_file_keeps_the_defaults(self):
         with open(os.path.join(self.config, 'agent-model-gate.json'), 'w') as fh:
             fh.write('{not json')
-        self.assert_denied(self.agent(description='explore', prompt='look'))
+        self.assert_allowed(self.agent(description='explore', prompt='look'))   # off by default
 
     # ---- never breaks anything
 

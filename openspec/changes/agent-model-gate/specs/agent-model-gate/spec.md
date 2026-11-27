@@ -2,6 +2,13 @@
 
 ## ADDED Requirements
 
+### Requirement: The gate ships disabled
+The default of `enabled` SHALL be false. While it is false the hook SHALL allow every call and write no state or log.
+
+#### Scenario: Disabled
+- **WHEN** `enabled` is false or absent and an `Agent` call has no `model`, or the advisor is called past any cap
+- **THEN** the hook exits 0 with no output and creates no file
+
 ### Requirement: Subagent calls name a model
 The gate SHALL deny an `Agent` or `Task` call whose `model` is absent, empty or `inherit`, unless `subagent_type` is `fork`.
 The denial SHALL say how to send the call again.

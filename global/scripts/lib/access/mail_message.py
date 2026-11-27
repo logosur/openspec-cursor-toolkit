@@ -74,10 +74,12 @@ class Item:
     subject: str
     attachment: bool
     folder: str = ''
+    message_id: str = ''      # the normalised Message-ID (lowercase, no angle brackets); '' when the message has none
 
     def as_json(self) -> dict:
         return {'id': self.id, 'date': iso(self.ts), 'direction': self.direction, 'party': self.party,
-                'subject': self.subject, 'attachment': self.attachment, 'folder': self.folder}
+                'subject': self.subject, 'attachment': self.attachment, 'folder': self.folder,
+                'message_id': self.message_id or None}
 
 
 @dataclass

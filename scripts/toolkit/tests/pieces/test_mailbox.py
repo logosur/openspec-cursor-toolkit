@@ -5,6 +5,7 @@ observed formats, a recording fake IMAP class, an HOME, config directory and cac
 reads the developer's real mail, credentials or network.
 """
 import contextlib
+import datetime
 import hashlib
 import imaplib
 import importlib.machinery
@@ -35,6 +36,7 @@ from access import mail_imap, mail_index, mail_local, mail_message, mail_selftes
 from access.mail_message import Unavailable  # noqa: E402
 
 SCRIPT = str(REPO_ROOT / 'global/scripts/mailbox')
+dt_date = datetime.date
 
 
 class Base(unittest.TestCase):
@@ -1768,6 +1770,786 @@ class Connector(CliBase):
         out = self.run_cli('accounts')[1]
         self.assertIn('hosted', out)
         self.assertIn('connector (gmail)', out)
+
+
+# ---------------------------------------------------------------- compatibility of the existing output (task 1.1)
+
+# What `search` and `thread` printed on the synthetic fixture BEFORE the identifier was added (captured on the unmodified
+# code, with the local index already built; the age of the folder files is removed because it changes every second).
+BASELINE = {'local_text': 'work | local | 7 matches | local copy: 2 folders\n'
+               'note: this local copy may hold mail deleted or moved since the client last compacted it (its folder '
+               'files carry no status lines)\n'
+               'l:Sent:67d69e442268 2026-11-05 11:00 > third@example.net | Lunch tomorrow\n'
+               'l:INBOX-1:2ff830e57e92 2026-11-04 08:00 < other@example.org | No date at all\n'
+               'l:INBOX-1:32b844f85f06 2026-11-03 11:00 < José | Café menu\n'
+               'l:INBOX-1:be05213d24d7 2026-11-02 09:30 < Other Person | Hello html\n'
+               'l:Sent:cc52988e93cd 2026-11-01 15:00 > other@example.org | Re: Invoice 2026\n'
+               'l:INBOX-1:ca960d443591 2026-11-01 10:00 <@ Other Person | Invoice 2026\n'
+               'l:INBOX-1:d62d3cc7baf0 ----------- --:-- < other@example.org | Broken date\n',
+ 'local_json': {'account': 'work',
+                'backend': 'local',
+                'freshness': 'local copy: 2 folders',
+                'items': [{'attachment': False,
+                           'date': '2026-11-05T11:00+00:00',
+                           'direction': '>',
+                           'folder': 'Sent',
+                           'id': 'l:Sent:67d69e442268',
+                           'party': 'third@example.net',
+                           'subject': 'Lunch tomorrow'},
+                          {'attachment': False,
+                           'date': '2026-11-04T08:00+00:00',
+                           'direction': '<',
+                           'folder': 'INBOX-1',
+                           'id': 'l:INBOX-1:2ff830e57e92',
+                           'party': 'other@example.org',
+                           'subject': 'No date at all'},
+                          {'attachment': False,
+                           'date': '2026-11-03T11:00+00:00',
+                           'direction': '<',
+                           'folder': 'INBOX-1',
+                           'id': 'l:INBOX-1:32b844f85f06',
+                           'party': 'José',
+                           'subject': 'Café menu'},
+                          {'attachment': False,
+                           'date': '2026-11-02T09:30+00:00',
+                           'direction': '<',
+                           'folder': 'INBOX-1',
+                           'id': 'l:INBOX-1:be05213d24d7',
+                           'party': 'Other Person',
+                           'subject': 'Hello html'},
+                          {'attachment': False,
+                           'date': '2026-11-01T15:00+00:00',
+                           'direction': '>',
+                           'folder': 'Sent',
+                           'id': 'l:Sent:cc52988e93cd',
+                           'party': 'other@example.org',
+                           'subject': 'Re: Invoice 2026'},
+                          {'attachment': True,
+                           'date': '2026-11-01T10:00+00:00',
+                           'direction': '<',
+                           'folder': 'INBOX-1',
+                           'id': 'l:INBOX-1:ca960d443591',
+                           'party': 'Other Person',
+                           'subject': 'Invoice 2026'},
+                          {'attachment': False,
+                           'date': None,
+                           'direction': '<',
+                           'folder': 'INBOX-1',
+                           'id': 'l:INBOX-1:d62d3cc7baf0',
+                           'party': 'other@example.org',
+                           'subject': 'Broken date'}],
+                'notes': ['this local copy may hold mail deleted or moved since the client last compacted it (its '
+                          'folder files carry no status lines)'],
+                'shown': 7,
+                'skipped': [],
+                'total': 7},
+ 'local_thread_text': 'work | local | 2 messages, oldest first | local copy: 2 folders\n'
+                      'note: this local copy may hold mail deleted or moved since the client last compacted it (its '
+                      'folder files carry no status lines)\n'
+                      'l:INBOX-1:ca960d443591 2026-11-01 10:00 <@ Other Person | Invoice 2026\n'
+                      'l:Sent:cc52988e93cd 2026-11-01 15:00 > other@example.org | Re: Invoice 2026\n',
+ 'local_thread_json': {'account': 'work',
+                       'backend': 'local',
+                       'freshness': 'local copy: 2 folders',
+                       'items': [{'attachment': True,
+                                  'date': '2026-11-01T10:00+00:00',
+                                  'direction': '<',
+                                  'folder': 'INBOX-1',
+                                  'id': 'l:INBOX-1:ca960d443591',
+                                  'party': 'Other Person',
+                                  'subject': 'Invoice 2026'},
+                                 {'attachment': False,
+                                  'date': '2026-11-01T15:00+00:00',
+                                  'direction': '>',
+                                  'folder': 'Sent',
+                                  'id': 'l:Sent:cc52988e93cd',
+                                  'party': 'other@example.org',
+                                  'subject': 'Re: Invoice 2026'}],
+                       'notes': ['this local copy may hold mail deleted or moved since the client last compacted it '
+                                 '(its folder files carry no status lines)'],
+                       'skipped': [],
+                       'total': 2},
+ 'imap_text': 'work | imap | 7 matches | live\n'
+              'i:Enviados:7001:31 2026-11-05 11:00 > third@example.net | Lunch tomorrow\n'
+              'i:INBOX:7001:14 2026-11-04 08:00 < other@example.org | No date at all\n'
+              'i:INBOX:7001:13 2026-11-03 11:00 < José | Café menu\n'
+              'i:INBOX:7001:12 2026-11-02 09:30 < Other Person | Hello html\n'
+              'i:Sent%20Items:7001:21 2026-11-01 15:00 > other@example.org | Re: Invoice 2026\n'
+              'i:INBOX:7001:11 2026-11-01 10:00 <@ Other Person | Invoice 2026\n'
+              'i:INBOX:7001:15 ----------- --:-- < other@example.org | Broken date\n',
+ 'imap_log': [('CONNECT', "('mail.example.com', 993, 20)"),
+              ('LOGIN', "'user@example.com'"),
+              ('LIST', "''"),
+              ('SELECT', '(\'"INBOX"\', True)'),
+              ('RESPONSE', "'UIDVALIDITY'"),
+              ('UID SEARCH', "('ALL',)"),
+              ('UID FETCH',
+               "('11,12,13,14,15', '(BODY.PEEK[HEADER.FIELDS (FROM TO CC BCC SUBJECT DATE MESSAGE-ID IN-REPLY-TO "
+               "REFERENCES CONTENT-TYPE X-MS-HAS-ATTACH RECEIVED)])')"),
+              ('SELECT', '(\'"Sent Items"\', True)'),
+              ('RESPONSE', "'UIDVALIDITY'"),
+              ('UID SEARCH', "('ALL',)"),
+              ('UID FETCH',
+               "('21,22', '(BODY.PEEK[HEADER.FIELDS (FROM TO CC BCC SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES "
+               "CONTENT-TYPE X-MS-HAS-ATTACH RECEIVED)])')"),
+              ('SELECT', '(\'"Enviados"\', True)'),
+              ('RESPONSE', "'UIDVALIDITY'"),
+              ('UID SEARCH', "('ALL',)"),
+              ('UID FETCH',
+               "('31', '(BODY.PEEK[HEADER.FIELDS (FROM TO CC BCC SUBJECT DATE MESSAGE-ID IN-REPLY-TO REFERENCES "
+               "CONTENT-TYPE X-MS-HAS-ATTACH RECEIVED)])')"),
+              ('LOGOUT', "''")],
+ 'imap_json': {'account': 'work',
+               'backend': 'imap',
+               'freshness': 'live',
+               'items': [{'attachment': False,
+                          'date': '2026-11-05T11:00+00:00',
+                          'direction': '>',
+                          'folder': 'Enviados',
+                          'id': 'i:Enviados:7001:31',
+                          'party': 'third@example.net',
+                          'subject': 'Lunch tomorrow'},
+                         {'attachment': False,
+                          'date': '2026-11-04T08:00+00:00',
+                          'direction': '<',
+                          'folder': 'INBOX',
+                          'id': 'i:INBOX:7001:14',
+                          'party': 'other@example.org',
+                          'subject': 'No date at all'},
+                         {'attachment': False,
+                          'date': '2026-11-03T11:00+00:00',
+                          'direction': '<',
+                          'folder': 'INBOX',
+                          'id': 'i:INBOX:7001:13',
+                          'party': 'José',
+                          'subject': 'Café menu'},
+                         {'attachment': False,
+                          'date': '2026-11-02T09:30+00:00',
+                          'direction': '<',
+                          'folder': 'INBOX',
+                          'id': 'i:INBOX:7001:12',
+                          'party': 'Other Person',
+                          'subject': 'Hello html'},
+                         {'attachment': False,
+                          'date': '2026-11-01T15:00+00:00',
+                          'direction': '>',
+                          'folder': 'Sent Items',
+                          'id': 'i:Sent%20Items:7001:21',
+                          'party': 'other@example.org',
+                          'subject': 'Re: Invoice 2026'},
+                         {'attachment': True,
+                          'date': '2026-11-01T10:00+00:00',
+                          'direction': '<',
+                          'folder': 'INBOX',
+                          'id': 'i:INBOX:7001:11',
+                          'party': 'Other Person',
+                          'subject': 'Invoice 2026'},
+                         {'attachment': False,
+                          'date': None,
+                          'direction': '<',
+                          'folder': 'INBOX',
+                          'id': 'i:INBOX:7001:15',
+                          'party': 'other@example.org',
+                          'subject': 'Broken date'}],
+               'notes': [],
+               'shown': 7,
+               'skipped': [],
+               'total': 7},
+ 'imap_thread_text': 'work | imap | 2 messages, oldest first | live\n'
+                     'i:INBOX:7001:11 2026-11-01 10:00 <@ Other Person | Invoice 2026\n'
+                     'i:Sent%20Items:7001:21 2026-11-01 15:00 > other@example.org | Re: Invoice 2026\n',
+ 'imap_thread_json': {'account': 'work',
+                      'backend': 'imap',
+                      'freshness': 'live',
+                      'items': [{'attachment': True,
+                                 'date': '2026-11-01T10:00+00:00',
+                                 'direction': '<',
+                                 'folder': 'INBOX',
+                                 'id': 'i:INBOX:7001:11',
+                                 'party': 'Other Person',
+                                 'subject': 'Invoice 2026'},
+                                {'attachment': False,
+                                 'date': '2026-11-01T15:00+00:00',
+                                 'direction': '>',
+                                 'folder': 'Sent Items',
+                                 'id': 'i:Sent%20Items:7001:21',
+                                 'party': 'other@example.org',
+                                 'subject': 'Re: Invoice 2026'}],
+                      'notes': [],
+                      'skipped': [],
+                      'total': 2}}
+
+
+def _no_age(text):
+    return re.sub(r', last change [^\n]*', '', text)
+
+
+def _document(text):
+    document = json.loads(text)
+    if 'freshness' in document:
+        document['freshness'] = _no_age(document['freshness'])
+    return document
+
+
+def _without_message_id(document):
+    """The document as the baseline knew it: the one key this change adds is removed from every item."""
+    document = json.loads(json.dumps(document))
+    for item in document['items']:
+        item.pop('message_id', None)
+    return document
+
+
+class CompatibilityLocal(CliBase):
+    """The output of `search` and `thread` on `local` is what it was, plus one key per item."""
+
+    def setUp(self):
+        super().setUp()
+        self.search()                                  # build the index: the output below is the warm one
+
+    def test_search_text_is_byte_identical(self):
+        self.assertEqual(_no_age(self.run_cli('search', 'work')[1]), BASELINE['local_text'])
+
+    def test_search_json_differs_only_by_the_new_key(self):
+        document = _document(self.run_cli('search', 'work', '--json')[1])
+        self.assertEqual(_without_message_id(document), BASELINE['local_json'])
+
+    def test_thread_text_and_json(self):
+        item = self.id_of('Invoice 2026')
+        self.assertEqual(_no_age(self.run_cli('thread', 'work', item)[1]), BASELINE['local_thread_text'])
+        document = _document(self.run_cli('thread', 'work', item, '--json')[1])
+        self.assertEqual(_without_message_id(document), BASELINE['local_thread_json'])
+
+
+class CompatibilityImap(ImapBase):
+    """The same on `imap`, and the commands sent to the server are the ones sent before."""
+
+    def test_search_text_json_and_the_command_stream(self):
+        code, text, _ = self.run_cli('search', 'work')
+        self.assertEqual(text, BASELINE['imap_text'])
+        self.assertEqual([(verb, repr(detail)) for verb, detail in self.server.log], BASELINE['imap_log'])
+        document = json.loads(self.run_cli('search', 'work', '--json')[1])
+        self.assertEqual(_without_message_id(document), BASELINE['imap_json'])
+
+    def test_thread_text_and_json(self):
+        item = self.lines(self.run_cli('search', 'work', '--subject', 'Invoice 2026', '--folder', 'inbox')[1])[0].split()[0]
+        self.assertEqual(self.run_cli('thread', 'work', item)[1], BASELINE['imap_thread_text'])
+        document = json.loads(self.run_cli('thread', 'work', item, '--json')[1])
+        self.assertEqual(_without_message_id(document), BASELINE['imap_thread_json'])
+
+
+
+# ---------------------------------------------------------------- the message identifier (tasks 2.1 and 2.2)
+
+class IdentifierLocal(CliBase):
+    """`message_id` on the local backend, on a folder made of the standard messages plus the extra fixtures."""
+
+    def setUp(self):
+        super().setUp()
+        extra = fx.list_messages()
+        inbox = [fx.standard_messages()[k] for k in ('invoice', 'html', 'invoice')] + [extra[k] for k in ('noid', 'mixed')]
+        self.lay['inbox'].write_bytes(fx.mbox_format_b(inbox))
+
+    def items(self, *args):
+        code, out, err = self.run_cli('search', 'work', '--folder', 'inbox', '--json', *args)
+        self.assertEqual(code, 0, err)
+        return json.loads(out)['items']
+
+    def test_the_identifier_is_normalised_lowercase_without_brackets(self):
+        by_subject = {item['subject']: item for item in self.items()}
+        self.assertEqual(by_subject['Mixed case identifier']['message_id'], 'case.mixed-1@example.test')
+        self.assertEqual(by_subject['Hello html']['message_id'], 'html-1@example.org')
+
+    def test_a_message_without_an_identifier_has_null_and_still_an_id(self):
+        item = next(i for i in self.items() if i['subject'] == 'No identifier')
+        self.assertIsNone(item['message_id'])
+        self.assertTrue(item['id'].startswith('l:INBOX-1:'))
+
+    def test_a_malformed_identifier_gives_null_and_no_traceback(self):
+        # the e-mail library refuses to write most of these, so the header line is replaced in the finished message
+        odd = []
+        for n, value in enumerate((b'no-brackets-here@example.org', b'<>', b'< spaced@example.org >', b'<a@b', b'=?utf-8?b?!!!?=')):
+            raw = fx.message(f'Odd {n}', fx.OTHER, fx.ADDRESS, 'Mon, 02 Nov 2026 10:00:00 +0000', f'odd-{n}@example.org')
+            self.assertIn(f'Message-ID: <odd-{n}@example.org>'.encode(), raw)
+            odd.append(raw.replace(f'Message-ID: <odd-{n}@example.org>'.encode(), b'Message-ID: ' + value))
+        self.lay['inbox'].write_bytes(fx.mbox_format_b(odd))
+        code, out, err = self.run_cli('search', 'work', '--folder', 'inbox', '--json')
+        self.assertEqual(code, 0, err)
+        self.assertNotIn('Traceback', err)
+        items = json.loads(out)['items']
+        self.assertEqual(len(items), 5)
+        self.assertEqual({i['message_id'] for i in items}, {None})
+
+    def test_identifiers_are_unique_within_a_result_except_null(self):
+        items = self.items()
+        ids = [i['message_id'] for i in items if i['message_id'] is not None]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual(ids.count('invoice-1@example.org'), 1)        # the message stored twice is one item
+        self.assertEqual(len(items), 4)
+
+    def test_the_text_line_does_not_show_the_identifier(self):
+        out = self.search('--folder', 'inbox')
+        self.assertNotIn('case.mixed', out)
+        self.assertNotIn('html-1@example.org', out)
+
+    def test_thread_items_carry_the_identifier(self):
+        item = self.id_of('Invoice 2026')
+        code, out, err = self.run_cli('thread', 'work', item, '--json')
+        self.assertEqual(code, 0, err)
+        self.assertEqual([i['message_id'] for i in json.loads(out)['items']], ['invoice-1@example.org', 'reply-1@example.com'])
+
+
+class IdentifierBothBackends(ImapBase):
+    """The same message gets the same `message_id` from the server and from the local copy."""
+
+    def setUp(self):
+        super().setUp()
+        self.configure(backends=('imap', 'local'))
+        extra = fx.list_messages()
+        self.server.folders[0][2][16] = extra['mixed']
+        self.server.folders[0][2][17] = extra['noid']
+        inbox = [fx.standard_messages()[k] for k in ('invoice', 'html', 'encoded', 'nodate', 'broken')]
+        self.lay['inbox'].write_bytes(fx.mbox_format_b(inbox + [extra['mixed'], extra['noid']]))
+
+    def by_subject(self, backend):
+        code, out, err = self.run_cli('search', 'work', '--folder', 'inbox', '--backend', backend, '--json')
+        self.assertEqual(code, 0, err)
+        return {item['subject']: item['message_id'] for item in json.loads(out)['items']}
+
+    def test_same_string_on_both_backends(self):
+        imap, local = self.by_subject('imap'), self.by_subject('local')
+        self.assertEqual(imap, local)
+        self.assertEqual(imap['Mixed case identifier'], 'case.mixed-1@example.test')
+        self.assertIsNone(imap['No identifier'])
+        self.assertEqual(sum(1 for v in imap.values() if v is not None), len(imap) - 1)
+
+    def test_identifiers_are_unique_within_a_result_on_both_backends(self):
+        for backend in ('imap', 'local'):
+            code, out, err = self.run_cli('search', 'work', '--backend', backend, '--json')
+            self.assertEqual(code, 0, err)
+            items = json.loads(out)['items']
+            ids = [i['message_id'] for i in items if i['message_id'] is not None]
+            self.assertEqual(len(ids), len(set(ids)), backend)
+            self.assertEqual(len({i['id'] for i in items}), len(items), backend)
+
+    def test_imap_thread_items_carry_the_identifier(self):
+        item = self.lines(self.run_cli('search', 'work', '--subject', 'Invoice 2026', '--folder', 'inbox',
+                                       '--backend', 'imap')[1])[0].split()[0]
+        code, out, err = self.run_cli('thread', 'work', item, '--json')
+        self.assertEqual(code, 0, err)
+        self.assertEqual([i['message_id'] for i in json.loads(out)['items']], ['invoice-1@example.org', 'reply-1@example.com'])
+
+
+class IdentifierCostsNothing(ImapBase):
+    """Task 2.2: the identifier adds no command to the server and no read of a local folder file."""
+
+    def test_a_25_result_search_issues_one_header_fetch_and_no_message_fetch(self):
+        many = {100 + n: fx.message(f'Bulk {n:03d}', fx.OTHER, fx.ADDRESS, f'Mon, 02 Nov 2026 10:{n:02d}:00 +0000',
+                                    f'bulk-{n}@example.org') for n in range(25)}
+        self.server.folders[0] = ('INBOX', '\\HasNoChildren', many)
+        code, out, err = self.run_cli('search', 'work', '--folder', 'inbox', '--limit', '25', '--json')
+        self.assertEqual(code, 0, err)
+        document = json.loads(out)
+        self.assertEqual(len(document['items']), 25)
+        self.assertEqual(len({i['message_id'] for i in document['items']}), 25)
+        fetches = [detail for verb, detail in self.server.log if verb == 'UID FETCH']
+        self.assertEqual(len(fetches), 1, fetches)
+        self.assertTrue(fetches[0][1].startswith('(BODY.PEEK[HEADER.FIELDS ('), fetches[0])
+        self.assertIn('MESSAGE-ID', fetches[0][1])
+
+    def test_a_local_search_of_an_indexed_folder_without_status_lines_opens_no_file(self):
+        backend = mail_local.LocalBackend(self.account(), {fx.ADDRESS}, {})
+        wanted = mail_message.Filters(folder='inbox')
+        try:
+            backend.search(wanted, 20)                       # builds the index
+        finally:
+            backend.close()
+        backend = mail_local.LocalBackend(self.account(), {fx.ADDRESS}, {})
+        try:
+            with mock.patch.object(mail_local, 'open_mbox', side_effect=AssertionError('the folder file was opened')):
+                result = backend.search(wanted, 20)
+        finally:
+            backend.close()
+        self.assertEqual(len(result.items), 5)
+        self.assertIn('invoice-1@example.org', {item.message_id for item in result.items})
+
+
+
+# ---------------------------------------------------------------- the header filter on `local` (tasks 3.1 and 4.x)
+
+class HeaderScanSetting(CliBase):
+    """Task 3.1: `header_scan_max` is shipped, validated and never below the cut it replaced."""
+
+    def test_shipped_defaults_agree_with_the_code(self):
+        shipped = json.loads(Path(REPO_ROOT, 'global/config/mailbox.json').read_text())['defaults']
+        self.assertEqual(shipped, load_cli().DEFAULTS['defaults'])
+        self.assertEqual(shipped['header_scan_max'], mail_local.HEADER_SCAN_MAX)
+
+    def test_the_default_is_not_below_the_old_silent_cut(self):
+        shipped = json.loads(Path(REPO_ROOT, 'global/config/mailbox.json').read_text())['defaults']
+        self.assertGreaterEqual(shipped['header_scan_max'], 50000)
+        self.assertGreaterEqual(mail_local.HEADER_SCAN_MAX, 50000)
+
+    def test_a_mistyped_value_falls_back_to_the_default_without_a_traceback(self):
+        for bad in ('many', '', 0, -5, True, None, [], {}, float('inf'), float('nan')):
+            config = fx.account_config(self.root)
+            config['defaults'] = {'header_scan_max': bad}
+            self.write_config(config)
+            self.assertEqual(load_cli().Config().defaults['header_scan_max'], 50000, repr(bad))
+            code, out, err = self.run_cli('search', 'work', '--header', 'Message-ID: lunch')
+            self.assertEqual(code, 0, (bad, err))
+            self.assertNotIn('Traceback', err)
+            self.assertNotIn('--header checked', out, repr(bad))
+            self.assertEqual(len(self.lines(out)), 1, repr(bad))
+
+    def test_a_number_beyond_the_range_of_a_float_is_mistyped_not_a_crash(self):
+        # `math.isfinite(10**400)` raises OverflowError: the check must treat it as a mistyped value, for every numeric key
+        for key, default in (('header_scan_max', 50000), ('limit', 20), ('text_scan_max', 1000)):
+            config = fx.account_config(self.root)
+            config['defaults'] = {key: 10 ** 400}
+            self.write_config(config)
+            self.assertEqual(load_cli().Config().defaults[key], default, key)
+            code, out, err = self.run_cli('search', 'work', '--header', 'Message-ID: lunch')
+            self.assertEqual(code, 0, (key, err))
+            self.assertNotIn('Traceback', err)
+            self.assertEqual(len(self.lines(out)), 1, key)
+
+    def test_a_decimal_is_a_number_and_is_cut_to_an_integer(self):
+        config = fx.account_config(self.root)
+        config['defaults'] = {'header_scan_max': 2.0}
+        self.write_config(config)
+        self.assertEqual(load_cli().Config().defaults['header_scan_max'], 2.0)
+        code, out, err = self.run_cli('search', 'work', '--folder', 'inbox', '--header', 'Message-ID: example')
+        self.assertEqual(code, 0, err)
+        self.assertIn('--header checked the newest 2 of 6 messages of INBOX-1', out)   # six rows: one message is stored twice
+
+    def test_help_documents_the_identifier_the_bound_and_the_build_note(self):
+        code, out, _ = self.run_cli('--help')
+        self.assertEqual(code, 0)
+        for text in ('message_id', 'header_scan_max', 'from scratch', 'before the deleted-message check'):
+            self.assertIn(text, ' '.join(out.split()), text)
+
+    def test_the_contract_probes_the_help(self):
+        import yaml
+        contract = yaml.safe_load(Path(REPO_ROOT, 'global/contracts/mailbox.yaml').read_text())
+        probed = {probe['contains'] for probe in contract['probes'] if probe['args'] == ['--help']}
+        self.assertLessEqual({'message_id', 'header_scan_max'}, probed)
+
+    def test_the_old_cut_is_not_hidden_in_the_index_module(self):
+        text = Path(REPO_ROOT, 'global/scripts/lib/access/mail_index.py').read_text()
+        self.assertNotIn('50000', text)
+        self.assertNotIn('cap', text.split('def header_filter', 1)[1].split('def raw', 1)[0])
+
+    def test_the_pass_has_no_bound_of_its_own_beyond_the_old_cut(self):
+        rows = [{'hstart': 0, 'hend': 0}] * 50001
+        index = mock.Mock(spec=mail_index.FolderIndex)
+        index.mbox = self.lay['inbox']
+        matched, scanned = mail_index.FolderIndex.header_filter(index, rows, 'list-id', 'x')
+        self.assertEqual((matched, scanned), ([], 50001))
+
+
+class HeaderFilterBase(CliBase):
+    """A folder made of the extra list fixtures; helpers for in-process runs with instrumentation."""
+
+    def setUp(self):
+        super().setUp()
+        self.extra = fx.list_messages()
+        self.write_inbox('alpha1', 'alpha2', 'beta1', 'twice', 'plain', 'noid', 'mixed')
+
+    def write_inbox(self, *keys):
+        self.lay['inbox'].write_bytes(fx.mbox_format_b([self.extra[k] for k in keys]))
+
+    def configure_defaults(self, **defaults):
+        config = fx.account_config(self.root)
+        config['defaults'] = defaults
+        self.write_config(config)
+
+    def document(self, *args):
+        code, out, err = self.run_cli('search', 'work', '--folder', 'inbox', '--json', *args)
+        self.assertEqual(code, 0, err)
+        return json.loads(out)
+
+    def subjects_of(self, *args):
+        return [item['subject'] for item in self.document(*args)['items']]
+
+    def probe(self, filters, **defaults):
+        """Run the local backend in-process; return (result, rows given to `live`, rows given to `header_filter`)."""
+        given = {'live': [], 'header': []}
+        live, header = mail_index.FolderIndex.live, mail_index.FolderIndex.header_filter
+
+        def spy_live(index, rows):
+            given['live'].append(len(rows))
+            return live(index, rows)
+
+        def spy_header(index, rows, *rest):
+            given['header'].append(len(rows))
+            return header(index, rows, *rest)
+
+        backend = mail_local.LocalBackend(self.account(), {fx.ADDRESS}, defaults)
+        try:
+            with mock.patch.object(mail_index.FolderIndex, 'live', spy_live), \
+                    mock.patch.object(mail_index.FolderIndex, 'header_filter', spy_header):
+                result = backend.search(filters, 50)
+        finally:
+            backend.close()
+        return result, given['live'], given['header']
+
+
+class HeaderFilterOrder(HeaderFilterBase):
+    """Task 4.1: header first, status pass on the matches, one stated bound."""
+
+    def test_the_status_pass_reads_only_the_matches(self):
+        filler = [fx.message(f'Filler {n:03d}', fx.OTHER, fx.ADDRESS, 'Mon, 02 Nov 2026 10:00:00 +0000', f'filler-{n}@example.org')
+                  for n in range(197)]
+        mine = [self.extra['alpha1'], self.extra['alpha2'], self.extra['beta1']]
+        self.lay['inbox'].write_bytes(fx.mbox_format_b(filler + mine))
+        result, live, header = self.probe(mail_message.Filters(folder='inbox', header='List-ID: x'))
+        self.assertEqual(result.total, 3)
+        self.assertEqual(header, [200])
+        self.assertEqual(live, [3])
+
+    def test_without_a_header_filter_the_status_pass_is_unchanged(self):
+        result, live, header = self.probe(mail_message.Filters(folder='inbox'))
+        self.assertEqual((live, header), ([7], []))
+        self.assertEqual(result.total, 7)
+
+    def test_the_cap_is_taken_before_any_header_is_read_and_is_stated(self):
+        self.configure_defaults(header_scan_max=2)
+        result, live, header = self.probe(mail_message.Filters(folder='inbox', header='List-ID: list'), header_scan_max=2)
+        self.assertEqual(header, [2])
+        self.assertLessEqual(live[0], 2)
+        out = self.run_cli('search', 'work', '--folder', 'inbox', '--header', 'List-ID: alpha')
+        self.assertEqual(out[0], 0, out[2])
+        note = '--header checked the newest 2 of 7 messages of INBOX-1 left by the other filters; narrow the search or raise header_scan_max'
+        self.assertIn('note: ' + note, out[1].splitlines()[:4])
+        self.assertEqual(self.document('--header', 'List-ID: alpha')['notes'][0], note)
+
+    def test_only_the_newest_candidates_are_checked(self):
+        self.configure_defaults(header_scan_max=3)
+        # newest first: Mixed, No identifier, Plain note, Two list headers, Digest beta 1, Digest alpha 2, Digest alpha 1
+        self.assertEqual(self.subjects_of('--header', 'List-ID: .example.org'), [])
+        self.configure_defaults(header_scan_max=4)
+        self.assertEqual(self.subjects_of('--header', 'List-ID: .example.org'), ['Two list headers'])
+        self.configure_defaults(header_scan_max=5)
+        self.assertEqual(self.subjects_of('--header', 'List-ID: .example.org'), ['Two list headers', 'Digest beta 1'])
+
+    def test_a_read_that_fails_stops_the_pass_and_the_note_counts_only_what_was_read(self):
+        class Failing:
+            """The folder file, whose third read raises (a vanished or unreadable file)."""
+            def __init__(self, handle):
+                self.handle, self.reads = handle, 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self.handle.close()
+
+            def seek(self, at):
+                return self.handle.seek(at)
+
+            def read(self, size=-1):
+                self.reads += 1
+                if self.reads >= 3:
+                    raise OSError('read failed')
+                return self.handle.read(size)
+
+        backend = mail_local.LocalBackend(self.account(), {fx.ADDRESS}, {})
+        wanted = mail_message.Filters(folder='inbox', header='List-ID: example')
+        try:
+            backend.search(wanted, 20)                       # builds the index: the next search opens the file only to read headers
+            with mock.patch.object(mail_local, 'open_mbox', lambda path: Failing(open(path, 'rb'))):
+                result = backend.search(wanted, 20)
+        finally:
+            backend.close()
+        # newest first: Mixed, No identifier, then the third read fails; neither of the two read matches
+        self.assertEqual(result.items, [])
+        self.assertIn('--header checked the newest 2 of 7 messages of INBOX-1 left by the other filters; narrow the search '
+                      'or raise header_scan_max', result.notes)
+
+    def test_a_cap_that_is_not_reached_says_nothing(self):
+        self.configure_defaults(header_scan_max=1000)
+        document = self.document('--header', 'List-ID: alpha')
+        self.assertEqual(document['total'], 2)
+        self.assertFalse([n for n in document['notes'] if '--header checked' in n])
+        self.assertNotIn('--header checked', self.run_cli('search', 'work', '--header', 'List-ID: alpha')[1])
+
+    def test_the_cut_is_stated_whatever_the_size_of_the_folder(self):
+        for cap, candidates in ((1, 7), (3, 7), (6, 7)):
+            self.configure_defaults(header_scan_max=cap)
+            notes = self.document('--header', 'List-ID: alpha')['notes']
+            self.assertTrue([n for n in notes if f'newest {cap} of {candidates} messages' in n], (cap, notes))
+        self.configure_defaults(header_scan_max=7)
+        self.assertFalse([n for n in self.document('--header', 'List-ID: alpha')['notes'] if '--header checked' in n])
+
+    def test_the_cap_is_per_folder(self):
+        self.lay['sent'].write_bytes(fx.mbox_format_a([(self.extra['alpha1'], 0x0001), (self.extra['alpha2'], 0x0001)]))
+        self.configure_defaults(header_scan_max=1)
+        code, out, err = self.run_cli('search', 'work', '--json', '--header', 'List-ID: alpha')
+        self.assertEqual(code, 0, err)
+        notes = [n for n in json.loads(out)['notes'] if '--header checked' in n]
+        self.assertEqual(len(notes), 2, notes)
+        self.assertTrue(any('of 2 messages of Sent' in n for n in notes) and any('of 7 messages of INBOX-1' in n for n in notes))
+
+
+class HeaderFilterSemantics(HeaderFilterBase):
+    """Task 4.2: the matches are the ones the backend gave before, and the other filters still apply."""
+
+    def test_substring_of_any_occurrence_case_insensitive(self):
+        self.assertEqual(sorted(self.subjects_of('--header', 'List-ID: ALPHA')), ['Digest alpha 1', 'Digest alpha 2'])
+        self.assertEqual(self.subjects_of('--header', 'list-id: BETA'), ['Digest beta 1'])
+        self.assertEqual(self.subjects_of('--header', 'List-ID: second'), ['Two list headers'])     # the second occurrence
+        self.assertEqual(self.subjects_of('--header', 'List-ID: first'), ['Two list headers'])
+        self.assertEqual(self.subjects_of('--header', 'List-ID: nothing like this'), [])
+
+    def test_an_empty_needle_matches_every_message_that_has_the_header(self):
+        self.assertEqual(sorted(self.subjects_of('--header', 'List-ID:')),
+                         ['Digest alpha 1', 'Digest alpha 2', 'Digest beta 1', 'Two list headers'])
+        self.assertNotIn('Plain note', self.subjects_of('--header', 'List-ID:'))
+
+    def test_other_filters_narrow_the_candidates_before_the_header_is_read(self):
+        wanted = mail_message.Filters(folder='inbox', header='List-ID: example', since=dt_date(2026, 11, 10))
+        result, live, header = self.probe(wanted)
+        self.assertEqual(sorted(i.subject for i in result.items), ['Digest alpha 2', 'Digest beta 1', 'Two list headers'])
+        self.assertEqual(header, [6])                           # six messages are dated on or after the 10th
+        self.assertEqual(self.subjects_of('--header', 'List-ID: alpha', '--since', '2026-11-10'), ['Digest alpha 2'])
+        self.assertEqual(sorted(self.subjects_of('--header', 'List-ID: list', '--from', 'LIST@')),
+                         ['Digest alpha 1', 'Digest alpha 2', 'Digest beta 1'])
+        self.assertEqual(self.subjects_of('--header', 'List-ID: list', '--from', 'nobody@'), [])
+
+    def test_limit_is_applied_after_the_header_pass_and_total_counts_the_matches(self):
+        self.configure_defaults(header_scan_max=7)
+        document = self.document('--header', 'List-ID: list', '--limit', '1')
+        self.assertEqual((document['total'], document['shown'], len(document['items'])), (3, 1, 1))
+        self.assertEqual(document['items'][0]['subject'], 'Digest beta 1')        # the newest match
+        self.assertFalse([n for n in document['notes'] if '--header checked' in n])
+
+    def test_a_body_filter_applies_after_the_header_with_its_own_cap(self):
+        self.configure_defaults(text_scan_max=1)
+        document = self.document('--header', 'List-ID: list', '--text', 'Hello')
+        self.assertTrue([n for n in document['notes'] if n.startswith('--text scanned the newest 1 of 3 messages')], document['notes'])
+        self.assertEqual(document['total'], 1)
+
+    def test_a_message_flagged_deleted_since_indexing_stays_hidden(self):
+        self.lay['sent'].write_bytes(fx.mbox_format_a([(self.extra['alpha1'], 0x0001), (self.extra['alpha2'], 0x0001)]))
+        code, out, err = self.run_cli('search', 'work', '--folder', 'sent', '--json', '--header', 'List-ID: alpha')
+        self.assertEqual(sorted(i['subject'] for i in json.loads(out)['items']), ['Digest alpha 1', 'Digest alpha 2'])
+        data = self.lay['sent'].read_bytes()
+        at = data.index(b'Digest alpha 2')
+        status = data.rindex(b'X-Mozilla-Status: 0001', 0, at)
+        with open(self.lay['sent'], 'r+b') as handle:
+            handle.seek(status + len(b'X-Mozilla-Status: '))
+            handle.write(b'0009')
+        stamp = time.time() + 30
+        os.utime(self.lay['sent'], (stamp, stamp))
+        self.assertEqual(self.lay['sent'].stat().st_size, len(data))
+        code, out, err = self.run_cli('search', 'work', '--folder', 'sent', '--json', '--header', 'List-ID: alpha')
+        self.assertEqual(code, 0, err)
+        self.assertEqual([i['subject'] for i in json.loads(out)['items']], ['Digest alpha 1'])
+
+    def test_a_header_search_leaves_the_store_untouched(self):
+        def snapshot():
+            files = sorted(p for p in self.lay['account_dir'].rglob('*') if p.is_file())
+            return [(p.name, p.stat().st_size, p.stat().st_mtime_ns, hashlib.sha1(p.read_bytes()).hexdigest()) for p in files]
+        self.lay['sent'].write_bytes(fx.mbox_format_a([(self.extra['alpha1'], 0x0001)]))
+        before = snapshot()
+        for args in (('--header', 'List-ID: alpha'), ('--header', 'List-ID:'), ('--header', 'X-Nothing: 1')):
+            self.assertEqual(self.run_cli('search', 'work', *args)[0], 0)
+        self.assertEqual(snapshot(), before)
+
+    def test_a_long_subject_and_an_identifier_keep_the_line_within_160_characters(self):
+        self.write_inbox('long', 'alpha1')
+        code, out, err = self.run_cli('search', 'work', '--folder', 'inbox', '--header', 'List-ID:')
+        self.assertEqual(code, 0, err)
+        self.assertTrue(all(len(line) <= 160 for line in out.splitlines()))
+        document = self.document()
+        self.assertEqual(sorted(i['message_id'] for i in document['items']), ['alpha-1@example.org', 'long-1@example.org'])
+
+    def test_a_message_stored_twice_is_listed_once(self):
+        self.lay['inbox'].write_bytes(fx.mbox_format_b([self.extra['alpha1'], self.extra['alpha1'], self.extra['plain']]))
+        self.assertEqual(self.subjects_of('--header', 'List-ID: alpha'), ['Digest alpha 1'])
+
+    def test_a_copy_with_the_header_is_listed_even_when_a_newer_copy_of_the_same_message_has_none(self):
+        # Same Message-ID twice in one folder; only the earlier copy in the file carries the List-ID. The status pass used
+        # to de-duplicate before the header pass and kept the newer copy only, which has no List-ID, so the message was
+        # hidden. Now every copy is header-tested first (design D6, second ordering difference), as on `imap` and across
+        # folders.
+        bare = fx.message('Digest alpha 1', 'List <list@example.org>', fx.ADDRESS, 'Mon, 09 Nov 2026 08:00:00 +0000',
+                          'alpha-1@example.org')
+        self.lay['inbox'].write_bytes(fx.mbox_format_b([self.extra['alpha1'], bare]))
+        self.assertEqual(self.subjects_of(), ['Digest alpha 1'])
+        self.assertEqual(self.subjects_of('--header', 'List-ID: alpha'), ['Digest alpha 1'])
+        self.assertEqual(self.document('--header', 'List-ID: alpha')['total'], 1)
+
+    def test_the_note_counts_the_candidates_left_by_the_other_filters_not_the_folder(self):
+        self.configure_defaults(header_scan_max=2)
+        document = self.document('--header', 'List-ID: alpha', '--since', '2026-11-10')       # six of the seven are dated 10th or later
+        self.assertEqual([n for n in document['notes'] if '--header checked' in n],
+                         ['--header checked the newest 2 of 6 messages of INBOX-1 left by the other filters; narrow the '
+                          'search or raise header_scan_max'])
+
+    def test_exit_codes(self):
+        self.configure_defaults(header_scan_max=1)
+        self.assertEqual(self.run_cli('search', 'work', '--header', 'List-ID: alpha')[0], 0)         # a capped search
+        self.assertEqual(self.run_cli('search', 'work', '--header', 'no colon')[0], 2)               # malformed
+        self.assertEqual(self.run_cli('search', 'work', '--backend', 'imap')[0], 3)                  # no such backend here
+        self.assertEqual(self.run_cli('show', 'work', 'l:INBOX-1:000000000000')[0], 4)               # stale id
+
+
+# ---------------------------------------------------------------- the build announcement (task 5.1)
+
+class BuildAnnouncement(CliBase):
+    NOTE = 'the index of INBOX-1 was built from scratch ('
+
+    def notes(self, *args):
+        code, out, err = self.run_cli('search', 'work', '--json', *args)
+        self.assertEqual(code, 0, err)
+        return json.loads(out)['notes']
+
+    def built(self, notes):
+        return [n for n in notes if n.startswith('the index of ')]
+
+    def test_a_first_build_is_announced_in_text_and_json_and_a_later_search_is_silent(self):
+        first = self.search('--folder', 'inbox')                    # six rows: one message is stored twice, and counts twice
+        self.assertIn('note: the index of INBOX-1 was built from scratch (6 messages)', first.splitlines()[:4])
+        self.assertEqual(self.built(self.notes('--folder', 'inbox')), [])                    # already built by the text run
+        self.assertNotIn('was built from scratch', self.search('--folder', 'inbox'))
+        shutil.rmtree(self.cache)                                                           # a cache wipe: built again
+        self.assertEqual(self.built(self.notes('--folder', 'inbox')), ['the index of INBOX-1 was built from scratch (6 messages)'])
+
+    def test_every_folder_of_the_search_is_named_once(self):
+        built = self.built(self.notes())
+        self.assertEqual(sorted(built), ['the index of INBOX-1 was built from scratch (6 messages)',
+                                         'the index of Sent was built from scratch (2 messages)'])
+
+    def test_a_compacted_folder_is_announced_again_and_ids_survive(self):
+        before = {i['subject']: i['id'] for i in json.loads(self.run_cli('search', 'work', '--folder', 'inbox', '--json')[1])['items']}
+        msgs = fx.standard_messages()
+        self.lay['inbox'].write_bytes(fx.mbox_format_b([msgs['html'], msgs['encoded']]))
+        document = json.loads(self.run_cli('search', 'work', '--folder', 'inbox', '--json')[1])
+        self.assertEqual(self.built(document['notes']), ['the index of INBOX-1 was built from scratch (2 messages)'])
+        for item in document['items']:
+            self.assertEqual(item['id'], before[item['subject']])
+
+    def test_appended_mail_is_not_a_build(self):
+        self.search('--folder', 'inbox')
+        msgs = fx.standard_messages()
+        with open(self.lay['inbox'], 'ab') as handle:
+            handle.write(fx.mbox_format_b([msgs['draft']]))
+        self.assertEqual(self.built(self.notes('--folder', 'inbox')), [])
+
+    def test_an_empty_folder_says_nothing(self):
+        self.lay['inbox'].write_bytes(b'')
+        self.assertEqual(self.built(self.notes('--folder', 'inbox')), [])
+
+    def test_the_work_is_not_changed_by_the_note(self):
+        backend = mail_local.LocalBackend(self.account(), {fx.ADDRESS}, {})
+        try:
+            backend.search(mail_message.Filters(folder='inbox'), 20)
+            self.assertEqual(backend._builds, {})                     # consumed by the search that reported it
+            index = backend.index('INBOX-1')
+            self.assertTrue(index.stats.rebuilt)
+        finally:
+            backend.close()
 
 
 class SelfTest(Base):

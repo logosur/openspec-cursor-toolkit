@@ -6,6 +6,7 @@
     "line_width": 160,
     "auth_cooldown_minutes": 30,
     "text_scan_max": 1000,
-    "imap_scan_max": 2000
+    "imap_scan_max": 2000,
+    "header_scan_max": 50000
   }
 }

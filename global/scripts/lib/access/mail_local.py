@@ -301,6 +301,7 @@ def folder_info(name: str, path: Path, roles: dict[str, list[str]]) -> dict:
 # ---------------------------------------------------------------- mbox reader
 
 CHUNK = 8 << 20
+HEADER_SCAN_MAX = 50000       # default of the setting `header_scan_max`: never below the cut this replaced
 HEADER_START_READ = 16 << 10
 HEADER_MAX = 4 << 20
 _NEEDLE = b'\nFrom - '
@@ -403,6 +404,7 @@ class LocalBackend:
         self.account, self.own, self.defaults = account, own, defaults
         self._store: Store | None = None
         self._indexes: dict[str, object] = {}
+        self._builds: dict[str, int] = {}   # folder -> messages, for indexes this run built from scratch
         self.chunk = CHUNK
 
     # -- resolution
@@ -435,6 +437,8 @@ class LocalBackend:
                 raise Unavailable(f'the local store has no folder named {name!r}')
             index = mail_index.FolderIndex(store.folders[name], settings.cache_dir('mailbox') / 'index')
             index.refresh(self.chunk)
+            if index.stats.rebuilt and index.count():
+                self._builds[name] = index.count()
             self._indexes[name] = index
         return self._indexes[name]
 
@@ -470,7 +474,7 @@ class LocalBackend:
         from access.mail_message import Item, party_and_direction
         direction, party = party_and_direction(row['from_addr'], row['from_party'], row['to_first'], self.own)
         return Item(self.make_id(folder, row['idh']), row['date'], direction, party, row['subject'],
-                    bool(row['att']), folder)
+                    bool(row['att']), folder, row['mid'] or '')
 
     def status(self) -> dict:
         """Details of a usable store (raises Unavailable with the reason otherwise)."""
@@ -488,12 +492,22 @@ class LocalBackend:
         from access import mail_message as mm
         names = self.folder_names(f.folder)
         pair = f.header_pair()
+        cap = max(int(self.defaults.get('header_scan_max', HEADER_SCAN_MAX)), 1)
         tagged, notes, seen = [], [], set()
         for name in names:
             index = self.index(name)
-            rows = index.live(index.select(f))
+            if name in self._builds:
+                notes.append(f'the index of {name} was built from scratch ({self._builds.pop(name)} messages)')
+            rows = index.select(f)
             if pair:
-                rows, _scanned = index.header_filter(rows, pair[0], pair[1])
+                # the header is read before the status pass, on the newest candidates only, so that `live` reads the
+                # matches and not the whole folder; the cut is the one setting `header_scan_max`, and it is stated
+                candidates = len(rows)
+                rows, scanned = index.header_filter(rows[:cap], pair[0], pair[1])
+                if scanned < candidates:
+                    notes.append(f'--header checked the newest {scanned} of {candidates} messages of {name} left by the '
+                                 'other filters; narrow the search or raise header_scan_max')
+            rows = index.live(rows)
             if index.without_status() and self.NOTE_NO_STATUS not in notes:
                 notes.append(self.NOTE_NO_STATUS)
             tagged.extend((row, name) for row in rows)

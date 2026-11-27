@@ -29,6 +29,16 @@
           "timeout": 10
         }
       ]
+    },
+    {
+      "matcher": "Agent|Task|mcp__ccd_session__start_session|advisor",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 ~/.claude/hooks/agent-model-gate",
+          "timeout": 10
+        }
+      ]
     }
   ],
   "WorktreeCreate": [

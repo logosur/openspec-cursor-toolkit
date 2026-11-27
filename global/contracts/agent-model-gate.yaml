@@ -1,0 +1,32 @@
+piece: agent-model-gate
+dest: hooks/agent-model-gate
+kind: hook
+event: PreToolUse
+# The gate ships disabled, so probes see the default install: it allows everything and writes nothing.
+# What it denies once enabled is pinned by scripts/toolkit/tests/pieces/test_agent_model_gate.py.
+probes:
+  - name: unrelated tool passes silently
+    stdin: {tool_name: Bash, tool_input: {command: ls}}
+    exit: [0]
+    stdout: empty
+  - name: disabled by default, a subagent without a model passes
+    stdin: {tool_name: Agent, session_id: probe, tool_input: {description: explore, prompt: look around}}
+    exit: [0]
+    stdout: empty
+  - name: disabled by default, an Opus subagent without a reason passes
+    stdin: {tool_name: Agent, session_id: probe, tool_input: {description: implement, prompt: write it, model: opus}}
+    exit: [0]
+    stdout: empty
+  - name: disabled by default, the advisor is not counted
+    stdin: {tool_name: advisor, session_id: probe, tool_input: {}}
+    exit: [0]
+    stdout: empty
+  - name: a corrupt config keeps it disabled
+    stdin: {tool_name: Agent, session_id: probe, tool_input: {description: explore, prompt: look around}}
+    corrupt_config: true
+    exit: [0]
+    stdout: empty
+  - name: unparseable stdin fails open
+    stdin_raw: "{not json"
+    exit: [0]
+    stdout: empty

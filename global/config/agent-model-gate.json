@@ -1,0 +1,9 @@
+{
+  "enabled": false,
+  "require_explicit_model": true,
+  "opus_needs_marker": true,
+  "panel_pattern": "^Panel",
+  "advisor_max_per_day": 4,
+  "exempt_paths": [],
+  "austerity": false
+}

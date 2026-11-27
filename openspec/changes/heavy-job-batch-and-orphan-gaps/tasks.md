@@ -35,6 +35,6 @@ Requirement references: **HS** = `specs/heavy-job-semaphore-gaps/spec.md`. Desig
 
 ## 6. Close
 
-- [ ] 6.1 Privacy check, validator, piece tests (through heavy-job, detached).
-- [ ] 6.2 PR develop→main, merge, sync develop, install, drift, skill-lint.
+- [x] 6.1 Privacy check, validator, piece tests (through heavy-job, detached). Evidence (2026-11-27): the piece tests were verified through CI, not locally: the local detached `heavy-job` run was stopped while it was still queued, and CI ran the same tests. CI run 45952297396 (pull request) and CI run 45953485219 (main) are green; `python3 scripts/privacy-check.py --range e8d02f3..390d733 --require-private` reports 0 findings.
+- [x] 6.2 PR develop→main, merge, sync develop, install, drift, skill-lint. Evidence (2026-11-27): PR #33 merged (`8caf574`); installed; `drift` in sync; `supervisor-lock skill-lint` ok.
 - [ ] 6.3 Live check: an orphan of a test job is listed by `scan`; a series of batches is denied.

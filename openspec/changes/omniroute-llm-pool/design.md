@@ -7,7 +7,7 @@ Every statement below is marked **FACT** (measured or read in a source), **INFER
 | Statement | Kind | Evidence |
 |---|---|---|
 | A supervisor wake re-reads the whole context: 0.4–3 M tokens, typically 1 M, in 3–5 model calls, over 97 % cache reads | FACT | Transcripts of three supervisors, 2026-11-26/27 |
-| Soft wakes (`TIMEOUT`, `STATUS`) cost about 4.1 M tokens/h across three supervisors, 26 % of their main-transcript flow, at 4.6 wakes/h | FACT | Same measurement, 3.07 h window |
+| Soft wakes (a timeout with no event, or a session going from idle to busy) cost about 3.8 M tokens/h across three supervisors, 24 % of their main-transcript flow, at 3.6 wakes/h | FACT | Same measurement, 3.07 h window: 11 wakes, 11.7 M tokens |
 | OmniRoute serves an OpenAI-compatible `/v1` and a dashboard on loopback port 20128 by default; `omniroute serve --headless` runs without the dashboard | FACT | README, release line 3.8 |
 | `omniroute run claude --model <provider/model>` starts Claude Code with the gateway URL and key in its environment and writes nothing to disk; `omniroute configure claude` writes the global Claude settings | FACT | README, "Compatible CLIs" |
 | A combo is a named list of targets with a strategy and automatic fallback on quota, provider failure or model lockout; combos can be created from the CLI | FACT | README, "Combos" |
@@ -22,7 +22,7 @@ Every statement below is marked **FACT** (measured or read in a source), **INFER
 
 ## The idea in one paragraph
 
-The pool is a lever, not a replacement. With about 3 M free tokens a day against hundreds of millions spent, the only sensible use is the one where a small pool call avoids a large main-model call. A triage call of about 5 000 tokens that keeps a supervisor asleep avoids about 1 M tokens: a leverage near 200. **Leverage (main-model tokens avoided ÷ pool tokens spent) is the figure this design optimises and reports.** HYPOTHESIS, from the measured wake rate: triaging every soft wake of three supervisors needs about 17 M pool tokens a month, well inside the free quota.
+The pool is a lever, not a replacement. With about 3 M free tokens a day against hundreds of millions spent, the only sensible use is the one where a small pool call avoids a large main-model call. A triage call of about 5 000 tokens that keeps a supervisor asleep avoids about 1 M tokens: a leverage near 200. **Leverage (main-model tokens avoided ÷ pool tokens spent) is the figure this design optimises and reports.** HYPOTHESIS, from the measured wake rate: triaging every soft wake of three supervisors needs about 13 M pool tokens a month, well inside the free quota.
 
 ## Goals / Non-Goals
 
@@ -71,15 +71,15 @@ Power levels: 1 classification and routing, 2 short summaries and digests, 3 lon
 
 ### D5 — Task kinds are a catalog, each with a data class and a minimum power
 
-| Task kind | What the pool does | Input class | Min power | Leverage |
-|---|---|---|---|---|
-| `wake-triage` | For a soft watcher event, answer `sleep` or `wake` with a reason | internal | 2 | very high |
-| `wake-digest` | Turn the event, the register's tail and the work in flight into five lines for the supervisor | internal | 2 | high |
-| `turn-report-check` | Classify a child's end-of-turn report: done, handed back, asks, blocked | private | 3 | high |
-| `log-digest` | Reduce a long command or test output to failures and their locations | private | 2 | medium |
-| `census-summary` | Say in words what changed between two censuses | internal | 1 | medium |
-| `closing-evidence-summary` | Summarise the closer's checks for the register | private | 2 | medium |
-| `dialog-draft` | Draft the plain-language text of a question for the developer | private | 3 | low |
+| Task kind | What the pool does | Input class | Min power | From dial level | Highest mode | Leverage |
+|---|---|---|---|---|---|---|
+| `wake-triage` | For a soft watcher event, answer `sleep` or `wake` with a reason | internal | 2 | 1 | `auto` | very high |
+| `wake-digest` | Turn the event, the register's tail and the work in flight into five lines for the supervisor | internal | 2 | 1 | `assist` | high |
+| `census-summary` | Say in words what changed between two censuses | internal | 1 | 1 | `auto` | medium |
+| `turn-report-check` | Classify a child's end-of-turn report: done, handed back, asks, blocked | private | 3 | 2 | `assist` | high |
+| `log-digest` | Reduce a long command or test output to failures and their locations | private | 2 | 2 | `assist` | medium |
+| `closing-evidence-summary` | Summarise the closer's checks for the register | private | 2 | 2 | `assist` | medium |
+| `dialog-draft` | Draft the plain-language text of a question for the developer | private | 3 | 3 | `assist` | low |
 
 Never offloaded: decisions the supervisor or a panel takes, merges, deploys, anything that writes to a repository, anything addressed to the developer without the main model reading it first, security judgements.
 
@@ -109,7 +109,7 @@ The dial can be `manual` or `follow-usage`: a provider reports the main model's 
 
 ### D8 — Triage can only be wrong in the safe direction
 - Hard events always wake and are never sent to the pool: anything that says a session crashed, hung, waits for a person, appeared, disappeared, was cut, can be closed, that the skill changed, or that the developer wrote.
-- Soft events are the candidates: a timeout with no event, a status change with no turn end, and the repeated notices of `supervisor-wake-economy`.
+- Soft events are the candidates: a timeout with no event, a session going from idle to busy, and the repeated notices of `supervisor-wake-economy`. A session going from busy to idle is the end of a turn and is hard.
 - The brief sent is `internal` only: signal lines, counts, ages, the supervisor's own list of work in flight with its deadlines. No transcript text.
 - A `sleep` is honoured only if the next forced wake is not later than the nearest deadline of the work in flight and not later than a maximum silent time (config, default 2 h). After a configured number of consecutive sleeps (default 4) the next soft event wakes.
 - Anything other than a well-formed `sleep` (timeout, error, refusal, malformed answer, no eligible member, budget, gate) is a `wake`.

@@ -21,6 +21,7 @@ Tasks marked **[developer]** are his alone and block only what names them. Every
 - [ ] 2.4 Audit log and `llm-pool why <member>` (CT: every change is audited); verify that each state, mode, dial and enablement change writes an entry with actor and reason.
 - [ ] 2.5 CLI skeleton with `list`, `status`, `enable`, `disable`, `assign`, `unassign`, `mode`, `dial`, `project`, `stop`, `resume`, `history`, `judge`, `doctor`, all with `--json` (CT: one command line; kill switch; narrowing is always allowed); verify each command against the temporary home.
 - [ ] 2.6 A stub gateway for tests (local HTTP server with scripted answers, quotas, errors and delays); verify it is used by every test below and that no test reaches a real network.
+- [ ] 2.7 Installer behaviour: the module installs without the gateway, leaves the dial at 0, prints the steps that are the developer's, and never touches the Claude settings file (GW: global Claude configuration is never modified; the gateway is installed and connected by the developer; D2); verify that install, a simulated day of use and uninstall in a temporary home leave the settings file byte-identical.
 
 ## 3. `ask`: gate, budgets, fallback
 
@@ -32,6 +33,7 @@ Tasks marked **[developer]** are his alone and block only what names them. Every
 - [ ] 3.6 `llm-pool why <ledger id>` (CT: explain a routing decision); verify on a served row and on each kind of fallback row.
 - [ ] 3.7 Dial in `follow-usage` through a usage provider, manual when it is missing (RT: the dial can follow the main model's usage; D7); verify with a fake provider and with none.
 - [ ] 3.8 `doctor` complete, including the pinned version and reconciliation with the gateway's usage when 1.3 found it (GW: one pinned version; doctor; LG: usage is reconciled); verify each failure is listed in one run.
+- [ ] 3.9 Avoided-token estimate with its stated rule, judgement of rows, and the totals of spend, saving (raw and weighted) and leverage in `status` (LG: avoided tokens are an estimate; rows are judged afterwards; totals; D11); verify the weighted-figure scenario, the "no baseline" case and that shadow rows count as zero.
 
 ## 4. Console and control by prompt
 

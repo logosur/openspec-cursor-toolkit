@@ -14,11 +14,15 @@ Supervision SHALL work unchanged when the `llm-pool` module is not installed, th
 - **THEN** the watcher wakes the supervisor for every event exactly as before and prints nothing about the pool
 
 ### Requirement: Hard events are never triaged
-The watcher SHALL send to triage only soft events: a timeout with no event, a status change that is not the end of a turn, and the repeated notices of the wake-economy rules. Every other event SHALL wake the supervisor at once and SHALL NOT be sent to the pool. The list of soft events SHALL be configuration that can only be narrowed in an override.
+The watcher SHALL send to triage only soft events: a timeout with no event, a session going from idle to busy, and the repeated notices of the wake-economy rules. Every other event SHALL wake the supervisor at once and SHALL NOT be sent to the pool. The list of soft events SHALL be configuration that can only be narrowed in an override.
 
 #### Scenario: A session crashes while the pool is in auto
 - **WHEN** the watcher sees a crash event
 - **THEN** the supervisor is woken at once and no pool request is made
+
+#### Scenario: A turn ends
+- **WHEN** a session of the project goes from busy to idle
+- **THEN** the supervisor is woken at once, because a finished turn has to be verified on disk
 
 #### Scenario: A message from the developer
 - **WHEN** the developer writes in the supervisor's session

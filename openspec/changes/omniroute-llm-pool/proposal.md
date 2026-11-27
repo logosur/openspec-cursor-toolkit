@@ -10,7 +10,7 @@
 Supervision is where the tokens go, and most of them buy nothing.
 
 - FACT (measured 2026-11-26, one machine, 24 h): about 790 million input tokens a day, 97.9 % of them cache reads, 96 % on the strongest model. Two supervisors alone account for about 150 million a day each.
-- FACT (measured 2026-11-27, three supervisors, 7 h): a watcher wake costs between 0.4 and 3 million tokens, typically one million, in 3 to 5 model calls. Wakes that only confirm that nothing needs a decision (`TIMEOUT` heartbeats and `STATUS` changes) cost about 4 million tokens per hour across the three, a quarter of everything those supervisors spent.
+- FACT (measured 2026-11-27, three supervisors, 7 h): a watcher wake costs between 0.4 and 3 million tokens, typically one million, in 3 to 5 model calls. Soft wakes (a timeout with no event, or a session that merely started working) cost about 3.8 million tokens per hour across the three, a quarter of everything those supervisors spent.
 - FACT (OmniRoute README, release line 3.8, read 2026-11-27): OmniRoute is an MIT-licensed local gateway that puts many providers behind one endpoint, with named routing combos, quota-aware fallback, usage and cost tracking, a dashboard, a CLI with JSON output and an MCP server. Its own catalog puts the free quota that can really be used at about 90 million tokens a month, with the developer's own provider accounts.
 
 So the free quota of a month is about a tenth of one day of use: **a pool of free models cannot replace the main model**. What it can do is act as a lever. A pool call of a few thousand tokens that lets a supervisor stay asleep avoids a million tokens of the main model. The pool is worth having only where each of its tokens avoids many of the main model's.

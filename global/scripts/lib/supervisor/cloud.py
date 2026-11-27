@@ -97,6 +97,22 @@ def forget_cloud_session(session_id):
             util.write_json_atomic(path, data)
 
 
+def rename_cloud_session(session_id, title):
+    """Record a new title in the shared cache after renaming a session, so the next census does not redo it."""
+    if providers.cloud_tests_module() is None:
+        return
+    path = os.path.join(cloud_dir(), 'active.json')
+    with open(path + '.lock', 'a+') as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        data = util.read_json(path)
+        if isinstance(data, dict) and data.get('ok'):
+            key = providers.cloud_tests_module().sid_key(session_id)
+            for row in data.get('sessions') or []:
+                if providers.cloud_tests_module().sid_key(row.get('id')) == key:
+                    row['title'] = title
+            util.write_json_atomic(path, data)
+
+
 def project_slugs(project):
     """GitHub owner/repo (lower case) of the project's repositories: the checkout, and in a workspace its nested repos."""
     ct = providers.cloud_tests_module()

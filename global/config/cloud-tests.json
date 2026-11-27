@@ -1,4 +1,5 @@
 {
   "excluded_names": [],
-  "excluded_owners": []
+  "excluded_owners": [],
+  "runner_session_title": "Tests en la nube de {project}"
 }

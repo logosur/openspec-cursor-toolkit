@@ -83,7 +83,7 @@ cómo se deshace. La que deba confirmar el desarrollador entra en la cola con
 Un diálogo detiene la sesión que lo abre hasta que se contesta. Si lo abre la supervisora se para todo el proyecto: por
 eso lo abre una sesión aparte.
 
-1. **Cuál es:** una por proyecto, con el título `Sesión de preguntas de <project>` (con el nombre del proyecto; lo fija `questions_session_title` en la configuración `supervision`), que
+1. **Cuál es:** una por proyecto, con el título que fija `questions_session_title` en la configuración `supervision` (`$L titles --session <id>` lo imprime con el nombre del proyecto), que
    los hooks reconocen. Se abre en el turno de invocación con el modelo de la fila Mensajero, el modo heredado y sin
    worktree, y se registra con `$L beat --session <id> --mailbox <id suyo>`. Antes de abrir otra, `$L status --json`.
    Si falta fuera de ese turno, las preguntas esperan en `ask-queue`: ni tarjetas ni otra sesión.

@@ -125,7 +125,8 @@ def _toolkit_config(piece, defaults):
         return dict(defaults)
 
 
-CONFIG = _toolkit_config('cloud-tests', {'excluded_names': [], 'excluded_owners': []})
+CONFIG = _toolkit_config('cloud-tests', {'excluded_names': [], 'excluded_owners': [],
+                                         'runner_session_title': 'Tests en la nube de {project}'})
 # Projects whose code never leaves the machine through the cloud, by checkout or repository name and by GitHub owner.
 EXCLUDED_NAMES = {n.strip().lower() for n in CONFIG['excluded_names']}
 EXCLUDED_OWNERS = {o.strip().lower() for o in CONFIG['excluded_owners']}
@@ -241,6 +242,7 @@ def ledger(proj):
             with open(path) as f:
                 data.update(json.load(f))
         data['common'] = proj.common  # local-guard finds the ledger of a directory by its git common dir
+        data['name'] = proj.name      # the runner title names the project; `sweep` reads it from here
         yield data
         tmp = path + '.tmp'
         with open(tmp, 'w') as f:
@@ -542,6 +544,8 @@ def dispatch(proj, data, now, fresh=None):
         if data.get('launch_backoff_until', 0) > now:
             return None
         session, err = launch_runner(proj, line)
+        if session:
+            rename_session(session, runner_title(proj.name))  # a failure here never fails the launch
         if not session:
             if rid == fresh:
                 raise LaunchFailed(err or 'no session id in the CLI output')
@@ -1437,6 +1441,15 @@ def api_call(method, path, body=None):
             st = json.load(f)
         if method == 'GET':
             return 200, {'data': [x for x in st['sessions'] if x.get('status') == 'active'], 'next_cursor': None}
+        if method == 'PUT':  # a rename: PUT /v1/code/sessions/<id> {"title": …}
+            sid = path.rstrip('/').split('/')[-1]
+            hit = [x for x in st['sessions'] if x['id'] == sid]
+            for x in hit:
+                x['title'] = (body or {}).get('title')
+            st['renamed'] = st.get('renamed', []) + [[sid, (body or {}).get('title')]]
+            with open(API_FAKE, 'w') as f:
+                json.dump(st, f)
+            return (200 if hit else 404), {}
         sid = path.rstrip('/').split('/')[-2]
         hit = [x for x in st['sessions'] if x['id'] == sid]
         for x in hit:
@@ -1503,6 +1516,55 @@ def ledger_keys():
     if not os.path.isdir(STATE_DIR):
         return []
     return sorted(n[:-5] for n in os.listdir(STATE_DIR) if n.endswith('.json') and n != 'account-limit.json')
+
+
+def runner_title(name):
+    """The title of the runners of the project called `name` (config `runner_session_title`)."""
+    return CONFIG['runner_session_title'].replace('{project}', str(name))
+
+
+def rename_session(session, title):
+    """Sets the title of a cloud session with PUT /v1/code/sessions/<id> (the call the CLI makes itself; the id is the
+    `cse_…` form the API lists, `session_…` is what the CLI prints). Returns the HTTP status, or None when the API cannot
+    be reached. Never raises: a title is cosmetic and must not fail a launch or a sweep."""
+    try:
+        code, _ = api_call('PUT', f'/v1/code/sessions/cse_{sid_key(session)}', {'title': title})
+        return code
+    except Exception:
+        return None
+
+
+def rename_targets(data, sessions, now, archiving=()):
+    """(session, expected title) for the active runners this ledger proves are its own whose title differs. The proof is
+    the one `sweep_targets` asks for, minus the idle and busy rules (a working runner is renamed too). A ledger written
+    before it recorded the project name takes it from the checkout of its git common dir, else renames nothing: the
+    title is never guessed."""
+    name = data.get('name')
+    common = data.get('common') or ''
+    if not name and os.path.basename(common) == '.git':   # a ledger from before it recorded the name: Project.name's rule
+        name = os.path.basename(os.path.dirname(common))
+    if not name or not isinstance(data.get('runs'), dict):
+        return []
+    want = runner_title(name)
+    r = data.get('runner') or {}
+    proven = {sid_key(x.get('session')) for x in data.get('retired') or []}
+    proven |= {sid_key(e.get('session')) for e in data['runs'].values() if e.get('session')}
+    proven.add(sid_key(r.get('session')))
+    proven.discard('')
+    skip = {sid_key(s.get('id')) for s in archiving}
+    repo = (data.get('repo') or '').lower()
+    out = []
+    for s in sessions:
+        k = sid_key(s.get('id'))
+        if k not in proven or k in skip or s.get('title') == want:
+            continue
+        if s.get('environment_kind') != RUNNER_ENV_KIND or s.get('status') != 'active':
+            continue
+        urls = [str(x.get('url', '')).lower() for x in (s.get('config') or {}).get('sources') or [] if isinstance(x, dict)]
+        if repo and any(urls) and not any(repo in u for u in urls):
+            continue
+        out.append((s, want))
+    return out
 
 
 def sweep_targets(data, sessions, now):
@@ -1577,6 +1639,18 @@ def cmd_sweep(args):
                 with ledger_by_key(key) as data:
                     data['archived'] = (data.get('archived') or [])[-(100 - len(done)):] + \
                         [{'session': sid, 'at': now} for sid in done]
+            with ledger_by_key(key) as data:
+                renames = rename_targets(data, sessions, now, archiving=targets)
+            for s, want in renames:
+                line = f"{key} {s['id']} «{s.get('title') or ''}» -> «{want}»"
+                if args.dry_run:
+                    print(f'WOULD_RENAME {line}')
+                    continue
+                code = rename_session(s['id'], want)
+                if code == 200:
+                    print(f'RENAMED {line}')
+                elif code not in (403, 404):  # another account's session, or not listed yet: the next tick retries
+                    print(f'WARN rename {line} HTTP {code}')
         except (OSError, ValueError, ApiUnavailable) as err:
             print(f'WARN {key}: {err}')
 

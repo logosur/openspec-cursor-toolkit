@@ -23,6 +23,11 @@
   "closer_session_titles": [
     "cierre de sesiones de"
   ],
+  "supervisor_session_title": "Supervisora de {project}",
+  "closer_session_title": "Cierre de sesiones de {project}",
+  "worker_session_title": "{project} · {task}",
+  "remote_previous_suffix": " (conexión anterior)",
+  "titles_sync": true,
   "skill_file": "~/.claude/skills/supervisa-sesiones/SKILL.md",
   "guard_section": "## Motivo de la guardia",
   "skill_anchors": [

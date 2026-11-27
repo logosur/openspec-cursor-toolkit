@@ -69,7 +69,7 @@ La lista completa está en `reference/anti-patrones.md` y se lee al arrancar.
 ## §0 — Una supervisora por proyecto
 
 ```bash
-$L acquire --session <id de get_session "self"> --title "<título>" --registry "$($L registry-dir)/SUPERVISOR-<YYYYMMDD-HHMM>.md"
+$L acquire --session <id de get_session "self"> --registry "$($L registry-dir)/SUPERVISOR-<YYYYMMDD-HHMM>.md"
 ```
 
 - `0 ACQUIRED` sigue; `0 RESUMED` reanuda su registro; `3 HELD`: hay otra supervisora y esta sesión no supervisa;

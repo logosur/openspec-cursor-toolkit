@@ -7,7 +7,7 @@ Defines what the pool knows about each model: what a person decided about it, wh
 ## ADDED Requirements
 
 ### Requirement: Each member has a described identity
-A pool member SHALL have: an id (kebab-case, unique), the gateway target it maps to, a display name, a description of at most 160 characters saying what kind of task it is good for, a power level from 1 to 5, the data class it accepts (`public`, `internal` or `private`), its billing (`free`, `plan`, `paid` or `local`), its provider and, when its billing is `paid`, a price per million tokens in and out.
+A pool member SHALL have: an id (kebab-case, unique), the gateway target it maps to, a display name, a description of at most 160 characters saying what kind of task it is good for, a power level from 1 to 5, the data class it accepts (`public`, `internal` or `private`), its billing (`free`, `plan`, `paid` or `local`), its provider, a daily token budget unless it is local, and, when its billing is `paid`, a price per million tokens in and out.
 
 #### Scenario: Member without a description
 - **WHEN** the definitions hold a member with no description
@@ -47,7 +47,7 @@ The task-kind catalog (each kind's input class, minimum power and highest mode),
 - **THEN** 2 hours is used and doctor reports it
 
 ### Requirement: Member states
-A member SHALL be in exactly one state: `active`, `paused`, `exhausted`, `cooldown`, `blocked` or `retired`. Only `active` members receive traffic. A member that is defined but not enabled by command is `paused`.
+A member SHALL be in exactly one state: `active`, `paused`, `exhausted`, `cooldown` or `blocked`. Only `active` members receive traffic. A member that is defined but not enabled by command is `paused`.
 
 #### Scenario: Quota reset
 - **WHEN** an `exhausted` member's reset time passes and the gateway reports quota again
@@ -91,8 +91,12 @@ The config piece in the repository SHALL contain an empty list of members and no
 - **THEN** `llm-pool list` shows no member and says how to add one
 
 ### Requirement: Local models can be members
-A member with billing `local` SHALL be reached through the gateway like any other, SHALL be exempt from provider terms and SHALL accept `private` when its definition says so. Starting a local model SHALL go through the machine's heavy-job queue when it is installed; without it the module SHALL NOT start one.
+With the `local-models` extension on, a member with billing `local` SHALL be reached through the gateway like any other, SHALL be exempt from provider terms and SHALL accept `private` when its definition says so. Starting a local model SHALL go through the machine's heavy-job queue when it is installed; without it the module SHALL NOT start one. With the extension off, a local member SHALL be `blocked`.
 
 #### Scenario: Local member, queue not installed
 - **WHEN** a local member is not running and the machine has no heavy-job queue
 - **THEN** the member is `blocked` with the reason "not running" and nothing is started
+
+#### Scenario: Extension off
+- **WHEN** the `local-models` extension is off and a local member is defined
+- **THEN** it is `blocked` with the reason "extension off"

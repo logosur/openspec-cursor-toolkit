@@ -2,6 +2,7 @@
 
 > **Date:** 2026-11-27 · **Mode:** A (existing change folder) · `main` @ `95991f4`
 > **Real status:** gaps verified → hydrated in `proposal.md`, `design.md`, `tasks.md` and the seven spec deltas. No product code was written.
+> **Second round:** a fresh reviewer read the hydrated documents (commit `56e46c6`) and found 16 more gaps, section E; they are hydrated too. Rows of that section cite the first hydration as `hyd:<file>`; `git show 56e46c6:openspec/changes/omniroute-llm-pool/<file>` reproduces them.
 > **Reviewed draft:** the change as first committed (`13b2264`). Rows about the documents themselves cite that draft as `draft:<file>:<line>`; `git show 13b2264:openspec/changes/omniroute-llm-pool/<file>` reproduces them.
 
 Paths are relative to the repository. `sup/` stands for `global/scripts/lib/supervisor/`, `skill/` for `global/skills/supervisa-sesiones/reference/`.
@@ -13,10 +14,10 @@ Paths are relative to the repository. `sup/` stands for `global/scripts/lib/supe
 | 1 | Primary code paths: the watcher the triage plugs into | One read-only reviewer over `sup/watch.py`, `cloud.py`, `machine_queue.py`, `lock.py`, `unattended.py`, the skill's references | 15 candidates; 9 FACT after re-check |
 | 2 | Adjacent integrations: modules, installer, config merge, validator, tests, CI | One read-only reviewer over `scripts/toolkit/`, `scripts/validate-toolkit.py`, `global/modules/`, `examples/override-full/` | 15 candidates; 13 FACT, 3 "no gap" |
 | 3 | Operations, security, economics, internal consistency | One adversarial reviewer over the eleven files of the draft | 25 candidates; 16 FACT, 1 already covered |
-| 4 | Cross-verify: every citation re-opened on the merged tree by the orchestrator; then a fresh reviewer over the hydrated documents | `grep -n` / `sed -n` on each cited line; reviewer given the files, not the findings | Citations: 5 line numbers corrected, 2 downgraded to INFERENCE. Reviewer: see "Verification" |
-| 5 | Stop | Remaining candidates are INFERENCE, UNKNOWN or already covered | Early-stop criterion met |
+| 4 | Cross-verify: every citation re-opened on the merged tree by the orchestrator; then a fresh reviewer over the hydrated documents | `grep -n` / `sed -n` on each cited line; reviewer given the files, not the findings | Citations: 5 line numbers corrected, 2 downgraded to INFERENCE. Reviewer: 16 gaps in the hydration itself (section E), two of them High; all hydrated in a second round |
+| 5 | Re-check of the second round | A second fresh reviewer over the diff of the second round; a script that matches every requirement title against the tasks | See "Verification" |
 
-The 55 raw candidates overlap; they consolidate into the 65 rows below (some candidates were split, several merged).
+The 55 raw candidates of iterations 1 to 3 overlap; they consolidate into rows G-01 to G-65 (some candidates were split, several merged). Iteration 4 added G-66 to G-82.
 
 ## Consolidated matrix
 
@@ -77,7 +78,7 @@ Requirement names: **GW** gateway, **RG** registry, **RT** routing, **CT** contr
 | G-37 | High | The digest task kinds could never be promoted: shadow answers are returned to nobody | — (INFERENCE from `draft:specs/llm-pool-routing/spec.md:24`, `:35`) | HYDRATED | RT "Assist-only task kinds are promoted by review"; CS "Shadow answers can be reviewed" |
 | G-38 | High | The "avoided tokens" estimate was inflated: the median included hard wakes, unjudged sleeps counted, a digest counted even if the original was read | — (INFERENCE from `draft:specs/llm-pool-ledger/spec.md:24`) | HYDRATED | LG "Avoided tokens are an estimate with a stated rule"; LG "Digests, shadow rows and fallbacks have their own rule" |
 | G-39 | High | The headline leverage was in raw tokens and the weighting that decides the economics was measured last | `draft:design.md:25`; `draft:tasks.md:64` | HYDRATED | T 1.7; LG "Totals show spend, saving and leverage, raw and weighted"; D11 |
-| G-40 | High | No criterion said when the pool has failed, and no baseline without a model was compared | absent from the draft | HYDRATED | SO "A simulator compares three policies before any triage is built"; SO "Triage is built only if the pool beats the fixed rule"; SO "The triage is switched off when it does not pay"; D15 |
+| G-40 | High | No criterion said when the pool has failed, and no baseline without a model was compared | absent from the draft | HYDRATED | SO "A simulator replays recorded wakes before any triage is built"; SO "The simulator compares today with a fixed rule"; SO "Nothing is built for a small saving, and a safe fixed rule wins"; SO "The triage is switched off when it does not pay"; D15 (rewritten by G-71) |
 | G-41 | Med | `internal` allowed session titles; provider retention was read and never used | `draft:design.md:86`; `draft:specs/llm-pool-registry/spec.md:50` | HYDRATED | RG "Provider terms decide the data class"; D5 |
 | G-42 | Med | Nothing checked which model answered; the gateway's compression was ignored; proposal and design disagreed on who owns combos | `draft:proposal.md:73` against `draft:design.md:52` | HYDRATED | GW "The answering model is checked"; GW "Doctor lists what the gateway sends elsewhere" |
 | G-43 | Med | Gateway features that send data elsewhere were not all checked | `draft:specs/llm-pool-gateway/spec.md:42` | HYDRATED | GW "Doctor lists what the gateway sends elsewhere"; T 1.6 |
@@ -103,11 +104,33 @@ Requirement names: **GW** gateway, **RG** registry, **RT** routing, **CT** contr
 | G-58 | — | The catalog's routing rules do not apply to a skill under `global/skills` | — | REJECTED | `scripts/validate-toolkit.py:457-461` runs the routing check and the `global-skill` collision rule there |
 | G-59 | Med | How long the gateway keeps its own call log, and whether that can be bounded | — | UNKNOWN | T 1.6 records it; until then `private` goes only to members whose terms allow it, and the gateway's log stays on the same machine |
 | G-60 | Low | On a machine with other local users, the console's address (with its token) is visible in the process list | — | INFERENCE | Stated as a limit in D12; single-user machine assumed |
-| G-61 | High | Whether a pool model, given the same structured brief, sleeps more soft wakes safely than a fixed rule | — | UNKNOWN | The question stage 0 answers: T 6.1–6.3. Until then the triage tasks are not built |
+| G-61 | High | Whether a fixed rule with no model can sleep the soft wakes safely and, if not, whether a pool model given the same brief can | — | UNKNOWN | The question stage 0 answers: T 6.1–6.3. Until then the triage tasks are not built |
 | G-62 | Med | A wake after a long silence may cost more if the prompt cache expired meanwhile | — | INFERENCE | Stated as a limit of the estimate in D11; the field result (T 7.4) measures real usage |
 | G-63 | Low | Clock changes move the windows "within 24 hours" and the schedule | — | INFERENCE | Not specified; wall-clock time is used and the effect is one window, once |
 | G-64 | Low | The ledger file never shrinks | — | INFERENCE | Out of version 1; figures are purged after 400 days |
 | G-65 | Med | How the main model's usage limit weighs cache reads | — | UNKNOWN | T 1.7, before anything is built; weighted figures read "not set" until then |
+
+### E. Found in the hydrated documents by the fresh reviewer (iteration 4)
+
+| ID | Sev | Gap | Evidence (FACT) | Status | Req |
+|----|-----|-----|-----------------|--------|-----|
+| G-66 | Med | `census-summary` was in the catalog and nothing would ever call it | `hyd:design.md` D5 table; no task and no SO requirement named it | HYDRATED | Removed. RT "The catalog of version 1 has five task kinds"; D5 |
+| G-67 | Med | `stop` was said to leave `follow-usage`, and `resume` to restore the previous dial: two rules for one flag | `hyd:design.md` D7 against `hyd:specs/llm-pool-control/spec.md` "Kill switch" | HYDRATED | CT "Kill switch" (scenario "Stop and resume"); D7 |
+| G-68 | High | In `shadow` the verdict went to the ledger only, so the judging step, which reads the journal, never showed it to the supervisor: shadow rows could not be judged and no pair could reach 50 judged samples | `hyd:specs/supervision-offload/spec.md` "Shadow triage…" against "The supervisor judges the sleeps…" | HYDRATED | SO "Shadow triage changes nothing and is judged by the same question"; D8; T 5.5 |
+| G-69 | Med | Nothing said which member answers when several are eligible, and "quota close to expiry first" relied on data the gateway may not give | `hyd:design.md` D10 | HYDRATED | RT "The member is chosen by a fixed order"; D10 |
+| G-70 | Med | After a change of the gateway pin, `auto` pairs stayed trusted on a scorecard earned with another version | `hyd:design.md` D3 ("re-checked afterwards", no rule) | HYDRATED | GW "One pinned gateway version" (scenario "The pin is updated"); D3 |
+| G-71 | High | The go/no-go could not be passed as written: it asked the pool to save 1.25 times what the fixed rule saves, and a model can only sleep a part of what the rule sleeps | `hyd:design.md` D15; `hyd:specs/supervision-offload/spec.md` "Triage is built only if the pool beats the fixed rule" | HYDRATED | SO "Nothing is built for a small saving, and a safe fixed rule wins"; SO "Triage is built only if a model is safer than the fixed rule"; D15; T 6.1, 6.3 |
+| G-72 | High | The judging vocabulary did not hold together: "agreed" and "missed" were answers and labels at once, "agreement" had no formula, and a model that always wakes scored as perfect | `hyd:specs/llm-pool-ledger/spec.md` "Rows are judged…", "Scorecards per pair" | HYDRATED | LG "Rows are judged by an explicit act"; LG "Scorecards per pair" (scenario "A model that always wakes"); D8 |
+| G-73 | Med | No command carried the supervisor's answers from the journal to the pool's ledger | `hyd:design.md` D8 ("records the answers with one command", unnamed) | HYDRATED | SO "The supervisor judges the sleeps with an explicit command"; T 5.3 |
+| G-74 | Med | A member that does not accept the data class had two outcomes, `refused by gate` and `no eligible member` | `hyd:specs/llm-pool-routing/spec.md` "Privacy gate before every send" | HYDRATED | RT "Privacy gate before every send"; D9 |
+| G-75 | Med | The outcome list had no name for success and none for a key file or URL the module refuses to use | `hyd:specs/llm-pool-routing/spec.md` "Every outcome has its own exit code" | HYDRATED | RT "The outcomes are a fixed list" |
+| G-76 | Med | Three things the design used had no command or field: the dial of one project, the class of `assign` (widening or not), a member's daily budget | `hyd:design.md` D7, D10, D13 | HYDRATED | CT "One command line for every control action"; CT "Narrowing is always allowed"; RG "Each member has a described identity"; RT "The free quota is rationed" |
+| G-77 | Med | The `--order` check looked only at whether the developer was present, not at whether he wrote that order | `sup/human_turns.py:126` (returns his text when asked) | HYDRATED | CT "A widening action is accepted only from the developer" (scenario "The developer wrote about something else"); D13 |
+| G-78 | Low | Left to the implementer: the thresholds of `follow-usage`, the list of reason codes, the fixed instruction and temperature of a request | `hyd:design.md` D7, D8, D11 | HYDRATED | RT "Usage thresholds have defaults and do not flap"; SO "The answer is a verdict in a fixed format"; RT "Requests are sent the same way every time"; D18 |
+| G-79 | Low | Loose ends in the specs: a `retired` state with no transition; a scenario that cannot be tested because the watcher never watches its owner's session; extensions with no named switch; the opener's default | `sup/watch.py:144-145` | HYDRATED | RG "Member states"; RG "Local models can be members"; CS "A local app window with no external dependency"; CS "Extended views appear only when their extension is on" |
+| G-80 | Low | Four citations of the hydrated design did not support their sentence, and the toolkit's checked loader cannot validate a list of members | `scripts/toolkit/apply.py:46-64`, `:144-154`; `scripts/toolkit/modules.py:26`; `global/scripts/lib/toolkit_config.py:48-53`; `sup/census.py:201-207` | HYDRATED | D2, D4, D12, D16 corrected |
+| G-81 | Low | Tasks cited a requirement title that does not exist, and no task read the members' quota and state from the gateway | `hyd:tasks.md` 1.6, group 3 | HYDRATED | T 1.6, T 3.12 (new) and the requirement lists of T 2.6, 3.1–3.11, 4.1–4.7, 5.3–5.7 |
+| G-82 | Med | The simulator reads "needed" from what the supervisor did: a wake where it should have acted and did not counts as not needed | — | INFERENCE | Stated as a limit of the method in D15; unclassifiable wakes are listed, not guessed |
 
 ## Useful casuistics
 
@@ -117,13 +140,17 @@ Requirement names: **GW** gateway, **RG** registry, **RT** routing, **CT** contr
 - **The model always says `sleep`.** It cannot be promoted: ten of the judged samples must be cases where the supervisor was needed.
 - **The gateway falls back to another model.** The answer is discarded and the member blocked.
 - **A paid model with no reported cost.** The price in the definitions gives the cost; without a price the member is blocked.
-- **`stop` while a project has its own dial.** The stop flag is checked first and the machine's wins.
+- **`stop` while a project has its own dial.** The stop flag is checked first and the machine's wins. After `resume` the dial is what it was.
+- **The model always says `wake`.** It never misses and it saves nothing: its wakes when the supervisor was not needed are `overwake` and pull its agreement down.
+- **The fixed rule turns out safe.** Then no model is used for triage and the rule becomes a change of its own.
+- **The developer wrote in the session about something else.** A widening command with an order he did not write is refused.
 - **An override tries to add a crash to the soft list.** Ignored and reported; the list is a constant.
 
 ## Out of v1
 
 - Triage of repeated notices (`ALLIDLE`, `QUEUED`, `SLOTHELD`): their state is consumed when generated and the back-off already rations them.
 - `wake-digest`: its input was private register text and the watcher prints the slept list itself.
+- `census-summary`: no caller.
 - A fixed rule in the watcher with no model: it is the comparison of stage 0 and, if it wins, a change of its own.
 - Headless pool workers: their own change, after the spike of T 8.3.
 - Multi-user machines, SQLite compaction, clock-change handling.
@@ -133,8 +160,8 @@ Requirement names: **GW** gateway, **RG** registry, **RT** routing, **CT** contr
 | Class | Rows |
 |-------|------|
 | FACT pending hydrate (`/mejora-tarea`) | 0 |
-| HYDRATED (spec OK; `/aplica-tarea` only) | 53 |
-| Non-blocking (INFERENCE / REJECTED / ALREADY / UNKNOWN) | 12 |
+| HYDRATED (spec OK; `/aplica-tarea` only) | 69 |
+| Non-blocking (INFERENCE / REJECTED / ALREADY / UNKNOWN) | 13 |
 
 **Gaps pending (mejora + apply): 0**
 

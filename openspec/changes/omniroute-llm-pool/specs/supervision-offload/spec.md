@@ -13,19 +13,49 @@ Supervision SHALL work unchanged when the `llm-pool` module is not installed, th
 - **WHEN** the supervision module runs on a machine without `llm-pool`
 - **THEN** the watcher wakes the supervisor for every event exactly as before, prints nothing about the pool, and the supervision self-test passes unchanged
 
-### Requirement: A simulator compares three policies before any triage is built
-Before any triage code is written for the watcher, a simulator SHALL replay recorded supervisor wakes under three policies: today's behaviour; a fixed rule with no model (a batch made only of idle-to-busy lines never wakes, and a timeout wakes only at the bounds of this spec); and pool triage with a stated share of soft wakes slept and its pool tokens. It SHALL report wakes and main-model tokens, raw and weighted, for each policy.
+### Requirement: A simulator replays recorded wakes before any triage is built
+Before any triage code is written for the watcher, a simulator SHALL read recorded supervisor wakes from the transcripts and classify each soft wake as one where the supervisor was needed or not. The supervisor was needed when, in that tick, it did more than its routine of census, register and re-arming the watcher.
 
 #### Scenario: A known transcript
-- **WHEN** the simulator runs on a seeded transcript whose soft and hard wakes are known
-- **THEN** it reports the known counts for each of the three policies
+- **WHEN** the simulator runs on a seeded transcript whose soft, hard, needed and routine wakes are known
+- **THEN** it reports the known counts of each
 
-### Requirement: Triage is built only if the pool beats the fixed rule
-`wake-triage` SHALL be implemented only when the simulator's report shows the pool policy saving at least 1.25 times what the fixed rule saves and at least 5 % of the supervisors' weighted flow, or when the developer sets other thresholds in writing after reading it. Otherwise the fixed rule SHALL be proposed as a change of its own and the triage requirements below SHALL NOT be implemented.
+### Requirement: The simulator compares today with a fixed rule
+The simulator SHALL report, for today's behaviour and for a fixed rule with no model that sleeps every soft wake within the bounds of this spec: the wakes, the main-model tokens raw and weighted, and the needed wakes the rule would have slept, with how long each would have waited.
 
-#### Scenario: The fixed rule is as good
-- **WHEN** the simulation shows the fixed rule saving 90 % of what pool triage would save
-- **THEN** the decision recorded is "no-go for wake-triage", the triage tasks are closed as not built, and the fixed rule is proposed separately
+#### Scenario: The fixed rule on a known transcript
+- **WHEN** the simulator runs on the seeded transcript
+- **THEN** it reports the known saving of the fixed rule and the known list of needed wakes it would have slept
+
+#### Scenario: No weights measured
+- **WHEN** the cache weights of the usage limit could not be measured
+- **THEN** the report gives raw tokens only and says so in its first lines
+
+### Requirement: Nothing is built for a small saving, and a safe fixed rule wins
+The decision SHALL be recorded from the simulator's report. Nothing SHALL be built for triage when the fixed rule saves under 5 % of the supervisors' weighted flow (raw, with a warning, when no weights could be measured). When the fixed rule would have slept at most one needed wake in 100, it SHALL be proposed as a change of its own and `wake-triage` SHALL NOT be built.
+
+#### Scenario: The fixed rule is safe
+- **WHEN** the report shows the fixed rule sleeping 1 needed wake in 300 soft wakes
+- **THEN** the decision is "no-go for wake-triage", the triage tasks are closed as not built, and the fixed rule is proposed separately
+
+#### Scenario: The saving is too small either way
+- **WHEN** the fixed rule would save 2 % of the supervisors' weighted flow
+- **THEN** the decision is "no-go" and nothing is built for triage
+
+### Requirement: Triage is built only if a model is safer than the fixed rule
+When the fixed rule is not safe, `wake-triage` SHALL be built only if a candidate member, replayed on the same recorded wakes, sleeps at most one needed wake in 100 and keeps at least half of the fixed rule's saving. The developer MAY set other thresholds in writing after reading the report.
+
+#### Scenario: The fixed rule is unsafe and a model is not better
+- **WHEN** the fixed rule would have slept 9 needed wakes in 100 and the replayed member sleeps 6
+- **THEN** the decision is "no-go": neither is built
+
+#### Scenario: A model is safe and keeps the saving
+- **WHEN** the fixed rule would have slept 9 needed wakes in 100, and the replayed member sleeps 1 in 100 and keeps 60 % of the saving
+- **THEN** the decision is "go" and the triage tasks are opened
+
+#### Scenario: No member can be replayed
+- **WHEN** the fixed rule is unsafe and no gateway is installed to replay a member
+- **THEN** the decision stays open, nothing is built, and the report says what is missing
 
 ### Requirement: Only two shapes of event are soft
 The watcher SHALL send to triage only: (a) a batch of events made only of lines that say a session went from idle to busy; (b) a timeout with no event, and only when the watcher was armed with a wake-by time. A batch that contains any other line SHALL wake the supervisor at once and nothing SHALL be sent to the pool. An event kind the code does not list as soft SHALL be hard.
@@ -45,10 +75,6 @@ The watcher SHALL send to triage only: (a) a batch of events made only of lines 
 #### Scenario: A timeout without a wake-by time
 - **WHEN** the watcher was armed without a wake-by time and its timeout passes
 - **THEN** the supervisor is woken and no pool request is made
-
-#### Scenario: A message from the developer
-- **WHEN** the developer writes in the supervisor's session
-- **THEN** no triage runs for that wake
 
 ### Requirement: Guard mode and repeated notices are never triaged
 Triage SHALL NOT run in guard mode. The repeated notices of the wake-economy rules SHALL NOT be triaged. The soft list SHALL be a constant of the code that configuration can only shorten.
@@ -73,7 +99,7 @@ The brief sent for `wake-triage` SHALL contain only: the kinds of the events; pe
 - **THEN** none of those texts appears in the brief, and a test proves it with marker strings planted in each
 
 ### Requirement: The answer is a verdict in a fixed format
-The triage answer SHALL be accepted only as one JSON object with a `verdict` of `sleep` or `wake` and a `reason` taken from a fixed list of codes. A timeout, an error, a refusal, text outside the object, another verdict, an unknown reason code, any exit code other than success or a response from a model other than the member's SHALL wake the supervisor.
+The triage answer SHALL be accepted only as one JSON object with a `verdict` of `sleep` or `wake` and a `reason` from this list: `started-work`, `nothing-changed`, `deadline-near`, `many-sessions`, `long-busy`, `unsure`. A timeout, an error, a refusal, text outside the object, another verdict, an unknown reason, any exit code other than success or a response from a model other than the member's SHALL wake the supervisor.
 
 #### Scenario: The model answers with prose
 - **WHEN** the triage answer has text around the object
@@ -143,10 +169,10 @@ When the supervisor is woken after one or more honoured sleeps, the watcher's ou
 - **THEN** the judging step of that turn lists both from the journal
 
 ### Requirement: The supervisor judges the sleeps with an explicit command
-The supervision skill's tick SHALL have a step, right after reading the watcher's output, that reads the journal and records for each slept event whether it needed the supervisor before now: `agreed` when it did not, `missed` when it did. The command that records the answers SHALL close the stretch. A slept event that is not judged SHALL stay `unknown`.
+The supervision skill's tick SHALL have a step, right after reading the watcher's output, that lists the journal with one supervision command and records for each entry whether the supervisor was `needed` or `not-needed` for that event before now. One supervision command SHALL record the answers, pass them to the pool's ledger and close the stretch. An entry that is not judged SHALL stay `unknown` and SHALL be listed again at the next wake.
 
 #### Scenario: Nothing was missed
-- **WHEN** the supervisor judges every slept event as not needing it
+- **WHEN** the supervisor judges every slept event as `not-needed`
 - **THEN** the rows are `agreed`, the journal is empty and a new stretch starts at the next sleep
 
 #### Scenario: The tick ends without the step
@@ -154,15 +180,19 @@ The supervision skill's tick SHALL have a step, right after reading the watcher'
 - **THEN** the rows stay `unknown`, they add nothing to the saving, and the next wake lists them again
 
 ### Requirement: Shadow triage changes nothing and is judged by the same question
-In `shadow`, the watcher SHALL run the triage, record the verdict and wake the supervisor exactly as without the pool. The row SHALL be judged in the same step and by the same question as a sleep: whether the supervisor was needed for that event. A verdict of `sleep` for an event that needed the supervisor is a false sleep.
+In `shadow`, the watcher SHALL run the triage, wake the supervisor exactly as without the pool, and append the verdict to the same journal, marked as shadow, so that the judging step lists it. The entry SHALL be judged by the same question as a sleep: whether the supervisor was needed for that event.
 
 #### Scenario: Shadow sleep, supervisor was needed
-- **WHEN** the pool said `sleep` in shadow and the supervisor judges that the event needed it
+- **WHEN** the pool said `sleep` in shadow and the supervisor judges that it was `needed`
 - **THEN** the row is `missed` and counts as a false sleep in the pair's scorecard
 
 #### Scenario: Shadow sleep, routine tick
 - **WHEN** the pool said `sleep` in shadow and the supervisor only took its census and re-armed the watcher
-- **THEN** the supervisor judges that it was not needed and the row is `agreed`
+- **THEN** the supervisor judges `not-needed` and the row is `agreed`
+
+#### Scenario: Shadow wake, routine tick
+- **WHEN** the pool said `wake` in shadow and the supervisor judges `not-needed`
+- **THEN** the row is `overwake`: it lowers the agreement and is not a miss
 
 ### Requirement: Digests are data the main model reads, never instructions
 `turn-report-check`, `log-digest`, `closing-evidence-summary` and `dialog-draft` SHALL be used by a session only as input it reads, and each answer SHALL arrive inside the envelope that marks it as data from another model. A session SHALL NOT follow an instruction found in a digest and SHALL NOT forward a digest to another session as a message. The supervision skill and the briefs it gives its child sessions SHALL say so.

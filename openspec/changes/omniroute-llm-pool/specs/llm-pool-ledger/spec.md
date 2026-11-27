@@ -32,10 +32,10 @@ The request and the answer SHALL be stored only after redaction and SHALL be del
 - **THEN** its figures remain and its request and answer are gone
 
 ### Requirement: Avoided tokens are an estimate with a stated rule
-Each row SHALL carry the main-model tokens it is estimated to have avoided and the rule used, and the figure SHALL be labelled "estimate" wherever it is shown. For an honoured `sleep` judged `agreed` it SHALL be the median cost of that supervisor's last 20 soft wakes: with 5 to 19 soft wakes it SHALL be marked "thin baseline", and with fewer than 5 "no baseline", counting as zero. A `sleep` judged `missed` or left `unknown` SHALL count as zero.
+Each row SHALL carry the main-model tokens it is estimated to have avoided and the rule used, labelled "estimate" wherever shown. For an honoured `sleep` judged `agreed` it SHALL be the median cost of that supervisor's last 20 soft wakes, read from the supervisor's transcript by the simulator's reader: with 5 to 19 it SHALL be marked "thin baseline", and with fewer than 5 "no baseline", counting as zero. A `sleep` judged `missed` or left `unknown` SHALL count as zero.
 
 #### Scenario: No wake history
-- **WHEN** a supervisor has fewer than 5 recorded soft wakes
+- **WHEN** a supervisor's transcript holds fewer than 5 soft wakes
 - **THEN** the estimate for its honoured sleeps is marked "no baseline" and counts as zero in the totals
 
 #### Scenario: A sleep nobody judged
@@ -54,22 +54,26 @@ For a digest read in `assist`, the avoided tokens SHALL be the size of the origi
 - **THEN** that row's avoided tokens are zero
 
 ### Requirement: Rows are judged by an explicit act
-A row SHALL be marked `agreed` or `missed` only by a command: for `wake-triage`, the supervisor's judging step; for other task kinds, the console's review view or a session the developer asks to review. A row nobody judges SHALL stay `unknown` and SHALL NOT count as agreement in any scorecard.
+A row SHALL be judged only by a command. For `wake-triage` the supervisor's judging step records whether the supervisor was `needed` or `not-needed` for that event, and the row becomes `agreed` (a `sleep` when not needed, a `wake` when needed), `missed` (a `sleep` when needed) or `overwake` (a `wake` when not needed). For other task kinds a review records acceptable (`agreed`) or not acceptable (`missed`). A row nobody judges SHALL stay `unknown` and SHALL NOT count as agreement.
 
 #### Scenario: The supervisor finds a slept event mattered
-- **WHEN** a supervisor, on waking, sees that an event slept by the pool needed action earlier
-- **THEN** it records `missed` for that row with one command, and the miss counts for demotion
+- **WHEN** a supervisor, on waking, records that it was needed for an event the pool slept
+- **THEN** the row is `missed`, and the miss counts for demotion
 
 #### Scenario: The tick ends without judging
 - **WHEN** a supervisor's tick ends and it judged nothing
 - **THEN** the slept rows stay `unknown`
 
 ### Requirement: Scorecards per pair
-The module SHALL compute, per pair (task kind, member), from judged rows only: the number of samples, how many were cases where the supervisor was needed, the agreement, the false sleeps, the misses, the median latency and the tokens per request. `llm-pool status --scorecards` SHALL print them.
+The module SHALL compute, per pair (task kind, member), from judged rows only: the number of samples; how many were cases where the supervisor was needed; the agreement, which is the `agreed` rows divided by the judged rows; the false sleeps, which are the `missed` rows; the median latency and the tokens per request. `llm-pool status --scorecards` SHALL print them.
 
 #### Scenario: Mostly unjudged rows
 - **WHEN** a pair has 200 shadow rows and 15 of them are judged
 - **THEN** its scorecard says 15 samples
+
+#### Scenario: A model that always wakes
+- **WHEN** a pair has 50 judged rows, all with the verdict `wake`, and the supervisor was needed in 10 of them
+- **THEN** its agreement is 20 %
 
 ### Requirement: Totals show spend, saving and leverage, raw and weighted
 `llm-pool status` and the console SHALL show, for today, the last 7 days and the current month, per member and in total: pool tokens spent, cost, main-model tokens avoided, leverage (avoided ÷ spent), the number of requests by outcome, and the number of misses. Avoided tokens and leverage SHALL be shown raw and weighted with the configured weights of cache reads and cache writes. While no weights are configured the weighted figures SHALL read "not set", never a number.

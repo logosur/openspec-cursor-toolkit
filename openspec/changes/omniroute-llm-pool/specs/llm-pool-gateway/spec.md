@@ -36,11 +36,15 @@ The module SHALL add no hook fragment and no settings key, SHALL NOT write the C
 - **THEN** the hash of the Claude settings file is the one it had before, and no shell profile or service unit was created or changed
 
 ### Requirement: One pinned gateway version
-The config piece SHALL name the gateway version the policy was evaluated with. When the running gateway reports another version, `llm-pool doctor` SHALL fail and every member SHALL be treated as `blocked` until the pin is updated.
+The config piece SHALL name the gateway version the policy was evaluated with. When the running gateway reports another version, `llm-pool doctor` SHALL fail and every member SHALL be treated as `blocked` until the pin is updated. When the pin changes, every pair in `auto` SHALL move to `probation`, because its scorecard was earned on another version.
 
 #### Scenario: Gateway updated behind the module
 - **WHEN** the gateway is updated and the pin is not
 - **THEN** `llm-pool ask` answers "no eligible member" for every task kind and callers use the main model
+
+#### Scenario: The pin is updated
+- **WHEN** the override names the new version and a pair was in `auto`
+- **THEN** that pair is in `probation` and the change is audited with the rule that fired
 
 ### Requirement: The answering model is checked
 `ask` SHALL compare the model the gateway's response names with the member's target. When they differ, the answer SHALL be discarded, the outcome SHALL be `wrong model`, and the member SHALL become `blocked` with that reason until `llm-pool doctor` passes for it again. The module SHALL create and change only combos whose name starts with `llm-pool-`.

@@ -7,15 +7,15 @@ Defines the desktop console: a local app window where the developer sees the poo
 ## ADDED Requirements
 
 ### Requirement: A local app window with no external dependency
-`llm-pool console` SHALL start an HTTP server bound to loopback only, serve static files shipped with the module, and open the page with the command the config key `console_opener` names; with no opener it SHALL print the address. The page SHALL make no request to any other host and SHALL work without network access.
+`llm-pool console` SHALL start an HTTP server bound to loopback only, serve static files shipped with the module, and open the page with the command the config key `console_opener` names. With the key empty, which is the default, it SHALL use the standard library's browser opener and, if that opens nothing, print the address. The page SHALL make no request to any other host and SHALL work without network access.
 
 #### Scenario: Opening the console offline
 - **WHEN** the console is opened with the network down
 - **THEN** the pool view renders completely, with the gateway shown as unreachable if it is
 
-#### Scenario: No opener configured
-- **WHEN** `console_opener` is empty
-- **THEN** the command prints the address and opens nothing
+#### Scenario: Nothing can open a page
+- **WHEN** `console_opener` is empty and the machine has no browser the standard library can start
+- **THEN** the command prints the address and keeps serving
 
 ### Requirement: The console server has a chosen port and a bounded life
 The port SHALL be the config key `console_port`: 0, the default, means a free loopback port chosen at start. The server SHALL stop after 30 minutes without a request and with `llm-pool console --stop`.
@@ -83,7 +83,7 @@ Each card and the header SHALL carry a link that opens a separate window with th
 - **THEN** the detail shows what the model was asked and what it answered (redacted, or "no longer kept" after retention), what the caller did with it, and the routing explanation of that request
 
 ### Requirement: Shadow answers can be reviewed
-The console SHALL offer a review view that shows, for a pair, its unjudged shadow rows one at a time with the request and the answer (redacted), and records "acceptable" or "not acceptable" for each. It is how the assist-only task kinds earn a promotion.
+The console SHALL offer a review view that shows, for a pair, its unjudged shadow rows one at a time with the request and the answer (redacted), and records "acceptable" or "not acceptable" for each, stored in the ledger as `agreed` or `missed`. It is how the assist-only task kinds earn a promotion.
 
 #### Scenario: Reviewing twenty digests
 - **WHEN** the developer judges 20 shadow rows of a pair and 19 are acceptable
@@ -119,7 +119,7 @@ The pool view SHALL fit a 1366×768 window without horizontal scrolling, SHALL f
 - **THEN** its state is still readable as text
 
 ### Requirement: Extended views appear only when their extension is on
-When an extension is switched on, the console SHALL offer its view: the routing matrix (task kinds against members, with modes), scorecards per pair, the timeline of audited changes, the simulator's last report, replay of a stored request on another member, and quota forecasts with recommendations. When it is off, no control of that view SHALL appear.
+When an extension is named in the config key `extensions`, the console SHALL offer its view: the routing matrix (task kinds against members, with modes), scorecards per pair, the timeline of audited changes, the simulator's last report, replay of a stored request on another member, and quota forecasts with recommendations. When it is off, no control of that view SHALL appear.
 
 #### Scenario: Extension switched off
 - **WHEN** the replay extension is off

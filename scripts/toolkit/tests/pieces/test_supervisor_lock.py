@@ -22,7 +22,7 @@ ENTRY = str(REPO_ROOT / 'global/scripts/supervisor-lock')
 SKILL = REPO_ROOT / 'global/skills/supervisa-sesiones/SKILL.md'
 SUBCOMMANDS = ('project', 'registry-dir', 'acquire', 'reclaim', 'beat', 'release', 'open', 'closable', 'hold', 'cloud',
                'cloud-archive', 'cloud-send', 'status', 'backlog', 'skill-lint', 'wait-closer', 'mode', 'list',
-               'sessions', 'wait', 'watchdog', 'titles', 'revive', 'hook', 'self-test')
+               'usage-role', 'sessions', 'wait', 'watchdog', 'titles', 'revive', 'hook', 'self-test')
 EXPORTS = ('cli_dir', 'collect_sessions', 'pid_alive', 'read_json_files', 'read_locks', 'resolve', 'git', 'span',
            'ASK_GATE_MAILBOX_TITLES', 'NOT_HUMAN_PREFIXES', 'app_glob', 'fold_text', 'session_role',
            'title_names_project', 'session_files', 'last_human_input')
@@ -1242,7 +1242,7 @@ class SelfTestTest(Base):
         self.assertEqual(failed, [], r.stdout[-3000:] + r.stderr[-2000:])
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
         checks = sum(1 for line in r.stdout.splitlines() if line.startswith('ok '))
-        self.assertGreaterEqual(checks, 564 if SKILL.is_file() else 563)
+        self.assertGreaterEqual(checks, 569 if SKILL.is_file() else 568)
         self.assertTrue(r.stdout.rstrip().endswith('ok: 0 failed'))
         self.assertFalse(os.listdir(self.env['TMPDIR']), 'the self-test left files in the temp dir')
 

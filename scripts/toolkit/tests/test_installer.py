@@ -186,6 +186,23 @@ class DefaultModules(Sandbox):
             self.assertEqual(quiet('install', '--modules', 'openspec,core,devtools'), 0)
         self.assertFalse((self.target / 'hooks' / 'heavy-job-gate').exists(), 'naming the modules still drops the rest')
 
+    def test_usage_module_installs_its_script_and_gate_and_is_opt_in(self):
+        quiet = lambda *argv: cli.main([*argv, '--override', '', '--target', str(self.target)])
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(quiet('install'), 0)
+        self.assertFalse((self.target / 'scripts' / 'usage-watch').exists(), 'usage is opt-in')
+        self.assertNotIn('usage-apply-gate', json.dumps(self.settings()))
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(quiet('install', '--modules', 'core,usage'), 0)
+        for rel in ('scripts/usage-watch', 'scripts/lib/usage_watch/flow.py', 'hooks/usage-apply-gate',
+                    'toolkit/config/usage-watch.json'):
+            self.assertTrue((self.target / rel).is_file(), rel)
+        self.assertTrue(os.access(self.target / 'hooks' / 'usage-apply-gate', os.X_OK))
+        matchers = [h['matcher'] for h in self.settings()['hooks']['PreToolUse']
+                    if any('usage-apply-gate' in c['command'] for c in h['hooks'])]
+        self.assertEqual(matchers, ['mcp__ccd_session_mgmt__set_session_model|mcp__ccd_session_mgmt__set_session_effort'])
+        self.assertFalse((self.target / 'scripts' / 'ask-queue').exists(), 'usage does not bring supervision')
+
     def test_module_notes_are_plain_text(self):
         for name in modules.available():
             for note in modules.load_many([name])[0].notes:

@@ -1,0 +1,38 @@
+piece: usage-watch
+dest: scripts/usage-watch
+kind: cli
+probes:
+  - name: help lists the subcommands
+    args: [--help]
+    exit: [0]
+    stdout: any
+    contains: "self-test"
+  - name: status with no transcripts prints zeros and an unknown pace
+    args: [status]
+    exit: [0]
+    stdout: any
+    contains: "pace unknown"
+  - name: status --json with no transcripts is JSON
+    args: [status, --json]
+    exit: [0]
+    stdout: json
+  - name: page with no transcripts is written
+    args: [page]
+    exit: [0]
+    stdout: any
+    contains: "page: "
+  - name: timer print shows both units and writes nothing
+    args: [timer, print]
+    exit: [0]
+    stdout: any
+    contains: "OnUnitActiveSec="
+  - name: an unknown finding id is a usage error
+    args: [show, no-such-finding]
+    exit: [2]
+    stdout: empty
+  - name: a corrupt config gives the defaults
+    args: [status]
+    corrupt_config: true
+    exit: [0]
+    stdout: any
+    contains: "pace unknown"

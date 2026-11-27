@@ -198,6 +198,7 @@ def run(main) -> int:
     import io
     import json
     import os
+    import re
     import shutil
     import tempfile
     import time
@@ -239,6 +240,10 @@ def run(main) -> int:
         document['accounts']['remote'] = {'address': ADDRESS, 'backends': ['imap'],
                                           'imap': {'host': HOST, 'credentials_file': str(tmp / 'absent.env')}}
         document['accounts']['hosted'] = {'address': ADDRESS, 'connector': {}}
+        document['accounts']['hosted-small'] = {'address': ADDRESS, 'connector': {'search_view': 'THREAD_VIEW_IDS_ONLY',
+                                                                                 'read_format': 'FULL_CONTENT',
+                                                                                 'page_size_max': 10}}
+        document['accounts']['hosted-bad'] = {'address': ADDRESS, 'connector': {'read_format': 'plain_text'}}
         (tmp / 'config' / 'mailbox.json').write_text(json.dumps(document), encoding='utf-8')
         before = snapshot(layout)
 
@@ -281,6 +286,49 @@ def run(main) -> int:
         delegated = json.loads(out) if out.strip().startswith('{') else {}
         check('a connector account is delegated with exit 10', code == 10 and delegated.get('delegate') == 'connector'
               and 'from:other@example.org' in delegated.get('arguments', {}).get('query', ''), out)
+        arguments = delegated.get('arguments', {})
+        check('a connector search carries the bounded default view and the page size',
+              arguments.get('view') == 'THREAD_VIEW_SUMMARY' and arguments.get('pageSize') == 20
+              and set(arguments) == {'query', 'pageSize', 'view'}, str(arguments))
+        code, out, _ = invoke('search', 'hosted', '--limit', '200')
+        capped = json.loads(out) if out.strip().startswith('{') else {}
+        check('a limit above the connector maximum is cut and says so outside the arguments',
+              code == 10 and capped.get('arguments', {}).get('pageSize') == 50 and 'paging' not in capped.get('arguments', {})
+              and capped.get('paging', {}).get('capped') is True and capped['paging'].get('continue_with') == 'pageToken',
+              out)
+        code, out, _ = invoke('search', 'hosted-small', '--limit', '25')
+        small = json.loads(out) if out.strip().startswith('{') else {}
+        check('the per-account view and page-size maximum are used',
+              code == 10 and small.get('arguments', {}).get('view') == 'THREAD_VIEW_IDS_ONLY'
+              and small['arguments'].get('pageSize') == 10 and small['paging'].get('requested') == 25, out)
+        code, out, _ = invoke('show', 'hosted', '18f3A_c-9')
+        read = json.loads(out) if out.strip().startswith('{') else {}
+        check('a connector read carries the id as typed and the plain-text format',
+              code == 10 and read.get('arguments') == {'threadId': '18f3A_c-9', 'messageFormat': 'PLAIN_TEXT'}, out)
+        code, out, _ = invoke('thread', 'hosted', 'abc', '--full-content')
+        check('the HTML body is read only when asked for', code == 10
+              and json.loads(out).get('arguments', {}).get('messageFormat') == 'FULL_CONTENT', out)
+        code, out, _ = invoke('thread', 'hosted-small', 'abc')
+        check('the per-account read format is used', code == 10
+              and json.loads(out).get('arguments', {}).get('messageFormat') == 'FULL_CONTENT', out)
+        code, out, _ = invoke('whoami', 'hosted-small')
+        first = json.loads(out.split('\n', 1)[0]) if out.strip().startswith('{') else {}
+        check('the identity check asks for metadata only, whatever the search view is', code == 0
+              and first.get('arguments') == {'query': 'in:sent', 'pageSize': 1, 'view': 'THREAD_VIEW_METADATA_ONLY'}, out)
+        code, out, err = invoke('show', 'hosted-bad', 'abc')
+        check('an invalid connector setting makes the account unusable', code == 2 and out == ''
+              and 'connector.read_format' in err, err)
+        code, out, _ = invoke('search', 'hosted', '--header', 'X-Thing: 1')
+        check('a header filter is refused on a connector account', code == 2 and out == '')
+        code, out, _ = invoke('show', 'work', ids.get('Hello html', 'none'), '--full-content')
+        check('--full-content is refused on an account that is not a connector account', code == 2 and out == '')
+        shown = ''
+        for args in (('search', 'hosted'), ('show', 'hosted', 'abc'), ('whoami', 'hosted'), ('doctor', 'hosted'),
+                     ('accounts',)):
+            _, out, err = invoke(*args)
+            shown += out + err
+        check('no connector server identifier is printed',
+              'mcp__' not in shown and not re.search(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}', shown))
         code, _, _ = invoke('whoami', 'hosted', '--sender', OTHER)
         check('a connector of another mailbox exits 3', code == 3)
         code, _, _ = invoke('whoami', 'hosted', '--sender', ADDRESS.upper())

@@ -55,12 +55,15 @@ not worth finding out). `paging` is always present (one shape for a consumer to 
 ```
 "paging": {"requested": 200, "page_size": 50, "capped": true,
            "continue_with": "pageToken",
-           "how": "repeat this call adding the connector's pageToken from its previous response to get further results"}
+           "how": "if the response carries a page token, repeat this call adding it as pageToken; if it carries none, narrow the search (a shorter --since/--until range or another filter) and run mailbox search again; resultCountEstimate estimates how many results match"}
 ```
 
 and `{"requested": 20, "page_size": 20, "capped": false}` when nothing was cut (`continue_with` and `how` only when capped).
-`how` names the argument and says where its value comes from without naming a response field of the connector, whose name is
-not among the measured facts (nothing is invented).
+**FACT (measured live after install, G-29):** a response to a search above the page size carried no page token key at all, with
+`resultCountEstimate` far above the page size. So `how` is one compact sentence true in both cases: with a page token, repeat the
+call adding it as `pageToken`; without one, narrow the search (a shorter `--since`/`--until` range or another filter) and run
+`mailbox search` again, `resultCountEstimate` estimating how many results match. It names no response field for the token (the
+name is not a measured fact); it does name `resultCountEstimate`, which was observed.
 
 **Verbatim versus a second page.** The skill says to pass `tool` and `arguments` as printed, adding nothing. That is true of
 the first call. A further page is a different, optional call that the document itself describes (`paging.how`); the script

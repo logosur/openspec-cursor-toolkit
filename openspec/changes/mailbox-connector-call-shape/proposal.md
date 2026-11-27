@@ -26,7 +26,7 @@ incomplete or unbounded today, so the session has to choose values itself, and t
 
 Connector shapes, measured by the orchestrator against the live connector on 2026-11-27, shape and counts only, no content:
 the search `view` is one of `THREAD_VIEW_METADATA_ONLY`, `THREAD_VIEW_MINIMAL`, `THREAD_VIEW_IDS_ONLY`, `THREAD_VIEW_SUMMARY`;
-`pageSize` defaults to 20 and is at most 50; `pageToken` continues a search. With `THREAD_VIEW_METADATA_ONLY` each message
+`pageSize` defaults to 20 and is at most 50; `pageToken` is the schema's argument for continuing a search, but a live response may carry no page token, so the hint also says to narrow the search. With `THREAD_VIEW_METADATA_ONLY` each message
 carries its id, sender, thread id and recipients (all the identity check needs). With `THREAD_VIEW_SUMMARY` and
 `THREAD_VIEW_MINIMAL`, single-message threads come back identical (the subject is added), so `SUMMARY` is never larger than
 `MINIMAL` and bounds a multi-message thread to one message. The read tool takes a required `threadId` and a `messageFormat`

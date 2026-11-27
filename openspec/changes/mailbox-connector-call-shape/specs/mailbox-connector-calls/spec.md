@@ -14,7 +14,7 @@ connector, writes to a mailbox or touches the `imap` and `local` backends.
 
 Connector values named below (tool schema of the Gmail connector, shape measured by the orchestrator on 2026-11-27, no
 content read): search `view` is one of `THREAD_VIEW_METADATA_ONLY`, `THREAD_VIEW_MINIMAL`, `THREAD_VIEW_IDS_ONLY`,
-`THREAD_VIEW_SUMMARY`; `pageSize` defaults to 20 with a maximum of 50; `pageToken` continues a search; the read tool takes a
+`THREAD_VIEW_SUMMARY`; `pageSize` defaults to 20 with a maximum of 50; `pageToken` is the schema's argument for continuing a search (a live response may carry no page token); the read tool takes a
 required `threadId` and a `messageFormat` that is one of `MINIMAL`, `FULL_CONTENT`, `METADATA_ONLY`, `PLAIN_TEXT` (default
 `PLAIN_TEXT`).
 
@@ -78,7 +78,8 @@ cut to one, as on every backend.
 ### Requirement: A capped search says so outside the arguments
 `mailbox search` on a connector account SHALL print a top-level `paging` object, never inside `arguments`, with `requested`,
 `page_size` (the value in `arguments`) and `capped`. When the limit exceeds the maximum, `capped` SHALL be `true` and `paging`
-SHALL also carry `continue_with` (`"pageToken"`) and `how` (one sentence: repeat the call adding the connector's `pageToken`).
+SHALL also carry `continue_with` (`"pageToken"`) and `how`, one compact sentence that is true whether or not a live response
+carries a page token and never promises one.
 
 #### Scenario: Not capped
 - **WHEN** `mailbox search ACCOUNT --limit 20` runs, and `--limit 50`
@@ -88,6 +89,12 @@ SHALL also carry `continue_with` (`"pageToken"`) and `how` (one sentence: repeat
 #### Scenario: Cap stated
 - **WHEN** `mailbox search ACCOUNT --limit 200` runs
 - **THEN** `paging` is `requested` 200, `page_size` 50, `capped` `true`, `continue_with` `"pageToken"` and a non-empty `how`
+
+#### Scenario: The hint holds with and without a page token
+- **WHEN** `mailbox search ACCOUNT --limit 200` runs
+- **THEN** `how` mentions the page token case (adding it as `pageToken`) and the narrowing case (a shorter `--since`/`--until`
+  range or another filter, then `mailbox search` again, with `resultCountEstimate` as the estimate of matches), and is a single
+  short sentence; when not capped there is no `how`
 
 #### Scenario: Notice stays out of the connector's arguments
 - **WHEN** `mailbox search ACCOUNT --limit 200` runs

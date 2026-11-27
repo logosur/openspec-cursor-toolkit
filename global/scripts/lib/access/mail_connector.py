@@ -107,8 +107,10 @@ def search_document(account: dict, f: Filters, limit: int) -> dict:
     page = min(limit, cfg['page_size_max'])
     paging = {'requested': limit, 'page_size': page, 'capped': page < limit}
     if paging['capped']:
-        paging.update(continue_with='pageToken', how="repeat this call adding the connector's pageToken from its previous "
-                                                    'response to get further results')
+        paging.update(continue_with='pageToken', how="if the response carries a page token, repeat this call adding it as "
+                                                    "pageToken; if it carries none, narrow the search (a shorter "
+                                                    "--since/--until range or another filter) and run mailbox search "
+                                                    "again; resultCountEstimate estimates how many results match")
     return {'delegate': 'connector', 'kind': cfg['kind'], 'tool': cfg['search_tool'],
             'arguments': {'query': gmail_query(f), 'pageSize': page, 'view': cfg['search_view']},
             'paging': paging, 'read_tool': cfg['read_tool']}

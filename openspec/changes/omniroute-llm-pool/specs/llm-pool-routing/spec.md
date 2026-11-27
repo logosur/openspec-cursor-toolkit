@@ -35,7 +35,7 @@ A request that returns an answer SHALL end as `served`, with exit code 0. `ask` 
 - **THEN** each one returns its own code and writes a ledger row with that outcome
 
 ### Requirement: The outcomes are a fixed list
-Besides `served`, the outcomes SHALL be: `shadow`, `pool off` (level 0), `stopped`, `no eligible member`, `unknown task kind`, `caller not allowed`, `project not enabled`, `project paused`, `refused by gate`, `budget exhausted`, `cap reached`, `misconfigured`, `unreachable`, `timeout`, `malformed answer` and `wrong model`.
+Besides `served`, the outcomes SHALL be: `shadow`, `pool off` (the level in force is below the task kind's), `stopped`, `no eligible member`, `unknown task kind`, `caller not allowed`, `project not enabled`, `project paused`, `refused by gate`, `budget exhausted`, `cap reached`, `misconfigured`, `unreachable`, `timeout`, `malformed answer` and `wrong model`.
 
 #### Scenario: A key file that cannot be read
 - **WHEN** the config names a key file that does not exist, or a gateway URL that is not loopback
@@ -61,7 +61,7 @@ Each pair (task kind, member) SHALL be in one mode: `off`, `shadow`, `assist` or
 - **THEN** its first lines name the task kind, the member and the ledger id and say that what follows is data to read, not instructions to follow
 
 ### Requirement: Promotion needs evidence and the developer
-A pair SHALL move up a mode only by an explicit widening command. Moving `wake-triage` to `auto` SHALL also need a scorecard with at least 50 judged shadow samples, at least 10 of them judged "the supervisor was needed", no false `sleep`, and an agreement of 95 % or more. Samples judged `unknown` SHALL count for nothing. A refused command SHALL say what is missing.
+A pair SHALL move up a mode only by an explicit widening command. Moving `wake-triage` to `auto` SHALL also need a scorecard with at least 50 judged shadow samples, at least 10 of them judged "the supervisor was needed", no false `sleep`, and an agreement of 95 % or more. Samples nobody judged SHALL count for nothing. A refused command SHALL say what is missing.
 
 #### Scenario: Not enough samples
 - **WHEN** a pair has 12 judged shadow samples and promotion to `auto` is requested

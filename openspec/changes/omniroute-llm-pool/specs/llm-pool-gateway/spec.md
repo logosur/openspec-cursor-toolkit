@@ -61,7 +61,7 @@ When the gateway is not installed, not running or not reachable within a bounded
 - **THEN** the answer is `wake` within the configured timeout and the ledger records the outcome `unreachable`
 
 ### Requirement: Doctor reports the whole chain
-`llm-pool doctor` SHALL check, without sending any private data: the gateway binary and version; the endpoint; the key file and its mode; that each `active` member answers a fixed public probe with its own model; and that the ledger is writable. It SHALL exit non-zero on any failure and list every finding in one run.
+`llm-pool doctor` SHALL check, without sending any private data: the gateway binary and version; the endpoint; the key file and its mode; that each enabled member that is `active`, or `blocked` for a wrong model or a failed probe, answers a fixed public probe with its own model; and that the ledger is writable. It SHALL exit non-zero on any failure and list every finding in one run.
 
 #### Scenario: One member's provider key expired
 - **WHEN** a member's probe is refused for authentication

@@ -14,7 +14,7 @@ Every `ask`, whatever its outcome, SHALL leave exactly one row with: an id, the 
 - **THEN** a row exists with the outcome "refused by gate", no member, zero tokens and no payload
 
 ### Requirement: The row exists before the request leaves
-The row SHALL be written before any request is sent, with the outcome `pending` and the budget it reserves, and completed when the answer or the failure is known. A `pending` row older than the request's time limit SHALL be closed as `lost` by the next command, and its reservation SHALL count as spent. Concurrent writers SHALL NOT lose or corrupt rows.
+The row SHALL be written before any request is sent, marked `pending` with the budget it reserves, and completed when the answer or the failure is known. A `pending` row older than the request's time limit SHALL be marked `lost` by the next command, and its reservation SHALL count as spent. Both are states of a row, not outcomes of `ask`. Concurrent writers SHALL NOT lose or corrupt rows.
 
 #### Scenario: The process is killed mid-request
 - **WHEN** an `ask` is killed after sending and before the answer arrives
@@ -65,7 +65,7 @@ A row SHALL be judged only by a command. For `wake-triage` the supervisor's judg
 - **THEN** the slept rows stay `unknown`
 
 ### Requirement: Scorecards per pair
-The module SHALL compute, per pair (task kind, member), from judged rows only: the number of samples; how many were cases where the supervisor was needed; the agreement, which is the `agreed` rows divided by the judged rows; the false sleeps, which are the `missed` rows; the median latency and the tokens per request. `llm-pool status --scorecards` SHALL print them.
+The module SHALL compute, per pair (task kind, member), from the rows judged since the pair last entered `shadow` or `probation`: the number of samples; how many were cases where the supervisor was needed; the agreement, which is the `agreed` rows divided by the judged rows; the `missed` rows, which for `wake-triage` are the false sleeps; the median latency and the tokens per request. `llm-pool status --scorecards` SHALL print them.
 
 #### Scenario: Mostly unjudged rows
 - **WHEN** a pair has 200 shadow rows and 15 of them are judged
@@ -76,7 +76,7 @@ The module SHALL compute, per pair (task kind, member), from judged rows only: t
 - **THEN** its agreement is 20 %
 
 ### Requirement: Totals show spend, saving and leverage, raw and weighted
-`llm-pool status` and the console SHALL show, for today, the last 7 days and the current month, per member and in total: pool tokens spent, cost, main-model tokens avoided, leverage (avoided ÷ spent), the number of requests by outcome, and the number of misses. Avoided tokens and leverage SHALL be shown raw and weighted with the configured weights of cache reads and cache writes. While no weights are configured the weighted figures SHALL read "not set", never a number.
+`llm-pool status` and the console SHALL show, for today, the last 7 days and the current month, per member and in total: pool tokens spent, cost, main-model tokens avoided, leverage (avoided ÷ spent), the number of requests by outcome, and the number of false sleeps. Avoided tokens and leverage SHALL be shown raw and weighted with the configured weights of cache reads and cache writes. While no weights are configured the weighted figures SHALL read "not set", never a number.
 
 #### Scenario: Weighted figure
 - **WHEN** the configured weight of a cache-read token is 0.1 and a sleep avoided 1 000 000 tokens of which 980 000 were cache reads

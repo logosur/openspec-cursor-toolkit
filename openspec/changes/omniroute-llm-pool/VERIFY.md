@@ -1,6 +1,6 @@
 # VERIFY — omniroute-llm-pool
 
-> **Date:** 2026-11-27 · `main` @ `95991f4` · written by `/prepara-tarea` after the gap review (`GAPS.md`), and brought up to date after its second round.
+> **Date:** 2026-11-27 · `main` @ `95991f4` · written by `/prepara-tarea` after the gap review (`GAPS.md`), and brought up to date after its second and third rounds.
 > Nothing of this change is implemented. VERIFY checks the documents against each other, against the request and against the code they will touch.
 
 ## Gates
@@ -9,12 +9,13 @@
 |------|-----------------|--------|
 | Artefacts present | `ls openspec/changes/omniroute-llm-pool/` | `proposal.md`, `design.md`, `tasks.md`, seven `specs/*/spec.md`, `GAPS.md`, `VERIFY.md`, `READY-TO-APPLY.md` |
 | `openspec validate omniroute-llm-pool --strict` | OpenSpec CLI 2.1.1 | `Change 'omniroute-llm-pool' is valid` |
-| Spec inventory | `grep -c '^### Requirement'` / `'^#### Scenario'` | 97 requirements / 165 scenarios in 7 specs; every requirement has at least one scenario |
+| Spec inventory | `grep -c '^### Requirement'` / `'^#### Scenario'` | 97 requirements / 169 scenarios in 7 specs; every requirement has at least one scenario |
 | Tasks | `grep -c '^- \[ \]' tasks.md` | 58, none done; 3 are the developer's (1.2, 7.1, 7.3) |
-| Gap review | `GAPS.md` | 82 rows: 69 hydrated, 13 non-blocking; pending 0. Two rounds: the first hydration was itself reviewed and corrected |
+| Gap review | `GAPS.md` | 97 rows: 80 hydrated, 15 non-blocking, **2 pending** (G-83, G-84), both outside stage 0. Three rounds: the first two corrections were each read by a fresh reviewer; the third was checked mechanically only |
 | Request → requirement | table below | every element of the request has at least one requirement |
 | Requirement → task | table below, checked by a script against the spec titles and the task ids | 97 / 97 |
 | Code citations | each `path:line` of `design.md` and `GAPS.md` opened on `95991f4` | match |
+| Go/no-go is decidable | the eight combinations of its three inputs against the table of design D15 | each falls on exactly one row |
 | Product files untouched | `git diff --stat origin/main -- . ':!openspec'` | empty |
 | Privacy | `scripts/privacy-check.py` on the tree and on the staged files | 0 findings |
 
@@ -153,18 +154,22 @@ Tasks with no requirement of their own, on purpose: the spike (1.1, 1.3–1.6, 8
 | Config merge is shallow; the installer writes only under the Claude directory | FACT | `scripts/toolkit/config.py:23`; `scripts/toolkit/modules.py:26` |
 | The developer's presence can be checked by a command | FACT | `global/scripts/heavy-job:503-546` does it today |
 | The hydrated sleep mechanism (journal, refreshed snapshot, five bounds) can be built into the watcher as specified | INFERENCE | No code yet; task 5.3 proves it with tests |
-| A fixed rule with no model sleeps the soft wakes safely; if it does not, a pool model reading the same fields does | UNKNOWN | Tasks 6.1–6.3 |
+| A fixed rule with no model sleeps the soft wakes safely | UNKNOWN | Tasks 6.1–6.3 |
+| If it does not, a pool model reading the same fields does | UNKNOWN, and how to test it is not specified yet | GAPS G-83, pending |
+| The closed list that defines when the supervisor was "needed" matches what supervisors do | INFERENCE | Task 6.1 on real transcripts; unclassified wakes are listed |
 | The developer's words can be read by a command, to check an order against them | FACT | `global/scripts/lib/supervisor/human_turns.py:126` |
 | The usage limit weighs a cache-read token at a fraction of a fresh one | UNKNOWN | Task 1.7 |
 | The gateway's calls for quota, usage, combos; whether compression and telemetry can be switched off per key | UNKNOWN | Tasks 1.3 and 1.6, after the developer installs it (1.2) |
 | Small free models triage well enough | HYPOTHESIS | Task 7.1 (shadow) |
-| The thresholds of design D15 (a saving of 5 %, one needed wake slept in 100, half of the rule's saving; after rollout: leverage 10, one miss per 100, 3 %) | Provisional defaults, not evidence | The developer confirms or changes them at task 6.3 |
+| The thresholds of design D15 (100 classified soft wakes; a saving of 5 %; one needed wake in 100; half of the rule's saving and no less than 3 %; after rollout: leverage 10, one miss per 100 honoured sleeps, 3 %) | Provisional defaults, not evidence | The developer confirms or changes them at task 6.3 |
 
 ## Honest limits
 
 - **The central idea is not proven.** The gap review showed that a safe triage brief is a handful of numbers, which a fixed rule can read as well as a model. A model cannot save more than a rule that sleeps every soft wake; it can only be safer. Whether that safety is needed is the first thing the tasks find out, and the answer may be that the rule is enough and no model is used for triage.
-- **The first hydration had defects of its own**, two of them serious: its go/no-go could never be passed, and shadow verdicts were never shown to the supervisor to be judged. A fresh reviewer found them (GAPS, section E) and they are corrected. It is a reason to expect that an apply will find more.
+- **Both corrections had defects of their own.** The first hydration's go/no-go could never be passed, and its shadow verdicts were never shown to the supervisor (GAPS, section E). The second correction's go/no-go was still not decidable, its simulator could not rebuild what it needed from history, and its scorecards never started again after a demotion (section F). Each was found by a fresh reviewer and corrected. **The third correction was not read by one**; it was kept to narrowing and choosing, and checked mechanically. An apply should expect to find more.
+- **Two gaps are left pending on purpose** (G-83: how a model is tested if the fixed rule is unsafe; G-84: who calls three of the digest task kinds). Neither touches stage 0. Both are better specified with the simulator's report in hand.
 - The simulator decides "needed" from what the supervisor did in a tick. A wake where it should have acted and did not counts as not needed.
+- The fixed rule's figures from the simulator are upper bounds, both its saving and its misses: three of the five bounds of a sleep cannot be rebuilt for past wakes. The decision uses each only where an upper bound is safe; in between, it stays open.
 - Nothing was run against a gateway. Every requirement about OmniRoute's behaviour rests on its README until the spike.
 - The measurement behind the figures is a 3-hour window on three supervisors.
 - The digest task kinds need a provider that neither trains on prompts nor keeps them beyond 30 days, or a local model. Whether the developer has or wants one is his to say; without one those task kinds stay refused by the gate.
@@ -173,11 +178,12 @@ Tasks with no requirement of their own, on purpose: the spike (1.1, 1.3–1.6, 8
 
 ## Verification status
 
-**READY TO APPLY — stage 0 only.**
+**READY TO APPLY — stage 0 only. NEEDS HYDRATION for the rest** (2 gaps pending).
 
-- **Ready now:** tasks 1.7, 6.1, 6.2 and 6.3 (the cache weights, the simulator, its report and the go/no-go). They need no gateway and no module, with one exception: if the report shows the fixed rule to be unsafe, the third case of 6.3 replays a candidate member and needs the gateway (1.2). Without it, 6.3 is recorded as open.
+- **Ready now:** tasks 1.7, 6.1, 6.2 and 6.3 (the cache weights, the simulator, its report and the go/no-go). They need no gateway and no module. Task 6.3 records one of four results; two of them are "open" (too little data; or the rule is unsafe and a model must be tested).
 - **Ready as soon as the developer has done 1.2** (install the gateway, connect a provider, place the key): the rest of the spike, 1.1 and 1.3 to 1.6.
-- **BLOCKED BY UNKNOWN until 6.3 is recorded:** tasks 5.2 to 5.6 and group 7 (the watcher's triage and its rollout).
+- **BLOCKED BY UNKNOWN until 6.3 is recorded:** tasks 5.2 to 5.6 and group 7 (the watcher's triage and its rollout). **NEEDS HYDRATION besides:** if 6.3 records "a model must be tested", G-83 is hydrated before any of them is built.
+- **NEEDS HYDRATION:** the digest task kinds other than `log-digest` (G-84), before task 5.7 covers them.
 - **BLOCKED BY UNKNOWN until 1.3 and 1.6 are recorded:** the parts of groups 2 to 4 that talk to the gateway beyond its OpenAI-compatible endpoint (quota, usage, combos, outward features). The rest of groups 2 to 4 can be built against the stub, but it is only worth building if 6.3 says "go" or the developer wants the pool for digests alone.
 
 An apply of this change must stop at task 6.3 and report.

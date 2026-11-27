@@ -58,7 +58,7 @@ Each card SHALL also show: the quota left and when it resets; tokens used today 
 - **THEN** its figures read zero and its success rate and latency read "no data", not zero
 
 ### Requirement: The header shows the whole picture
-Above the cards the view SHALL show: the dial with its mode (manual or following usage) and the schedule window in force, a stop button, the pool tokens spent and the cost for today and the month, the main-model tokens avoided raw and weighted (or "not set"), the leverage, the number of misses, the monthly free quota as a bar, and the gateway's health.
+Above the cards the view SHALL show: the dial with its mode (manual or following usage) and the schedule window in force, a stop button, the pool tokens spent and the cost for today and the month, the main-model tokens avoided raw and weighted (or "not set"), the leverage, the number of false sleeps, the monthly free quota as a bar, and the gateway's health.
 
 #### Scenario: Stop button
 - **WHEN** the developer presses stop and confirms
@@ -69,7 +69,7 @@ A switch or an assignment change in the console SHALL call the same code as the 
 
 #### Scenario: Switching on a member with stale terms
 - **WHEN** the developer assigns a private task kind to a member whose provider terms are stale
-- **THEN** the change is refused and the card shows the reason and the date the terms were read
+- **THEN** the assignment is stored, and the card says that the member accepts `public` only, with the date its terms were read, so the pair receives nothing
 
 ### Requirement: A link opens the history in a second window
 Each card and the header SHALL carry a link that opens a separate window with the history, already filtered by that member when opened from a card. The history SHALL be paginated, newest first, and filterable by member, project, session, task kind, outcome, judgement and date. Each row SHALL show when, where (project and session), what for (task kind), which member, tokens, cost, outcome and judgement.
@@ -83,7 +83,7 @@ Each card and the header SHALL carry a link that opens a separate window with th
 - **THEN** the detail shows what the model was asked and what it answered (redacted, or "no longer kept" after retention), what the caller did with it, and the routing explanation of that request
 
 ### Requirement: Shadow answers can be reviewed
-The console SHALL offer a review view that shows, for a pair, its unjudged shadow rows one at a time with the request and the answer (redacted), and records "acceptable" or "not acceptable" for each, stored in the ledger as `agreed` or `missed`. It is how the assist-only task kinds earn a promotion.
+The console SHALL offer a review view that shows, for a pair of a task kind whose highest mode is `assist`, its unjudged shadow rows one at a time with the request and the answer (redacted), and records "acceptable" or "not acceptable" for each, stored in the ledger as `agreed` or `missed`. It is how the assist-only task kinds earn a promotion.
 
 #### Scenario: Reviewing twenty digests
 - **WHEN** the developer judges 20 shadow rows of a pair and 19 are acceptable

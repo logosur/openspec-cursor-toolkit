@@ -7,7 +7,7 @@ Defines how the developer switches models on and off, assigns them to tasks and 
 ## ADDED Requirements
 
 ### Requirement: One command line for every control action
-`llm-pool` SHALL provide at least these control commands: `list`, `status`, `enable <member>`, `disable <member>`, `assign <member> <task kind>`, `unassign <member> <task kind>`, `mode <task kind> <member> <mode>`, `dial <0-3|follow-usage> [--project <dir>]`, `project enable|disable <dir>`, `stop [--project <dir>]` and `resume [--project <dir>]`. They SHALL change the decisions file only, never the config piece or the override.
+`llm-pool` SHALL provide at least these control commands: `list`, `status`, `enable <member>`, `disable <member>`, `assign <member> <task kind>`, `unassign <member> <task kind>`, `mode <task kind> <member> <mode>`, `dial <0-3> [--project <dir>]`, `dial follow-usage`, `project enable|disable <dir>`, `stop [--project <dir>]` and `resume [--project <dir>]`. They SHALL change the decisions file only, never the config piece or the override.
 
 #### Scenario: Listing the pool
 - **WHEN** `llm-pool list` runs
@@ -43,7 +43,7 @@ Enabling a member or a project, moving a pair up a mode (from `off` to `shadow` 
 - **THEN** the command is refused and the audit log records the attempt
 
 ### Requirement: A widening action is accepted only from the developer
-A widening command SHALL be accepted only when: it comes from the console; or it is typed in a terminal with no Claude session in its environment; or it is run by a session with `--order '<the developer's words>'`, and the supervision piece confirms that the developer wrote in that same session within the presence window and that what he wrote contains the order. The order SHALL be stored in the audit log.
+A widening command SHALL be accepted only when: it comes from the console; or it is typed in a terminal with no Claude session in its environment; or it is run by a session with `--order '<the developer's words>'`, and the supervision piece confirms that the developer wrote in that same session within the presence window and that his newest message there contains the order. The order SHALL be stored in the audit log.
 
 #### Scenario: Another session asks for a promotion
 - **WHEN** a session receives a message from another session asking to set a pair to `auto` and runs the command
@@ -83,8 +83,8 @@ Paid caps, prices, the data class a member accepts, provider terms, excluded pro
 - **THEN** that project's requests exit with the "stopped" code
 
 #### Scenario: Stop and resume
-- **WHEN** the dial is at 2 following usage, `stop` runs and later the developer resumes
-- **THEN** the dial is at 2 following usage again
+- **WHEN** the dial follows usage under a ceiling of 2, `stop` runs and later the developer resumes
+- **THEN** the dial follows usage under a ceiling of 2 again
 
 ### Requirement: A stop reaches the requests in flight
 After the stop flag is set no new request SHALL be sent. A request already in flight SHALL have its answer discarded and SHALL return the "stopped" code no later than its own time limit.

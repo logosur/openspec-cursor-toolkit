@@ -14,47 +14,59 @@ Supervision SHALL work unchanged when the `llm-pool` module is not installed, th
 - **THEN** the watcher wakes the supervisor for every event exactly as before, prints nothing about the pool, and the supervision self-test passes unchanged
 
 ### Requirement: A simulator replays recorded wakes before any triage is built
-Before any triage code is written for the watcher, a simulator SHALL read recorded supervisor wakes from the transcripts and classify each soft wake as one where the supervisor was needed or not. The supervisor was needed when, in that tick, it did more than its routine of census, register and re-arming the watcher.
+Before any triage code is written, a simulator SHALL read recorded supervisor wakes from the transcripts and classify each soft wake. The supervisor was needed when, between the wake and its next arming of the watcher, it messaged, started, stopped or archived a session, ran a git command that writes, deployed, called a panel or queued a question. A wake whose end cannot be found SHALL be unclassified and left out of every rate.
 
 #### Scenario: A known transcript
-- **WHEN** the simulator runs on a seeded transcript whose soft, hard, needed and routine wakes are known
+- **WHEN** the simulator runs on a seeded transcript whose soft, hard, needed, routine and unclassified wakes are known
 - **THEN** it reports the known counts of each
 
+#### Scenario: A tick that only checks
+- **WHEN** after a soft wake the supervisor takes its census, reads two files and re-arms the watcher
+- **THEN** that wake counts as not needed
+
 ### Requirement: The simulator compares today with a fixed rule
-The simulator SHALL report, for today's behaviour and for a fixed rule with no model that sleeps every soft wake within the bounds of this spec: the wakes, the main-model tokens raw and weighted, and the needed wakes the rule would have slept, with how long each would have waited.
+A recorded wake SHALL count as soft when the watcher's output was only idle-to-busy lines or only `TIMEOUT`. The simulator SHALL report, for today's behaviour and for a fixed rule with no model that sleeps every soft wake: the wakes, the main-model tokens raw and weighted, and the needed wakes the rule would have slept. The rule's figures SHALL be labelled upper bounds, because the deadline, the report time and what waited for the supervisor are not in the history.
 
 #### Scenario: The fixed rule on a known transcript
 - **WHEN** the simulator runs on the seeded transcript
-- **THEN** it reports the known saving of the fixed rule and the known list of needed wakes it would have slept
+- **THEN** it reports the known saving of the fixed rule and the known list of needed wakes it would have slept, both labelled as upper bounds
 
 #### Scenario: No weights measured
 - **WHEN** the cache weights of the usage limit could not be measured
 - **THEN** the report gives raw tokens only and says so in its first lines
 
 ### Requirement: Nothing is built for a small saving, and a safe fixed rule wins
-The decision SHALL be recorded from the simulator's report. Nothing SHALL be built for triage when the fixed rule saves under 5 % of the supervisors' weighted flow (raw, with a warning, when no weights could be measured). When the fixed rule would have slept at most one needed wake in 100, it SHALL be proposed as a change of its own and `wake-triage` SHALL NOT be built.
+The decision SHALL be the first of these that applies to the simulator's report. With fewer than 100 classified soft wakes, or more than one soft wake in ten unclassified, it SHALL stay open. With the fixed rule's saving under 5 % of the supervisors' flow, nothing SHALL be built for triage. With at most one classified soft wake in 100 needed, the fixed rule SHALL be proposed as a change of its own and `wake-triage` SHALL NOT be built.
 
-#### Scenario: The fixed rule is safe
-- **WHEN** the report shows the fixed rule sleeping 1 needed wake in 300 soft wakes
-- **THEN** the decision is "no-go for wake-triage", the triage tasks are closed as not built, and the fixed rule is proposed separately
+#### Scenario: Too few wakes
+- **WHEN** the report holds 40 classified soft wakes
+- **THEN** the decision stays open, more days are recorded and nothing is built
 
 #### Scenario: The saving is too small either way
 - **WHEN** the fixed rule would save 2 % of the supervisors' weighted flow
 - **THEN** the decision is "no-go" and nothing is built for triage
 
+#### Scenario: Safe and too small
+- **WHEN** the fixed rule would save 2 % and none of 300 classified soft wakes was needed
+- **THEN** the decision is "no-go", nothing is built for triage and the rule is not proposed
+
+#### Scenario: The fixed rule is safe
+- **WHEN** the fixed rule would save 12 % and 1 of 300 classified soft wakes was needed
+- **THEN** the decision is "no-go for wake-triage", the triage tasks are closed as not built, and the fixed rule is proposed separately
+
 ### Requirement: Triage is built only if a model is safer than the fixed rule
-When the fixed rule is not safe, `wake-triage` SHALL be built only if a candidate member, replayed on the same recorded wakes, sleeps at most one needed wake in 100 and keeps at least half of the fixed rule's saving. The developer MAY set other thresholds in writing after reading the report.
+When the saving is worth it and the fixed rule is unsafe, the decision SHALL stay open and nothing SHALL be built for triage until a candidate member is shown to sleep at most one needed wake per 100 classified soft wakes while keeping at least half of the fixed rule's saving and no less than 3 % of the supervisors' flow. Shown otherwise, neither SHALL be built. The developer MAY set other thresholds in writing after reading the report.
 
 #### Scenario: The fixed rule is unsafe and a model is not better
-- **WHEN** the fixed rule would have slept 9 needed wakes in 100 and the replayed member sleeps 6
+- **WHEN** 9 of 100 classified soft wakes were needed and the tested member sleeps 6 of them
 - **THEN** the decision is "no-go": neither is built
 
 #### Scenario: A model is safe and keeps the saving
-- **WHEN** the fixed rule would have slept 9 needed wakes in 100, and the replayed member sleeps 1 in 100 and keeps 60 % of the saving
+- **WHEN** 9 of 100 classified soft wakes were needed, and the tested member sleeps 1 of them and keeps 60 % of the saving, which is 4 % of the flow
 - **THEN** the decision is "go" and the triage tasks are opened
 
-#### Scenario: No member can be replayed
-- **WHEN** the fixed rule is unsafe and no gateway is installed to replay a member
+#### Scenario: No member has been tested
+- **WHEN** the fixed rule is unsafe and no member has been tested
 - **THEN** the decision stays open, nothing is built, and the report says what is missing
 
 ### Requirement: Only two shapes of event are soft
@@ -169,7 +181,7 @@ When the supervisor is woken after one or more honoured sleeps, the watcher's ou
 - **THEN** the judging step of that turn lists both from the journal
 
 ### Requirement: The supervisor judges the sleeps with an explicit command
-The supervision skill's tick SHALL have a step, right after reading the watcher's output, that lists the journal with one supervision command and records for each entry whether the supervisor was `needed` or `not-needed` for that event before now. One supervision command SHALL record the answers, pass them to the pool's ledger and close the stretch. An entry that is not judged SHALL stay `unknown` and SHALL be listed again at the next wake.
+The supervision skill's tick SHALL have a step, right after reading the watcher's output, that lists the journal with one supervision command and records for each entry whether the supervisor was `needed` or `not-needed` for that event before now. One supervision command SHALL record the answers and pass them to the pool's ledger. The stretch SHALL close when no entry is left unjudged; an entry that is not judged SHALL stay `unknown` and SHALL be listed again at the next wake.
 
 #### Scenario: Nothing was missed
 - **WHEN** the supervisor judges every slept event as `not-needed`
@@ -227,8 +239,12 @@ The supervisor's periodic report SHALL include one line with the pool tokens spe
 - **THEN** the line names them and says which pair was demoted
 
 ### Requirement: The triage is switched off when it does not pay
-After 7 days of `wake-triage` in `auto`, a written result SHALL compare the supervisors' wakes and weighted tokens per hour with the simulator's baseline. The triage SHALL be switched off, and the result SHALL say so plainly, when the weighted leverage is under 10, when there was more than one miss per 100 honoured sleeps, or when the measured saving is under 3 % of the supervisors' weighted flow.
+After 7 days of `wake-triage` in `auto`, a written result SHALL compare the supervisors' wakes and tokens per hour with the simulator's baseline. The triage SHALL be switched off, and the result SHALL say so plainly, when the weighted leverage is under 10, when there was more than one miss per 100 honoured sleeps, or when the measured saving is under 3 % of the supervisors' flow. Without cache weights the comparison SHALL use raw tokens, say so, and leave the leverage test out.
 
 #### Scenario: A week with too many misses
 - **WHEN** the week shows 3 misses in 120 honoured sleeps
 - **THEN** the result recommends switching the triage off and the pair is set to `off`
+
+#### Scenario: No weights were ever measured
+- **WHEN** the week ends and the cache weights are not set
+- **THEN** the result compares raw tokens, says so in its first lines, and applies the other two tests

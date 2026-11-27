@@ -25,6 +25,14 @@ resolves to `jest/bin/jest.js` or `jest-cli/bin/jest.js`, and only when the argu
 swallowed: the preload can never break a command. The kit converts `testResults[].assertionResults[]`
 (`passed`, `failed`, `pending`/`skipped`/`todo` → skipped) to TSV lines `outcome<TAB>file › full name`.
 
+## D3b. vitest through the same preload
+In the process whose main script resolves to `vitest/vitest.mjs`, when the arguments have no `--reporter`,
+`--outputFile`, watch mode (`watch`, `dev`, `-w`, `--watch`), `--ui` or `list`, the preload appends
+`--reporter=default --reporter=json --outputFile.json=<dir>/vitest-<pid>.json`. Limit, accepted: a reporter given on
+the command line replaces those of the project's config, so a project whose config sets its own reporters (for
+example a JUnit file) loses them in the cloud run; the terminal output keeps the default reporter. vitest's JSON uses
+jest's format and goes through the same conversion.
+
 ## D4. JUnit fallback
 Only when D2 and D3 recorded nothing: the request's `junit` file, else XML files modified after the start under the
 checkout, `/tmp` and `~/.cache` (depth-limited, at most 50 files read) whose root is `testsuite(s)`.

@@ -569,6 +569,29 @@ class TestPerTestResults(Base):
         new = dict(old, runner=dict(old['runner'], brief_version=m.BRIEF_VERSION, kit_sha=m.kit_sha()))
         self.assertEqual(m.sweep_targets(new, sessions, now), [])
 
+    def test_pump_reexecutes_itself_when_an_install_replaces_the_script(self):
+        m = self.module()
+        stamps = iter([1, 2])
+        m.script_mtime = lambda path: next(stamps)
+        proj = mock.Mock()
+        proj.key, proj.top = 'pump-test', self.proj
+        m.Project = lambda repo: proj
+
+        class Exec(Exception):
+            pass
+
+        calls = []
+
+        def fake_exec(exe, argv):
+            calls.append(argv)
+            raise Exec()
+
+        with mock.patch.object(m.os, 'execv', fake_exec), mock.patch.object(m, 'settle') as settle:
+            with self.assertRaises(Exec):
+                m.cmd_pump(mock.Mock(repo=self.proj))
+        settle.assert_not_called()           # nothing dispatched with the replaced code
+        self.assertEqual(calls[0][1], os.path.realpath(SCRIPT))
+
     def test_runner_of_another_kit_is_not_reused(self):
         m = self.module()
         now = time.time()

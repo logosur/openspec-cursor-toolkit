@@ -45,6 +45,16 @@ A job of the project holding a slot or waiting in the machine queue blocks `ALLI
 ### D5 — The skill carries the cost model
 The watcher reference tells the supervisor that the cost of a tick is the wake, and allows doubling `--timeout` after two unchanged ticks up to 7200 s, bounded by the nearest deadline of the work in flight. The first event returns it to 600 s.
 
+### D6 — Keep the base at 900 s and the cap at 7200 s (decision of task 4.2 and 4.3)
+Decided on 2026-11-27 from the 24-hour comparison in `evidence/measurement.md`. The values do not change.
+
+- **What the data show.** On the same four supervisors, `ALLIDLE` went from 20 wakes and 27.5 M tokens in the 24 hours before the change to 6 wakes and 5.8 M in the 24 hours after. After the change it is 3 % of the watcher wakes and 2.6 % of their tokens. The wakes the cap and the base still allow cost about 1 M tokens each.
+- **A higher cap would save almost nothing here.** A fully idle day gives about 15 reports with the cap at 2 hours and 10 with a cap of 4 hours, so it can save about 5 M tokens per fully idle supervisor-day. In the measured day no supervisor was idle for that long without a queued job: of the 6 reports, a 4-hour cap would have removed at most one. The saving is under 1 % of the 227 M tokens of all watcher wakes, and it would delay the report of a project idle for a bad reason from 2 to 4 hours.
+- **A larger base would save almost nothing either.** With a base of 30 minutes a fully idle day gives about 14 reports instead of 15, and the first report of a project that has just gone idle, the one that matters (D2), would come 15 minutes later.
+- **The sample is thin.** The "after" side has 6 `ALLIDLE` samples, not the 10 the task asked for; the measurement report says why. The decision therefore rests on the arithmetic of the schedule and on the measured cost per wake, and it does not claim that the cap value is optimal.
+- **Reopen when** a window with at least 10 `ALLIDLE` samples on the "after" side shows them above 10 % of the watcher wake tokens, or when a project is reported as idle for a bad reason later than its owner can accept.
+- **Where the remaining wakes are.** Outside the parameters of this change, the 24 hours show `TIMEOUT` wakes as the main cost (96 of 189 wakes, 57 % of the tokens), driven by one supervisor that armed its watcher with `--timeout 300` instead of doubling it (D5 allows doubling, it does not require it), and the first announcement of each new queued job (39 against 10). This is recorded as an observation and not as a task of this change.
+
 ## Risks / Trade-offs
 
 - A project idle for a bad reason is reported later. Bounded by the cap and by the hard signals, which are unchanged.
@@ -54,4 +64,4 @@ The watcher reference tells the supervisor that the cost of a tick is the wake, 
 
 - Unit tests of `allidle_line` and of the re-announce intervals in `test_supervisor_lock.py`; mutation of each rule makes a test fail.
 - `supervisor-lock self-test` on the repo copy and on the installed copy.
-- Field measurement: see `evidence/measurement.md`. The 24-hour comparison is the open task.
+- Field measurement: see `evidence/measurement.md`: the first comparison (4 hours against 3 hours) and the 24-hour comparison on four supervisors. The decision about the values is D6.

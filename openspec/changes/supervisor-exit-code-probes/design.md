@@ -130,7 +130,7 @@ weakened) and the row is redone.
 
 FACT (orchestrator baseline on the unmodified tree): the local gate is the piece test, run the way CI runs it:
 `python3 -m unittest scripts.toolkit.tests.pieces.test_supervisor_lock.SelfTestTest.test_the_whole_self_test_passes_in_a_temp_home`
-exits 0 in about 408 s. The whole module (`python3 -m unittest scripts.toolkit.tests.pieces.test_supervisor_lock`) is the
+exits 0 in about 7 min. The whole module (`python3 -m unittest scripts.toolkit.tests.pieces.test_supervisor_lock`) is the
 same gate plus the fast tests of the entry point. Running `global/scripts/supervisor-lock self-test` directly under the real
 `HOME` is not the gate: it inherits the session's environment, and a preparation run done that way showed 9 `FAIL` lines that
 the piece test does not show. The self-test is never run against the real `HOME`.

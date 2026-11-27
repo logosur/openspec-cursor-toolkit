@@ -33,7 +33,7 @@ is shown to fail when its code path changes (recorded in `evidence/mutations.md`
 
 The preparation phase ran `supervisor-lock self-test` directly under the real `HOME` and saw 9 `FAIL`. That is not the gate.
 FACT: run the way CI runs it, through the piece test in a temporary `HOME`, the unmodified tree is green (exit 0, about
-408 s). Design D6 and tasks 1.1 and 4.1 now use that piece test as the local gate.
+about 7 min). Design D6 and tasks 1.1 and 4.1 now use that piece test as the local gate.
 
 ## Applied (`repasa-spec`, round 1)
 

@@ -18,11 +18,11 @@ Phase P2 of `run-spec` (`repasa-spec`), 2026-11-27. Starting commit: `182c084`. 
 
 | Run | Tree | Exit | `ok` | `FAIL` | Last line | Wall time |
 |-----|------|-----:|-----:|-------:|-----------|----------:|
-| Orchestrator baseline (unittest, `SelfTestTest.test_the_whole_self_test_passes_in_a_temp_home`) | unmodified | 0 | — | 0 | — | about 408 s |
-| Baseline count (copy, piece-test environment) | unmodified | 1 | 645 | 1 | `FAIL: 1 failed` | 243 s |
-| Local gate (unittest module, 82 tests) | final | 0 | — | 0 | `OK` | 355 s |
-| Final count (copy, piece-test environment) | final | 0 | 652 | 0 | `ok: 0 failed` | 243 s |
-| Toolkit suite (`unittest discover -s scripts/toolkit/tests -t . -v`, 1221 tests, includes the gate) | final | 0 | — | 0 | `OK` | 1291 s |
+| Orchestrator baseline (unittest, `SelfTestTest.test_the_whole_self_test_passes_in_a_temp_home`) | unmodified | 0 | — | 0 | — | about 7 min |
+| Baseline count (copy, piece-test environment) | unmodified | 1 | 645 | 1 | `FAIL: 1 failed` | about 4 min |
+| Local gate (unittest module, 82 tests) | final | 0 | — | 0 | `OK` | about 6 min |
+| Final count (copy, piece-test environment) | final | 0 | 652 | 0 | `ok: 0 failed` | about 4 min |
+| Toolkit suite (`unittest discover -s scripts/toolkit/tests -t . -v`, 1221 tests, includes the gate) | final | 0 | — | 0 | `OK` | about 21 min |
 
 Every label named in design D2 and D3 printed `ok` in the final run. Every D2 label printed `ok` in the baseline count run.
 652 = 646 (645 `ok` + 1 `FAIL` of the baseline count run) + 6 new checks.

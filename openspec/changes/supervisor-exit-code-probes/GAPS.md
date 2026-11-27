@@ -30,7 +30,7 @@ the fallback; task 2.3 checks it first).
 
 | ID | Sev | Gap | Evidence (FACT) | Status | Where closed |
 |----|-----|-----|-----------------|--------|--------------|
-| G-14 | high | Tasks 1.1/4.1, design D6 and the spec scenario "Green self-test" use `supervisor-lock self-test` run directly (under the real `HOME`) and a CI run as evidence; the local gate is the piece test, which is green | orchestrator baseline: `python3 -m unittest scripts.toolkit.tests.pieces.test_supervisor_lock.SelfTestTest.test_the_whole_self_test_passes_in_a_temp_home` exit 0 in about 408 s on the unmodified tree | HYDRATED (Phase 2) | design D6, tasks 1.1, 4.1, spec "Green self-test", READY-TO-APPLY |
+| G-14 | high | Tasks 1.1/4.1, design D6 and the spec scenario "Green self-test" use `supervisor-lock self-test` run directly (under the real `HOME`) and a CI run as evidence; the local gate is the piece test, which is green | orchestrator baseline: `python3 -m unittest scripts.toolkit.tests.pieces.test_supervisor_lock.SelfTestTest.test_the_whole_self_test_passes_in_a_temp_home` exit 0 in about 7 min on the unmodified tree | HYDRATED (Phase 2) | design D6, tasks 1.1, 4.1, spec "Green self-test", READY-TO-APPLY |
 | G-15 | med | D5 asks for 14 sequential full runs, one mutation each (about 7 min each) | `cmd_self_test` is one function with no way to run a subset | HYDRATED (Phase 2) | design D5 (three batches on throw-away copies, sites sharing a statement split, expected labels written first, one run at a time), tasks group 3, spec "A mutated site turns its check red" |
 | G-16 | med | D2's "Existing check" column misses checks that assert the same codes, so a batch could show `FAIL` labels nobody expected | `selftest.py`: second busy-release check and the workspace release checks (6), `backlog: a park is void …` (7), the `refused()` family and the other-session beat (8) | HYDRATED (Phase 2) | design D2 column completed; D5 step 3 |
 | G-17 | low | The S3c scenario says "a project with no lock", but `cmd_cloud` never reads the lock and the probe runs on the cloud project, which holds one | `cloud.cmd_cloud` | HYDRATED (Phase 2) | spec scenario S3c, design D3 N2 |
@@ -84,7 +84,7 @@ The loop ends after round 1 (`gaps_pending` = 0).
 | Mutations | `evidence/mutations.md`: 14 rows, each with its own `FAIL` labels; batch `FAIL` counts add up (17 = 3+2+2+2+8, 9 = 1+1+3+3+1, 9 = 3+2+2+2); `ok + FAIL` = 652 per batch | met (not rerun here) |
 | Scope | `git diff --stat origin/main -- global/ scripts/` (origin/main = 182c084): only `selftest.py` (+32) and `test_supervisor_lock.py` (floor 558/557 → 564/563); the only removed line is the old floor | met |
 | Non-goals | proposal Non-goals: the private `supervisa-sesiones` skill text is not touched; nothing under `global/skills/` in the diff | met |
-| Gates | `python3 -m unittest scripts.toolkit.tests.pieces.test_supervisor_lock.SelfTestTest` exit 0 (3 tests, 301 s, temp `HOME`); `python3 scripts/validate-toolkit.py` exit 0; `openspec validate supervisor-exit-code-probes --strict` exit 0; `python3 scripts/privacy-check.py` exit 0 (0 findings, untracked files included) | met |
+| Gates | `python3 -m unittest scripts.toolkit.tests.pieces.test_supervisor_lock.SelfTestTest` exit 0 (3 tests, about 5 min, temp `HOME`); `python3 scripts/validate-toolkit.py` exit 0; `openspec validate supervisor-exit-code-probes --strict` exit 0; `python3 scripts/privacy-check.py` exit 0 (0 findings, untracked files included) | met |
 
 Observations (INFERENCE, outside the scope; recorded, not counted):
 

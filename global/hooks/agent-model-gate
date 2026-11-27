@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""PreToolUse(Agent, Task, mcp__ccd_session__start_session, advisor): no expensive model without a reason.
+
+Why: a subagent that does not name a model inherits the caller's, which is usually the most expensive one, and
+a second opinion from a stronger model costs as much as a long turn. Written rules ("implementers run on the cheap
+model") are not followed by themselves; this gate makes them deterministic. It never changes a call, it only denies.
+
+What it checks, per tool (every deny is a plain PreToolUse deny with the way out in the message):
+  - `Agent` (and `Task`, its older name): `model` must be given, unless `subagent_type` is `fork` (a fork ignores
+    `model`). `inherit` counts as not given. A model of the Opus or Fable family is denied unless `description` or
+    `prompt` carries the escalation mark `[opus: <reason of at least 10 characters>]`, or `description` matches
+    `panel_pattern` (the decision panel, which is meant to run on the strong model).
+  - `mcp__ccd_session__start_session`: a call that carries a `prompt` (not a title-only offer, not a `proposal_id`
+    start) needs an explicit `model`; an Opus or Fable id needs the same mark in `prompt` or `background`.
+  - `advisor`: at most `advisor_max_per_day` calls per session in a rolling 24 hours (0 denies every call). The
+    counter lives in <state>/<session id>.json. The deny tells the session to carry on without the advisor.
+    Note: in the transcripts this was written against the advisor shows up as a server-side tool call, which is not
+    run by the client, so the host may never fire PreToolUse for it. The matcher is registered anyway: if the host
+    does call it, the cap applies, and if it does not, nothing is lost.
+
+Config piece `agent-model-gate` (a wrong or missing value keeps the default below):
+  enabled true, require_explicit_model true, opus_needs_marker true, panel_pattern "^Panel" (regex, case
+  insensitive, searched in `description`), advisor_max_per_day 4, exempt_paths [] (folder prefixes of the session's
+  cwd where nothing applies), austerity false. With austerity on, Opus and Fable are denied even with the mark (the
+  panel excepted; `opus_needs_marker` does not matter then) and the advisor cap drops to 1.
+
+Never breaks a session: any exception, a malformed input or a broken config lets the call through with no output
+and a line in <state>/errors.log. No network, no subprocess. Denies are logged in <state>/decisions.log.
+State dir: ~/.cache/claude-toolkit/agent-model-gate (override: AGENT_MODEL_GATE_STATE).
+Rule: ~/.claude/rules/subagentes-con-modelo-explicito.md.
+"""
+import fcntl
+import hashlib
+import json
+import os
+import re
+import sys
+import time
+import traceback
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'scripts', 'lib'))
+try:
+    from toolkit_config import load_checked as _load_config
+except ImportError:  # no helper, or one older than load_checked: the code's defaults
+    def _load_config(piece, defaults):
+        return dict(defaults)
+
+DEFAULTS = {
+    'enabled': True,
+    'require_explicit_model': True,
+    'opus_needs_marker': True,
+    'panel_pattern': '^Panel',
+    'advisor_max_per_day': 4,
+    'exempt_paths': [],
+    'austerity': False,
+}
+STATE_DIR = os.environ.get('AGENT_MODEL_GATE_STATE') or os.path.expanduser('~/.cache/claude-toolkit/agent-model-gate')
+AGENT_TOOLS = ('Agent', 'Task')
+START_SESSION = 'mcp__ccd_session__start_session'
+ADVISOR = 'advisor'
+EXPENSIVE = re.compile(r'opus|fable', re.I)
+MARKER = re.compile(r'\[opus:\s*([^\]]+)\]', re.I)
+MIN_REASON = 10
+WINDOW_S = 24 * 3600
+STALE_FILE_S = 3 * 24 * 3600
+NO_MODEL = ('', 'inherit')
+
+REASON_MODEL = (
+    'agent-model-gate: this {what} names no model, so it would run on the caller\'s, usually the most expensive one. '
+    'Send it again with {fix}. Implementation, exploration and verification go to a Sonnet model; trivial searches '
+    'to a Haiku one.{escalate}'
+)
+REASON_ESCALATE = (
+    ' To use an Opus or Fable model for a complex piece, write [opus: <reason of at least {n} characters>] in {where}.'
+)
+REASON_EXPENSIVE = (
+    'agent-model-gate: model "{model}" is of the Opus or Fable family and the call has no reason for it. Use a Sonnet '
+    'model (Haiku for trivial searches). If the piece really is complex (architecture, security, concurrency, a hard '
+    'bug, two failed cheaper attempts), repeat the call with [opus: <reason of at least {n} characters>] in {where}.'
+)
+REASON_AUSTERITY = (
+    'agent-model-gate: austerity is on, so Opus and Fable models are denied even with a reason (only the decision '
+    'panel is excepted). Use a Sonnet model, or Haiku for trivial searches.'
+)
+REASON_ADVISOR = (
+    'agent-model-gate: the advisor was used {used} time(s) in this session in the last 24 hours and the cap is {cap}. '
+    'Carry on without the advisor: decide with what is documented and, if that does not settle it, with the decision '
+    'panel.'
+)
+
+
+def _append(name, text):
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        with open(os.path.join(STATE_DIR, name), 'a') as fh:
+            fh.write(text)
+    except OSError:
+        pass
+
+
+def log_error():
+    _append('errors.log', '--- %s\n%s\n' % (time.strftime('%Y-%m-%dT%H:%M:%S'), traceback.format_exc()))
+
+
+def log_decision(sid, tool, decision, detail):
+    _append('decisions.log', '\t'.join((time.strftime('%Y-%m-%dT%H:%M:%S'), sid, tool, decision, detail)) + '\n')
+
+
+def deny(reason):
+    json.dump({'hookSpecificOutput': {
+        'hookEventName': 'PreToolUse',
+        'permissionDecision': 'deny',
+        'permissionDecisionReason': reason,
+    }}, sys.stdout)
+
+
+def text_of(value):
+    return value if isinstance(value, str) else ''
+
+
+def has_marker(*texts):
+    """True if any text carries [opus: <reason>] with a reason of at least MIN_REASON characters."""
+    for text in texts:
+        for match in MARKER.finditer(text_of(text)):
+            if len(match.group(1).strip()) >= MIN_REASON:
+                return True
+    return False
+
+
+def is_panel(description, pattern):
+    try:
+        return bool(re.search(pattern, text_of(description).strip(), re.I))
+    except re.error:
+        return bool(re.search(DEFAULTS['panel_pattern'], text_of(description).strip(), re.I))
+
+
+def exempt(cwd, prefixes):
+    if not cwd or not prefixes:
+        return False
+    here = os.path.realpath(os.path.expanduser(cwd))
+    for prefix in prefixes:
+        base = os.path.realpath(os.path.expanduser(prefix)).rstrip('/')
+        if base and (here == base or here.startswith(base + '/')):
+            return True
+    return False
+
+
+def check_model(sid, tool, cfg, model, marked, panel, what, fix, where):
+    """The model checks shared by Agent and start_session. Returns True if it denied."""
+    model = model.strip() if isinstance(model, str) else ''
+    expensive = bool(EXPENSIVE.search(model))
+    if model.lower() in NO_MODEL:
+        if cfg['require_explicit_model']:
+            log_decision(sid, tool, 'deny-no-model', what)
+            escalate = REASON_ESCALATE.format(n=MIN_REASON, where=where) if cfg['opus_needs_marker'] and \
+                not cfg['austerity'] else ''
+            deny(REASON_MODEL.format(what=what, fix=fix, escalate=escalate))
+            return True
+        return False
+    if not expensive or panel:
+        return False
+    if cfg['austerity']:
+        log_decision(sid, tool, 'deny-austerity', model)
+        deny(REASON_AUSTERITY)
+        return True
+    if cfg['opus_needs_marker'] and not marked:
+        log_decision(sid, tool, 'deny-expensive', model)
+        deny(REASON_EXPENSIVE.format(model=model, n=MIN_REASON, where=where))
+        return True
+    return False
+
+
+def advisor_decision(sid, cfg):
+    """Count this call in the session's rolling day; True if it is over the cap and was denied."""
+    cap = cfg['advisor_max_per_day']
+    if cfg['austerity']:
+        cap = min(cap, 1)
+    safe = sid if re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', sid) else hashlib.sha256(sid.encode()).hexdigest()[:32]
+    os.makedirs(STATE_DIR, exist_ok=True)
+    path = os.path.join(STATE_DIR, safe + '.json')
+    now = time.time()
+    with open(path, 'a+') as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        fh.seek(0)
+        try:
+            stamps = [float(t) for t in json.load(fh).get('advisor', [])]
+        except (ValueError, AttributeError, TypeError):
+            stamps = []
+        stamps = [t for t in stamps if now - t < WINDOW_S]
+        if len(stamps) >= cap:
+            denied = True
+        else:
+            denied = False
+            stamps.append(now)
+            fh.seek(0)
+            fh.truncate()
+            json.dump({'advisor': stamps}, fh)
+    if denied:
+        log_decision(sid, ADVISOR, 'deny-advisor-cap', '%d/%d' % (len(stamps), cap))
+        deny(REASON_ADVISOR.format(used=len(stamps), cap=cap))
+    prune(now)
+    return denied
+
+
+def prune(now):
+    """Drop the counters of sessions that have been quiet for days; best effort."""
+    try:
+        for name in os.listdir(STATE_DIR):
+            if name.endswith('.json'):
+                path = os.path.join(STATE_DIR, name)
+                if now - os.path.getmtime(path) > STALE_FILE_S:
+                    os.unlink(path)
+    except OSError:
+        pass
+
+
+def decide(payload):
+    tool = payload.get('tool_name') or ''
+    if tool not in AGENT_TOOLS and tool not in (START_SESSION, ADVISOR):
+        return
+    cfg = _load_config('agent-model-gate', DEFAULTS)
+    if not cfg['enabled'] or exempt(payload.get('cwd'), cfg['exempt_paths']):
+        return
+    inp = payload.get('tool_input')
+    inp = inp if isinstance(inp, dict) else {}
+    sid = text_of(payload.get('session_id')) or 'unknown'
+
+    if tool == ADVISOR:
+        advisor_decision(sid, cfg)
+        return
+
+    if tool == START_SESSION:
+        if not text_of(inp.get('prompt')).strip() or inp.get('proposal_id'):
+            return  # a title-only offer, or the start of a proposal the developer already accepted
+        check_model(sid, tool, cfg, inp.get('model'), has_marker(inp.get('prompt'), inp.get('background')), False,
+                    'session start', 'an explicit model id (a Sonnet one unless the work is complex)',
+                    'prompt or background')
+        return
+
+    if text_of(inp.get('subagent_type')).strip().lower() == 'fork':
+        return  # a fork ignores `model` and runs on the caller's
+    description = inp.get('description')
+    check_model(sid, tool, cfg, inp.get('model'), has_marker(description, inp.get('prompt')),
+                is_panel(description, cfg['panel_pattern']), 'subagent call',
+                'model: "sonnet" (or "haiku" for trivial searches)', 'description or prompt')
+
+
+def main():
+    try:
+        payload = json.load(sys.stdin)
+        if isinstance(payload, dict):
+            decide(payload)
+    except Exception:
+        log_error()
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

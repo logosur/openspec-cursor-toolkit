@@ -1,6 +1,7 @@
 name: core
 summary: >-
   General mechanics for unattended agent work on one machine: authorship gate, process-kill gate,
+  agent-model gate (no subagent or session on an expensive model without a reason, a cap on the advisor),
   worktree placement, the per-piece config helper, the rules that explain each of them and the
   decision panel that replaces questions in unattended work.
 requires:
@@ -16,12 +17,14 @@ files:
   - {src: global/scripts/lib/toolkit_config.py, dest: scripts/lib/toolkit_config.py, mode: "0755"}
   - {src: global/hooks/commit-authorship-gate, dest: hooks/commit-authorship-gate, mode: "0755"}
   - {src: global/hooks/process-kill-gate, dest: hooks/process-kill-gate, mode: "0755"}
+  - {src: global/hooks/agent-model-gate, dest: hooks/agent-model-gate, mode: "0755"}
   - {src: global/hooks/worktree-location-gate, dest: hooks/worktree-location-gate, mode: "0755"}
   - {src: global/scripts/worktree-location, dest: scripts/worktree-location, mode: "0755"}
   - {src: global/rules/autoria-commits.md, dest: rules/autoria-commits.md}
   - {src: global/rules/matar-procesos-solo-propios.md, dest: rules/matar-procesos-solo-propios.md}
+  - {src: global/rules/subagentes-con-modelo-explicito.md, dest: rules/subagentes-con-modelo-explicito.md}
   - {src: global/rules/worktrees-ubicacion.md, dest: rules/worktrees-ubicacion.md}
   - {src: global/skills/panel-de-decision/SKILL.md, dest: skills/panel-de-decision/SKILL.md}
 hooks:
   - global/settings/hooks.core.json
-config: [worktree-location]
+config: [worktree-location, agent-model-gate]

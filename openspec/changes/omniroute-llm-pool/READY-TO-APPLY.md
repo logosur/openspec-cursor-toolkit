@@ -1,34 +1,40 @@
-# READY TO APPLY — omniroute-llm-pool (stage 0 only)
+# READY TO APPLY — omniroute-llm-pool (tasks 6.4 and 6.5 only)
 
-> **Date:** 2026-11-27
+> **Date:** 2026-11-27, after the apply of stage 0
 
 ## Verdict
 
-**READY TO APPLY — stage 0 only. NEEDS HYDRATION for the rest.** Proposal, design (D1–D18), 7 specs (97 requirements / 169 scenarios) and tasks (58, none done); `openspec validate --strict` passes; the gap review, in three rounds, left 2 gaps pending, both outside stage 0 (G-83, G-84). See `VERIFY.md` for the gates and the evidence map, and `GAPS.md` for what the review changed.
+**Stage 0 is applied and its go/no-go is open: row 1 of design D15, too little data. READY TO APPLY — tasks 6.4 and 6.5 only.** Proposal, design (D1–D18), 7 specs (102 requirements / 183 scenarios) and tasks (61: 4 done, 57 open); `openspec validate --strict` passes; 0 gaps pending. See `VERIFY.md` for the gates and the evidence map, `GAPS.md` for what the review and the apply changed, and `evidence/` for the two reports.
 
-## Scope of the apply
+## What stage 0 found
 
-1. Task 1.7: how the usage limit weighs cached tokens, from data that already exists.
-2. Tasks 6.1 and 6.2: the simulator as one self-contained script, and its report on real wakes: for each soft one, whether the supervisor was needed, and what a fixed rule with no model would have saved and missed.
-3. Task 6.3: the go/no-go for the watcher's triage, recorded in `design.md` as one of the four rows of D15: too little data; too small to bother; the fixed rule is enough; or the rule is unsafe and a model must be tested. **The apply stops here and reports.**
-4. In parallel, once the developer has installed the gateway and connected a provider (task 1.2): the spike, tasks 1.1 and 1.3 to 1.6.
+- **Cache weights** (`evidence/cache-weights.md`): a cache-read token counts toward the usage limit about a fiftieth of a cache-write token (0.02, range 0 to 0.05). A soft supervisor wake of about 1.4 million raw tokens is worth about 42,000 cache-write tokens.
+- **The simulator** (`evidence/what-if.md`): over seven days and nine supervisors, 941 wakes, 202 of them soft and classified. A fixed rule that sleeps every soft wake would have saved at most 5.6 % of the supervisors' flow at the central weights (7.5 % in raw tokens) and would have slept 22 wakes where the supervisor turned out to be needed, 10.9 per 100.
+- **Why it does not decide yet:** one wake in three of those seven days cannot be classified, because the watcher's output lived in temporary files that a restart erased; and the hours since the watcher's back-off hold 23 soft wakes where 100 are asked for.
+- **What it already shows:** the fixed rule is not safe by the threshold, whatever the unclassified wakes hide; and the saving sits on the 5 % line below which nothing is built.
+
+## Scope of the next apply
+
+1. Task 6.4: the watcher appends the events of each wake to a file beside the supervisor's lock, and the simulator reads it.
+2. Task 6.5, two to three days later: the simulator again, on a window after the back-off with at least 100 classified soft wakes; the row is recorded in `design.md`. **The apply stops there and reports.**
+3. In parallel, once the developer has installed the gateway and connected a provider (task 1.2): the spike, tasks 1.1 and 1.3 to 1.6.
 
 ## Not in this apply
 
-- Groups 2 to 5 and 7 to 9. They wait for 6.3 and, where they talk to the gateway, for 1.3 and 1.6.
+- Groups 2 to 5 and 7 to 9, and task 6.6 (the shadow test of a member). They wait for 6.5 and, where they talk to the gateway, for 1.2, 1.3 and 1.6.
 - Installing the gateway, creating provider accounts, typing any key: the developer's.
 
 ## Decisions locked (design.md)
 
-D1 optional module, every other piece through a provider · D2 gateway never wired into global configuration · D4 definitions, decisions and observed state in three places; limits and catalog in code · D5 five task kinds, `internal` is structured fields only · D6 promotion by the developer with judged evidence · D7 dial, schedules, `follow-usage` under a ceiling, stop as a flag · D8 two soft shapes, a journal, five bounds, explicit judging · D9 own redactor · D13 widening checked by the command · D10 a fixed order picks the member · D15 simulate first, a safe fixed rule wins, removal criterion · D16 caller check is scope, not security · D17 pool text is data.
+D1 optional module, every other piece through a provider · D2 gateway never wired into global configuration · D4 definitions, decisions and observed state in three places; limits and catalog in code · D5 five task kinds, `internal` is structured fields only · D6 promotion by the developer with judged evidence · D7 dial, schedules, `follow-usage` under a ceiling, stop as a flag · D8 two soft shapes, a journal, five bounds, explicit judging · D9 own redactor · D13 widening checked by the command · D10 a fixed order picks the member · D15 simulate first, a safe fixed rule wins, a member is tested in shadow, removal criterion · D16 caller check is scope, not security · D17 pool text is data.
 
 ## Open for the developer
 
-- The thresholds of D15, after he reads the simulator's report.
-- If the report says the fixed rule is unsafe: how a pool model is tested before the triage is built (G-83).
+- **Whether to go on at all.** The saving at stake is about 6 % of the supervisors' flow at most, and a model can only save less than the fixed rule. He may close the triage now, keep the pool for digests alone, or wait for task 6.5.
+- The thresholds of D15, now that he can read the report.
 - Whether "child sessions" includes sessions he opens himself in a supervised project (D16).
 - Whether he has or wants a provider that neither trains on prompts nor keeps them long, or a local model: without one the digest task kinds stay closed.
 
 ## Next step
 
-`/aplica-tarea omniroute-llm-pool`, in a new message, for stage 0.
+`/aplica-tarea omniroute-llm-pool`, in a new message, for tasks 6.4 and 6.5.

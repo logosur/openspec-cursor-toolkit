@@ -1,0 +1,33 @@
+piece: mailbox
+dest: scripts/mailbox
+kind: cli
+probes:
+  - name: help lists the subcommands
+    args: [--help]
+    exit: [0]
+    stdout: any
+    contains: "mailbox search ACCOUNT"
+  - name: self-test passes from the installed copy
+    args: [self-test]
+    exit: [0]
+    stdout: any
+    contains: "self-test: ok"
+    timeout: 120
+  - name: a corrupt config does not crash
+    args: [accounts]
+    corrupt_config: true
+    exit: [0]
+    stdout: any
+    contains: "no account configured"
+  - name: an unknown account is a usage error
+    args: [search, no-such-account]
+    exit: [2]
+    stdout: empty
+  - name: accounts runs with whatever the machine configures
+    args: [accounts]
+    exit: [0]
+    stdout: any
+  - name: doctor without --live reads no network and does not crash
+    args: [doctor]
+    exit: [0, 3]
+    stdout: any

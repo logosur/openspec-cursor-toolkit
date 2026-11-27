@@ -1,7 +1,7 @@
 # GAPS — omniroute-llm-pool
 
 > **Date:** 2026-11-27 · **Mode:** A (existing change folder) · `main` @ `95991f4`
-> **Real status:** gaps verified → hydrated in `proposal.md`, `design.md`, `tasks.md` and the seven spec deltas, in three rounds; **2 gaps are left pending on purpose** (G-83, G-84). No product code was written.
+> **Real status:** gaps verified → hydrated in `proposal.md`, `design.md`, `tasks.md` and the seven spec deltas, in three rounds; the 2 gaps left pending by the review (G-83, G-84) were hydrated on 2026-11-27 with the simulator's report in hand, together with 4 gaps the apply of stage 0 found (section G). **0 pending.** Stage 0 is applied: its code is the two scripts and the test file under `evidence/`; no product code was written.
 > **Second round:** a fresh reviewer read the hydrated documents (commit `56e46c6`) and found 16 more gaps, section E; they are hydrated too. Rows of that section cite the first hydration as `hyd:<file>`; `git show 56e46c6:openspec/changes/omniroute-llm-pool/<file>` reproduces them.
 > **Third round:** a second fresh reviewer read the diff of the second round (commit `d55ab4d`, cited as `hyd2:<file>`) and found defects in what that round had written, section F. They were corrected by narrowing or by choosing one of two conflicting statements, with no new mechanism; the two that needed one are left pending. **This third correction was not read by a fresh reviewer**: the loop's five iterations were spent.
 > **Reviewed draft:** the change as first committed (`13b2264`). Rows about the documents themselves cite that draft as `draft:<file>:<line>`; `git show 13b2264:openspec/changes/omniroute-llm-pool/<file>` reproduces them.
@@ -139,8 +139,8 @@ Requirement names: **GW** gateway, **RG** registry, **RT** routing, **CT** contr
 
 | ID | Sev | Gap | Evidence (FACT) | Status | Req |
 |----|-----|-----|-----------------|--------|-----|
-| G-83 | High | When the fixed rule turns out unsafe, nothing says how a candidate member is tested: stage 0 has no pool code, the brief builder was gated on the "go" it is needed for, and three of the brief's bounds are not in the history | `hyd2:tasks.md` 5.4 ("only if 6.3 is go"), 6.1; `hyd2:design.md` D15 case 3 | **FACT** | Pending: `/mejora-tarea` once the simulator's report exists (replay on rebuilt briefs, or rule and model side by side in `shadow`). Until then D15 row 4 keeps the decision open and nothing is built |
-| G-84 | Med | Three task kinds have no caller: nothing says which session asks for `turn-report-check`, `closing-evidence-summary` and `dialog-draft`, nor at which step | `hyd2:tasks.md` 5.6, 5.7 | **FACT** | Pending: `/mejora-tarea` if the developer wants the pool for digests. T 5.7 covers `log-digest` only until then |
+| G-83 | High | When the fixed rule turns out unsafe, nothing says how a candidate member is tested: stage 0 has no pool code, the brief builder was gated on the "go" it is needed for, and three of the brief's bounds are not in the history | `hyd2:tasks.md` 5.4 ("only if 6.3 is go"), 6.1; `hyd2:design.md` D15 case 3 | HYDRATED (2026-11-27) | SO "A candidate member is tested in shadow on live wakes"; SO "The shadow test is built only when it can run"; D15 (why not a replay, and what the test costs); T 6.6; T 5.2, 5.4, 5.5 re-gated |
+| G-84 | Med | Three task kinds have no caller: nothing says which session asks for `turn-report-check`, `closing-evidence-summary` and `dialog-draft`, nor at which step | `hyd2:tasks.md` 5.6, 5.7 | HYDRATED (2026-11-27) | SO "Each digest task kind has one caller and one step" (the supervisor, the closing session, the question session); T 5.7 |
 | G-85 | High | The task proposed the fixed rule after every no-go, also when the rule is unsafe; and a rule both safe and too small had two decisions | `hyd2:tasks.md` 6.3 against `hyd2:specs/supervision-offload/spec.md` "…neither is built" | HYDRATED | D15 as one ordered table, first row wins; SO "Nothing is built for a small saving, and a safe fixed rule wins" (scenario "Safe and too small"); T 6.3 |
 | G-86 | High | The simulator could not tell which past timeouts were soft, nor rebuild three of the five bounds for past wakes | `hyd2:design.md` D8 bound 1 ("without it a `TIMEOUT` is hard"); no recorded wake has a `--wake-by` | HYDRATED | SO "The simulator compares today with a fixed rule" (soft by the watcher's output; figures labelled upper bounds); D15; T 6.1 |
 | G-87 | Med | The decision's terms were loose: "one in 100" of what, no minimum sample, an open list for "needed", no place for a wake that cannot be classified, an "open" result no task handled | `hyd2:design.md` D15; `hyd2:tasks.md` Order | HYDRATED | SO "A simulator replays recorded wakes before any triage is built"; D15 table row 1; D18; tasks, Order |
@@ -154,6 +154,17 @@ Requirement names: **GW** gateway, **RG** registry, **RT** routing, **CT** contr
 | G-95 | Low | Two requirements were cited by no task by name, and five citations were clipped | `hyd2:tasks.md` 1.7, 2.1, 2.4, 3.2, 4.3, 5.2 | HYDRATED | Tasks corrected; VERIFY's table is generated by a script that fails on a title or a task id that does not exist |
 | G-96 | Low | "Five bounds" in the design against four in SO "A sleep is bounded" | — | REJECTED | Not a contradiction: the fifth bound is its own requirement, SO "The deadline is an argument, and nothing is triaged while something waits" |
 | G-97 | Low | `scripts/toolkit/apply.py:46-64` does not show the refusal to reinstall | — | REJECTED | The same row of the Context table cites `scripts/toolkit/cli.py:71-78` for the refusal; `apply.py` is cited for where the installer writes |
+
+### G. Found while applying stage 0 (2026-11-27)
+
+Rows cite the change as merged before the apply as `hyd3:<file>`; `git show d650685:openspec/changes/omniroute-llm-pool/<file>` reproduces them. Figures are those of `evidence/what-if.md`.
+
+| ID | Sev | Gap | Evidence (FACT) | Status | Req |
+|----|-----|-----|-----------------|--------|-----|
+| G-98 | High | The simulator needs the watcher's output of each wake, and that output is kept nowhere durable: it is in the transcript only when the supervisor read it with a command, and otherwise in a temporary file. A restart on the night of the run left 89 of 297 soft-or-unknown wakes of seven days with no output (38 started no turn; in 31 the supervisor's command named the file but showed only its last lines, after the events; in 20 no command named it), so "record more days" would record nothing readable. The file alone may not be enough: the 38 wakes with no turn stay unclassified, about 13 % of the window | `evidence/what-if.md`: 95 unclassified of 297 (32 %); a run before the restart had 33 of 264 | HYDRATED | SO "The watcher keeps the events of each wake"; D15; T 6.4, T 6.5 |
+| G-99 | Med | A wake whose watcher was stopped before printing anything had no class: the text made it unclassified, though nothing could have been triaged there | `hyd3:design.md` D15 ("the watcher's output is nowhere to be found"); 15 such wakes in seven days, none stopped by the supervisor's own stop call | HYDRATED | SO "A watcher that was stopped is a hard wake"; D15; T 6.1. The row of D15 is the same with either reading (`evidence/what-if.md`) |
+| G-100 | Low | "Needed" was read "until the next arming of the watcher", but supervisors re-arm first and keep acting in the same turn | `hyd3:specs/supervision-offload/spec.md` "A simulator replays…"; real transcripts | HYDRATED | Same requirement and D15: the turn the wake started, up to the next message that is not a tool result |
+| G-101 | Med | The cache weights came out as a range, and the saving crosses the 5 % line inside it: nothing said which value decides the row | `evidence/cache-weights.md` (cache read 0 to 0.05); `evidence/what-if.md` (3.5 % to 6.4 %) | HYDRATED | D15 "Which weights decide": the central weights, with both ends reported. Chosen with the figures in view: it puts the saving above the line (5.6 %), where a weight of 0, which the data does not rule out, puts it below (3.5 %). It is the developer's to confirm |
 
 ## Useful casuistics
 
@@ -171,6 +182,9 @@ Requirement names: **GW** gateway, **RG** registry, **RT** routing, **CT** contr
 - **Forty soft wakes in the window.** Too few to decide: more days are recorded.
 - **The developer wrote in the session about something else.** A widening command with an order he did not write is refused.
 - **An override tries to add a crash to the soft list.** Ignored and reported; the list is a constant.
+- **The app restarts and the watcher dies.** Its notice says "stopped" and no event exists: a hard wake, not a soft one.
+- **The machine restarts before the simulator runs.** The temporary output files are gone; the events come from the file the watcher keeps.
+- **The fixed rule is unsafe and no gateway is installed.** Nothing is built; the shadow test waits for the developer's install.
 
 ## Out of v1
 
@@ -185,13 +199,13 @@ Requirement names: **GW** gateway, **RG** registry, **RT** routing, **CT** contr
 
 | Class | Rows |
 |-------|------|
-| FACT pending hydrate (`/mejora-tarea`) | 2 (G-83, G-84) |
-| HYDRATED (spec OK; `/aplica-tarea` only) | 80 |
+| FACT pending hydrate (`/mejora-tarea`) | 0 |
+| HYDRATED (spec OK; `/aplica-tarea` only) | 86 |
 | Non-blocking (INFERENCE / REJECTED / ALREADY / UNKNOWN) | 15 |
 
-Both pending gaps are outside stage 0 (tasks 1.7 and 6.1 to 6.3) and inside what `VERIFY.md` marks as blocked. They are left pending on purpose: each needs a mechanism that is better designed with the simulator's report in hand than guessed now.
+The two gaps the review left pending (G-83, G-84) were hydrated after stage 0, with the simulator's report in hand, and the apply added four rows (section G), all hydrated: 101 rows in all. **This hydration was read by no fresh reviewer either**; it was checked with `openspec validate --strict` and by matching every requirement title against the tasks.
 
-**Gaps pending (mejora + apply): 2**
+**Gaps pending (mejora + apply): 0**
 
 ## Verification (this document)
 
@@ -207,5 +221,5 @@ Both pending gaps are outside stage 0 (tasks 1.7 and 6.1 to 6.3) and inside what
 - **The third correction was not read by a fresh reviewer.** Both earlier corrections had defects that only a fresh reader found; this one may too. It was kept small for that reason.
 - Whether the closed list that defines "needed" matches what a supervisor really does in a tick. Task 6.1 tests it on real transcripts and lists what it cannot classify.
 - Nothing was run against a real gateway: none is installed for this change. Every statement about OmniRoute comes from its README.
-- The figures of the measurement (wakes, tokens) are those of the earlier measurement; they were not re-taken.
+- The figures of the first measurement (wakes, tokens) were re-taken by stage 0 on seven days and nine supervisors: see `evidence/what-if.md`. One wake in three of that window could not be classified.
 - Whether the hydrated design is implementable in the watcher as written is INFERENCE until T 5.3 has tests.

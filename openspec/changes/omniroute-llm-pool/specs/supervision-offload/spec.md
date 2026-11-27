@@ -14,7 +14,7 @@ Supervision SHALL work unchanged when the `llm-pool` module is not installed, th
 - **THEN** the watcher wakes the supervisor for every event exactly as before, prints nothing about the pool, and the supervision self-test passes unchanged
 
 ### Requirement: A simulator replays recorded wakes before any triage is built
-Before any triage code is written, a simulator SHALL read recorded supervisor wakes from the transcripts and classify each soft wake. The supervisor was needed when, between the wake and its next arming of the watcher, it messaged, started, stopped or archived a session, ran a git command that writes, deployed, called a panel or queued a question. A wake whose end cannot be found SHALL be unclassified and left out of every rate.
+Before any triage code is written, a simulator SHALL read recorded supervisor wakes from the transcripts and classify each soft wake. The supervisor was needed when, in the turn that wake started, it messaged, started, stopped or archived a session, ran a git command that writes, deployed, called a panel or queued a question. A wake whose end cannot be found SHALL be unclassified and left out of every rate.
 
 #### Scenario: A known transcript
 - **WHEN** the simulator runs on a seeded transcript whose soft, hard, needed, routine and unclassified wakes are known
@@ -23,6 +23,32 @@ Before any triage code is written, a simulator SHALL read recorded supervisor wa
 #### Scenario: A tick that only checks
 - **WHEN** after a soft wake the supervisor takes its census, reads two files and re-arms the watcher
 - **THEN** that wake counts as not needed
+
+### Requirement: A watcher that was stopped is a hard wake
+A recorded wake whose notice says the watcher was stopped, and whose output holds no event, SHALL count as hard: the watcher never finished, so there was nothing to triage. A wake with no output whose watcher did finish SHALL stay unclassified.
+
+#### Scenario: The watcher died with the app
+- **WHEN** the notice of a wake says "stopped" and no event line can be found for it
+- **THEN** the wake counts as hard, is not in the unclassified share, and the fixed rule does not sleep it
+
+#### Scenario: A finished watcher with no output
+- **WHEN** the notice of a wake says "completed" and no event line can be found for it
+- **THEN** the wake is unclassified and left out of every rate
+
+### Requirement: The watcher keeps the events of each wake
+Before it exits, the watcher SHALL append the event lines of that wake, with the lock's owner and the times the wait started and ended, to a file beside the supervisor's lock, kept for 30 days. The simulator SHALL read a wake's events from that file, matched by owner and end time, when the transcript does not hold them. The file SHALL stay on the machine, and no report SHALL print a line of it.
+
+#### Scenario: The machine was restarted
+- **WHEN** the simulator runs after a restart that erased the temporary output files, on wakes recorded since the file exists
+- **THEN** each of those wakes that started a turn is classified from the file
+
+#### Scenario: A wake older than the file
+- **WHEN** a wake was recorded before the watcher kept its events and its output is in neither the transcript nor a temporary file
+- **THEN** it is unclassified, as before
+
+#### Scenario: A wake that started no turn
+- **WHEN** the events of a soft wake are known and another message arrived before the supervisor answered it
+- **THEN** it is unclassified, because what the supervisor did for it cannot be told apart
 
 ### Requirement: The simulator compares today with a fixed rule
 A recorded wake SHALL count as soft when the watcher's output was only idle-to-busy lines or only `TIMEOUT`. The simulator SHALL report, for today's behaviour and for a fixed rule with no model that sleeps every soft wake: the wakes, the main-model tokens raw and weighted, and the needed wakes the rule would have slept. The rule's figures SHALL be labelled upper bounds, because the deadline, the report time and what waited for the supervisor are not in the history.
@@ -55,7 +81,7 @@ The decision SHALL be the first of these that applies to the simulator's report.
 - **THEN** the decision is "no-go for wake-triage", the triage tasks are closed as not built, and the fixed rule is proposed separately
 
 ### Requirement: Triage is built only if a model is safer than the fixed rule
-When the saving is worth it and the fixed rule is unsafe, the decision SHALL stay open and nothing SHALL be built for triage until a candidate member is shown to sleep at most one needed wake per 100 classified soft wakes while keeping at least half of the fixed rule's saving and no less than 3 % of the supervisors' flow. Shown otherwise, neither SHALL be built. The developer MAY set other thresholds in writing after reading the report.
+When the saving is worth it and the fixed rule is unsafe, the decision SHALL stay open and nothing that honours a `sleep` SHALL be built until a candidate member is shown to sleep at most one needed wake per 100 classified soft wakes while keeping at least half of the fixed rule's saving and no less than 3 % of the supervisors' flow. Shown otherwise, neither SHALL be built. The developer MAY set other thresholds in writing after reading the report.
 
 #### Scenario: The fixed rule is unsafe and a model is not better
 - **WHEN** 9 of 100 classified soft wakes were needed and the tested member sleeps 6 of them
@@ -67,7 +93,33 @@ When the saving is worth it and the fixed rule is unsafe, the decision SHALL sta
 
 #### Scenario: No member has been tested
 - **WHEN** the fixed rule is unsafe and no member has been tested
-- **THEN** the decision stays open, nothing is built, and the report says what is missing
+- **THEN** the decision stays open, nothing that honours a `sleep` is built, and the report says what is missing
+
+### Requirement: A candidate member is tested in shadow on live wakes
+On the decision "a model must be tested", the member SHALL be tested in `shadow` on live wakes and not by replay. The watcher SHALL record the member's verdict for each soft wake and wake the supervisor as before; the simulator SHALL read from the transcript whether that wake was needed. The test SHALL run until 100 classified soft wakes carry a verdict. A late, failed or malformed answer SHALL count as `wake`.
+
+#### Scenario: The member would have slept a needed wake
+- **WHEN** the member said `sleep` in shadow and, in the turn that wake started, the supervisor sent a message to a session
+- **THEN** the wake counts as a needed wake the member would have slept
+
+#### Scenario: An answer arrives late
+- **WHEN** the member answers after the triage's time limit
+- **THEN** the verdict counts as `wake` and adds nothing to the member's saving
+
+#### Scenario: The test ends
+- **WHEN** 100 classified soft wakes carry a verdict
+- **THEN** a written result gives the needed wakes the member would have slept per 100, and its saving as a share of the fixed rule's and of the flow, and the decision is recorded as "go" or "no-go"
+
+### Requirement: The shadow test is built only when it can run
+What the shadow test needs (the soft-event list, the brief builder, the verdict parser, shadow mode and the pool's `ask` for `wake-triage`) SHALL be built only after the developer has installed the gateway and connected a member. Nothing that honours a `sleep` SHALL be built before the decision is "go".
+
+#### Scenario: The gateway is not installed
+- **WHEN** the decision is "a model must be tested" and no gateway is installed
+- **THEN** nothing is built, the decision stays open, and the report says the test waits for the developer's install
+
+#### Scenario: The gateway is installed and the decision is open
+- **WHEN** the decision is "a model must be tested" and a member answers through the gateway
+- **THEN** the shadow test's pieces are built and the test starts, and no sleep is honoured while it runs
 
 ### Requirement: Only two shapes of event are soft
 The watcher SHALL send to triage only: (a) a batch of events made only of lines that say a session went from idle to busy; (b) a timeout with no event, and only when the watcher was armed with a wake-by time. A batch that contains any other line SHALL wake the supervisor at once and nothing SHALL be sent to the pool. An event kind the code does not list as soft SHALL be hard.
@@ -216,6 +268,25 @@ In `shadow`, the watcher SHALL run the triage, wake the supervisor exactly as wi
 #### Scenario: No member accepts private data
 - **WHEN** no active member accepts `private`
 - **THEN** the session reads the output itself, as before
+
+### Requirement: Each digest task kind has one caller and one step
+`turn-report-check` SHALL be asked for by the supervisor, when a child's end-of-turn report arrives and before it decides that child's next step. `closing-evidence-summary` SHALL be asked for by the closing session, after its checks on disk and before it writes the register. `dialog-draft` SHALL be asked for by the question session, before it opens a dialog. `log-digest` SHALL be open to every session in scope.
+
+#### Scenario: A child's report is classified as done
+- **WHEN** the supervisor receives `done` for a child's report
+- **THEN** it uses the answer to order its work and still checks on disk before it closes that child
+
+#### Scenario: A check on disk failed
+- **WHEN** one of the closing session's checks failed
+- **THEN** it asks for no summary and writes the failure itself
+
+#### Scenario: A draft for the developer
+- **WHEN** the question session receives a draft
+- **THEN** it checks every fact of the draft against the queued question and rewrites it before the dialog opens; the draft is never shown as it arrived
+
+#### Scenario: A child session asks for a report check
+- **WHEN** a child session asks for `turn-report-check`
+- **THEN** the skill's rule for its role does not list that task kind, and the call is recorded with its caller's role
 
 ### Requirement: A digest says what it left out, and the original stays the authority
 A digest SHALL say what it left out (the size of the original and the number of lines dropped). A session SHALL open the original before any action that cannot be undone, and SHALL report when it read the whole original anyway.

@@ -60,6 +60,7 @@ None in `openspec/specs/`. `supervisor-wake-economy` (in `watcher-wake-backoff`)
 ## Impact
 
 - New: `global/modules/llm-pool.yaml`, `global/scripts/llm-pool` with its library, `global/config/llm-pool.json`, `global/contracts/llm-pool.yaml`, a skill, tests in a temporary home with a stub gateway, the console's static files, and the example override's entry for the module.
+- Touched after stage 0's first record, whatever the decision: the watcher appends the events of each wake to a file beside the supervisor's lock, so that the simulator can read them later (task 6.4).
 - Touched, only if stage 0 says go: the watcher (`global/scripts/lib/supervisor/watch.py`) gains an optional triage step, a `--wake-by` argument and a sleep journal; `supervisor-lock` gains a command to read it; the supervision skill's tick gains a judging step.
 - Touched in any case: `supervision.yaml` (declares the pool's command as provided elsewhere), `README.md`, `CLAUDE.md`, the example override.
 - External: OmniRoute, installed and connected by the developer. Provider accounts are his; the module never creates one and never sees a provider key.

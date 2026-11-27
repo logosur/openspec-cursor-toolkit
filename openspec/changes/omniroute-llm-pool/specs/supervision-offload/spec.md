@@ -93,7 +93,7 @@ When the saving is worth it and the fixed rule is unsafe, the decision SHALL sta
 
 #### Scenario: No member has been tested
 - **WHEN** the fixed rule is unsafe and no member has been tested
-- **THEN** the decision stays open, nothing is built, and the report says what is missing
+- **THEN** the decision stays open, nothing that honours a `sleep` is built, and the report says what is missing
 
 ### Requirement: A candidate member is tested in shadow on live wakes
 On the decision "a model must be tested", the member SHALL be tested in `shadow` on live wakes and not by replay. The watcher SHALL record the member's verdict for each soft wake and wake the supervisor as before; the simulator SHALL read from the transcript whether that wake was needed. The test SHALL run until 100 classified soft wakes carry a verdict. A late, failed or malformed answer SHALL count as `wake`.

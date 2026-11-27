@@ -24,7 +24,7 @@ Runs of `evidence/simulate.py` on 2026-11-27, on one developer machine, over the
   - The fixed rule is not safe by the threshold of D15 (at most 1 needed wake in 100). In window A it would have slept 22 needed wakes in 202. If every one of the 95 unclassified wakes were soft and not needed, the rate would still be 22 in 297, that is 7.4 per 100. So row 3, "the rule is enough", cannot come out of these seven days.
   - The saving sits on the threshold of row 2 (5 % of the flow) and depends on the weights: between 3.5 % and 7.5 % in window A, 5.6 % at the central weights. With cache reads counted as free it is under 5 %.
   - The soft wakes are concentrated: two supervisors hold 164 of the 201 wakes the rule would have slept.
-- **Why so many wakes cannot be classified, and what it takes to fix it.** The simulator needs the watcher's output of each wake. It finds it when the supervisor read that output with a command (the result is in the transcript), or in the task's output file, which lives in a temporary directory. The machine was restarted on the night of the run and the temporary files were lost. Of the 89 wakes with no output, 38 started no turn at all (another message arrived first), and in 51 the supervisor acted without a recorded read of the output. A run the same night before the restart, whose files were lost with it and which cannot be reproduced, classified 67 more wakes of about the same window: 231 classified soft wakes, 30 of them needed (13 per 100), 12.5 % unclassified. Recording more days helps only if the watcher's output is kept somewhere that survives: see "What the next run needs".
+- **Why so many wakes cannot be classified, and what it takes to fix it.** The simulator needs the watcher's output of each wake. It finds it when the supervisor read that output with a command (the result is in the transcript), or in the task's output file, which lives in a temporary directory. The machine was restarted on the night of the run and the temporary files were lost. Of the 89 wakes with no output, 38 started no turn at all (another message arrived first). In the other 51 the supervisor acted and the transcript holds no event line: in 31 of them a command did name the output file, and in the one checked it printed only the file's last two lines, which are a blank line and the exit marker, after the events (a surviving output file has that layout); in 20 no command named it. A run the same night before the restart, whose files were lost with it and which cannot be reproduced, classified 67 more wakes of about the same window: 231 classified soft wakes, 30 of them needed (13 per 100), 12.5 % unclassified. Those figures counted a wake that started no turn as soft and not needed whenever its events were known, which lowers the rate; the simulator still does so, and task 6.4 corrects it. Recording more days helps only if the watcher's output is kept somewhere that survives: see "What the next run needs".
 
 ## The fixed rule's saving under each weighting
 
@@ -68,7 +68,8 @@ Window B is the baseline, because it is the watcher as it runs today. It is **th
 
 ## What the next run needs
 
-1. **The watcher's output kept where it survives** a restart and the cleaning of temporary files: the event lines of each wake, with the task id, appended to a file under the supervisor's state directory. This is task 6.4 of the change (GAPS G-98). Without it, "record more days" records nothing the simulator can read later.
+1. **The watcher's output kept where it survives** a restart and the cleaning of temporary files: the event lines of each wake, with the lock's owner and the times the wait started and ended, appended to a file beside the supervisor's lock. This is task 6.4 of the change (GAPS G-98). Without it, "record more days" records nothing the simulator can read later.
+   - **That alone may not be enough.** A wake that started no turn stays unclassified even with its events known, because what the supervisor did for it cannot be told apart. In window A those are 38 wakes, and with the 6 compactions that is 44 of 297, about 15 %, before knowing how many of the 38 are soft. If they stay above one in ten, the share threshold of row 1 cannot be met as written, and the developer has to set it.
 2. **At least 100 classified soft wakes after the back-off**, with at most one in ten unclassified. At the rate of window B that is two to three days of the same supervisors.
 3. Then tasks 6.2 and 6.3 run again on that window alone.
 
@@ -78,6 +79,8 @@ Window B is the baseline, because it is the watcher as it runs today. It is **th
 - Commands hidden inside quotes, scripts or wrappers are not seen by the detection of git writes and deploys.
 - The rule's two figures are upper bounds, as said.
 - The usage of a turn is the sum of its main-model messages; subagents and advisor sub-calls are not in it.
+- A wake that started no turn and whose events are known is counted as soft and not needed, with no tokens. It adds to the classified wakes and lowers the needed rate; how many of the 202 are of that kind was not counted.
+- Two definitions were set after seeing the data: a stopped watcher is a hard wake, and the central weights decide the row. The first does not change the row. The second matters only once row 1 no longer applies: at the central weights the saving is above the 5 % line, and with cache reads counted as free it is below.
 - One machine, one week, and the back-off changed the mix of wakes on the last evening of it.
 
 ## Reproduce

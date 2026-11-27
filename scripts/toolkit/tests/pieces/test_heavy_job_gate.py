@@ -175,7 +175,7 @@ class GateTest(unittest.TestCase):
         self.assertIn('why=phpunit sin filtro ni fichero (suite completa)', line)
 
     def test_explicit_targets_and_filters_pass_the_gate(self):
-        for command in ('vendor/bin/phpunit --group REQ-1', 'for f in tests/*Test.php; do vendor/bin/phpunit $f; done',
+        for command in ('vendor/bin/phpunit --group REQ-1', 'for f in a_test.py b_test.py; do pytest $f; done',
                         'pytest --collect-only -q', 'npx playwright test e2e/a.spec.ts'):
             with self.subTest(command=command):
                 self.assert_allowed(self.bash(command))

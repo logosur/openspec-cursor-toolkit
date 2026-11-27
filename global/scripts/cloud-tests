@@ -13,6 +13,8 @@ How it works (all from Bash, so it also works in a supervisor's automated tick, 
     queue once and a fresh runner is launched; the second time it expires. If the launch fails, the head run expires
     (`launch_failed`) and no launch is tried again for LAUNCH_BACKOFF_S. The deadline counts from the dispatch, not from
     the request. A queued run never sent within QUEUE_MAX_S expires.
+  * A runner remembers the brief version it was launched with (`brief_version`). One launched with an older brief (or
+    without the field) is not given new runs: the next dispatch launches a fresh runner and `sweep` retires the old one.
   * A newer request for the same suite and branch supersedes the older runs still queued (SUPERSEDED); `wait` follows
     the chain to the successor. Runs already sent cannot be cancelled.
   * `pump` (hidden, spawned detached by request while runs are queued or sent) keeps polling so the queue moves with
@@ -53,13 +55,16 @@ Commands (run inside the project's checkout or a worktree of it, or pass --repo)
   poll                          DONE / PENDING / QUEUED / EXPIRED lines for the runs of the last 24 h (moves the queue)
   wait RUN [RUN...]             polls until they finish: 0 all done, 5 one expired, 75 timeout (run in background);
                                 follows SUPERSEDED runs to their successor
-  result RUN                    the stored result, JSON
+  result RUN [--tests [--grep RE]]
+                                the stored result, JSON; with --tests the per-test lines (`outcome<TAB>id`) the runner
+                                published in `runs/<run>.tests.tsv` on the results branch, filtered by the regex RE
+                                (exit 3 when the run published none)
   record-local --suite S --exit N --summary TEXT [--ref BR]   a local fallback run, so others reuse it
   status                        runner and runs
   runner [--forget]             show or drop the project's runner
   local-guard [--cwd D] -- CMD  exit 3 + why when CMD here is redundant with a cloud run (heavy-job calls it), else 0
   stop-local [RUN...]           stop the redundant local jobs of these runs (of all in-flight runs without RUN)
-  brief                         the runner brief (what the cloud session is told)
+  brief                         the runner brief (what the cloud session is told; BRIEF_VERSION says which one)
   pump                          (hidden) keeps the queue moving until nothing is queued or sent
   sweep [--dry-run]             archives in the cloud the runners of every project that nobody needs any more: replaced,
                                 used up or failed, idle and quiet for 3 h, no run waiting (the supervisor-watchdog timer
@@ -95,6 +100,8 @@ STATE_DIR = os.environ.get('CLOUD_TESTS_STATE', os.path.expanduser('~/.claude/st
 RECIPE = '.claude/cloud-tests.json'
 RESULTS_BRANCH = 'cloud-tests-results'
 RESULTS_LOCAL_REF = 'refs/cloud-tests/results'
+BRIEF_VERSION = 2  # 2: per-test results (JUnit -> runs/<run>.tests.tsv); a runner launched with a lower one is not reused
+TESTS_FILE_MAX_LINES = 50000
 MAX_RUNS_PER_RUNNER = int(os.environ.get('CLOUD_TESTS_MAX_RUNS', '15'))
 MAX_RUNNER_AGE_S = int(os.environ.get('CLOUD_TESTS_MAX_RUNNER_AGE_S', str(3 * 86400)))
 DEFAULT_DEADLINE_MIN = 60
@@ -277,19 +284,47 @@ Reglas:
   Para cada una:
   1. `git fetch -q origin <sha>` (si no basta, `git fetch -q origin`), `git checkout -q --detach <sha>`, y comprueba que
      `git rev-parse HEAD^{{tree}}` es el tree pedido.
-  2. Ejecuta el comando tal cual, con la salida en /tmp/<run>.log y `date +%s` antes y despues. Si va a durar mas de
+  2. Antes del comando, prepara el JUnit de esta peticion:
+       export CLOUD_TESTS_JUNIT=/tmp/<run>.junit.xml
+       export PYTEST_ADDOPTS="${{PYTEST_ADDOPTS:+$PYTEST_ADDOPTS }}--junitxml=$CLOUD_TESTS_JUNIT"
+     Si la peticion trae `junit` (una ruta relativa al checkout que el propio comando escribe), no toques
+     PYTEST_ADDOPTS y usa ese fichero: CLOUD_TESTS_JUNIT="$PWD/<junit>".
+     Ejecuta el comando tal cual, con la salida en /tmp/<run>.log y `date +%s` antes y despues. Si va a durar mas de
      8 minutos, lanzalo en segundo plano y espera a que termine, sin pasar de timeout_min.
+     Despues, si el fichero JUnit existe, conviertelo en /tmp/<run>.tests.tsv (una linea `resultado<TAB>id` por test,
+     resultado passed, failed, error o skipped, como mucho {max_lines} lineas) con este script (sin la sangria),
+     que imprime los totales:
+       python3 - "$CLOUD_TESTS_JUNIT" /tmp/<run>.tests.tsv <<'PY'
+       import json, sys, xml.etree.ElementTree as ET
+       src, dst = sys.argv[1], sys.argv[2]
+       counts = dict(passed=0, failed=0, error=0, skipped=0)
+       lines = []
+       for tc in ET.parse(src).getroot().iter('testcase'):
+           kinds = [c.tag for c in tc]
+           o = 'error' if 'error' in kinds else 'failed' if 'failure' in kinds else 'skipped' if 'skipped' in kinds else 'passed'
+           counts[o] += 1
+           ident = '::'.join(x for x in (tc.get('classname') or tc.get('file'), tc.get('name')) if x)
+           if len(lines) < {max_lines}:
+               lines.append(o + chr(9) + ' '.join(ident.split()))
+       open(dst, 'w').write(''.join(l + chr(10) for l in lines))
+       print(json.dumps(counts))
+       PY
+     Si no hay JUnit o el script falla, no hay fichero de tests: seguiras sin el.
   3. Escribe el resultado en JSON: run, suite, sha, tree, exit, duration_s (los segundos reales entre los dos
      `date +%s`: una suite completa nunca dura 0), cores (la salida de `nproc`), summary (una linea: tests,
-     aserciones, fallos), failures (hasta 30 nombres de tests que fallaron), log_tail (las ultimas 120 lineas del log) y
-     finished_at (ISO 8601). Si no pudiste correrlo, exit 97 y la causa en summary.
+     aserciones, fallos), failures (hasta 30 nombres de tests que fallaron), log_tail (las ultimas 120 lineas del log),
+     tests_file ("runs/<run>.tests.tsv" si hay fichero de tests, si no null), tests_counts (los totales que imprimio el
+     script, o null) y finished_at (ISO 8601). Sin JUnit, tests_file es null y summary dice que no hay resultado por
+     test. Si no pudiste correrlo, exit 97 y la causa en summary.
   4. Publicalo sin tocar el checkout de trabajo:
        R=$(mktemp -d); git clone -q --no-checkout . "$R"; git -C "$R" remote set-url origin "$(git remote get-url origin)"
        cd "$R"; if git ls-remote --exit-code origin refs/heads/{branch} >/dev/null; then
          git fetch -q origin {branch} && git checkout -q -B {branch} FETCH_HEAD; else
          git checkout -q --orphan {branch} && git rm -rqf --cached --ignore-unmatch . ; fi
        mkdir -p runs; (escribe runs/<run>.json); git add runs/<run>.json
+       if [ -f /tmp/<run>.tests.tsv ]; then cp /tmp/<run>.tests.tsv runs/; git add runs/<run>.tests.tsv; fi
        git commit -qm "cloud-tests: <run> [skip ci]" && git push -q origin HEAD:refs/heads/{branch}
+     El fichero de tests va en el mismo commit que el JSON.
      Si el push se rechaza por una carrera: fetch, `git rebase FETCH_HEAD` y reintenta, hasta 5 veces.
   5. Termina el turno con una sola linea final: `CLOUD-TESTS-RESULT {{el mismo JSON sin log_tail}}`.
 - Entre peticiones no hagas nada.
@@ -297,11 +332,14 @@ Reglas:
 
 
 def brief_for(proj):
-    return BRIEF.format(name=proj.name, slug=proj.slug or '?', branch=RESULTS_BRANCH, recipe=RECIPE)
+    return BRIEF.format(name=proj.name, slug=proj.slug or '?', branch=RESULTS_BRANCH, recipe=RECIPE,
+                        max_lines=TESTS_FILE_MAX_LINES)
 
 
 def request_line(entry):
     payload = {k: entry[k] for k in ('run', 'sha', 'tree', 'suite', 'command', 'timeout_min')}
+    if entry.get('junit'):
+        payload['junit'] = entry['junit']  # the suite writes its own JUnit file, relative to the checkout
     return 'CLOUD-TESTS-REQUEST ' + json.dumps(payload, ensure_ascii=False)
 
 
@@ -463,8 +501,8 @@ def hhmm(epoch):
 
 
 def runner_usable(r, now):
-    return bool(r) and not r.get('dead') and r.get('runs', 0) < MAX_RUNS_PER_RUNNER \
-        and now - r.get('created', 0) < MAX_RUNNER_AGE_S
+    return bool(r) and not r.get('dead') and r.get('brief_version', 0) >= BRIEF_VERSION \
+        and r.get('runs', 0) < MAX_RUNS_PER_RUNNER and now - r.get('created', 0) < MAX_RUNNER_AGE_S
 
 
 # ---------------------------------------------------------------------------------------------------------- results
@@ -557,7 +595,7 @@ def dispatch(proj, data, now, fresh=None):
         if r and r.get('session'):  # `sweep` archives it in the cloud once nobody needs it
             data['retired'] = (data.get('retired') or [])[-49:] + [
                 {'session': r['session'], 'created': r.get('created'), 'retired': now}]
-        data['runner'] = r = {'session': session, 'created': now, 'runs': 0}
+        data['runner'] = r = {'session': session, 'created': now, 'runs': 0, 'brief_version': BRIEF_VERSION}
         data.pop('launch_backoff_until', None)
         launched = True
     r['runs'] = r.get('runs', 0) + 1
@@ -1140,6 +1178,9 @@ def cmd_request(args):
         die(3, f'LOCAL suite {args.suite!r} is not in {RECIPE} (cloud suites: {", ".join(recipe.get("suites", {})) or "none"})')
     command = suite['command']
     timeout_min = int(args.deadline_min or suite.get('timeout_min') or DEFAULT_DEADLINE_MIN)
+    junit = suite.get('junit')
+    if junit and (not isinstance(junit, str) or os.path.isabs(junit) or '..' in junit.split('/')):
+        die(3, f'LOCAL suite {args.suite!r}: junit must be a path inside the checkout, got {junit!r}')
     key = run_key(tree, command)
     now = time.time()
     with ledger(proj) as data:
@@ -1167,6 +1208,8 @@ def cmd_request(args):
             entry = {'run': rid, 'key': key, 'suite': args.suite, 'command': command, 'ref': branch, 'sha': sha,
                      'tree': tree, 'timeout_min': timeout_min, 'requester': args.requester or os.environ.get('CLAUDE_SESSION_ID', ''),
                      'created': now, 'queued_at': now, 'state': 'queued', 'local_match': local_match(suite)}
+            if junit:
+                entry['junit'] = junit
             data['runs'][rid] = entry
             try:
                 dispatch(proj, data, now, fresh=rid)
@@ -1323,8 +1366,38 @@ def cmd_stop_local(args):
         print('NONE no redundant local job')
 
 
+def print_tests(proj, rid, pattern):
+    """The per-test lines the runner published for `rid` (`runs/<rid>.tests.tsv` on the results branch), optionally
+    filtered by a regex. Exit 3 when the run has none."""
+    try:
+        wanted = re.compile(pattern) if pattern else None
+    except re.error as e:
+        die(2, f'BAD_REGEX {pattern!r}: {e}')
+    if not re.fullmatch(r'[\w.-]+', rid):
+        die(3, f'UNKNOWN {rid}')
+    f = run(['git', 'fetch', '-q', 'origin', f'+refs/heads/{RESULTS_BRANCH}:{RESULTS_LOCAL_REF}'], cwd=proj.top, check=False)
+    have_ref = run(['git', 'rev-parse', '-q', '--verify', RESULTS_LOCAL_REF], cwd=proj.top, check=False).returncode == 0
+    if f.returncode != 0 and not have_ref:
+        die(3, f'NO_TESTS_FILE {rid}: the results branch {RESULTS_BRANCH} is not on origin')
+    p = run(['git', 'show', f'{RESULTS_LOCAL_REF}:runs/{rid}.tests.tsv'], cwd=proj.top, check=False)
+    if p.returncode != 0:
+        die(3, f'NO_TESTS_FILE {rid}: the run published no per-test result (runs/{rid}.tests.tsv); '
+               'see the result JSON for its summary')
+    lines = p.stdout.splitlines()
+    if wanted:
+        lines = [l for l in lines if wanted.search(l)]
+        if not lines:
+            print(f'NONE no test line of {rid} matches {pattern!r}', file=sys.stderr)
+    for line in lines:
+        print(line)
+
+
 def cmd_result(args):
     proj = Project(args.repo)
+    if args.tests:
+        return print_tests(proj, args.run, args.grep)
+    if args.grep:
+        die(2, '--grep needs --tests')
     with ledger(proj) as data:
         e = data['runs'].get(args.run)
         if not e:
@@ -1998,7 +2071,7 @@ def self_test():
     now_ = time.time()
 
     def legacy(d):
-        d['runner'] = {'session': 'session_OLD', 'created': now_, 'runs': 1}
+        d['runner'] = {'session': 'session_OLD', 'created': now_, 'runs': 1, 'brief_version': BRIEF_VERSION}
         d['runs']['legacy-1'] = {'run': 'legacy-1', 'key': run_key(tree9, 'make unit'), 'suite': 'unit', 'command': 'make unit',
                                  'ref': 'main', 'sha': sha9, 'tree': tree9, 'timeout_min': 60, 'requester': '',
                                  'created': now_ - 60, 'deadline': now_ + 3600, 'state': 'sent', 'session': 'session_OLD',
@@ -2249,7 +2322,8 @@ def self_test():
     os.makedirs(senv['CLOUD_TESTS_STATE'])
     iso = lambda age_s: time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - age_s))
     old, fresh_ = iso(5 * 3600), iso(600)
-    sl = {'project': 'sw-1', 'repo': 'o/sw', 'runner': {'session': 'session_CUR', 'created': time.time() - 3600, 'runs': 1},
+    sl = {'project': 'sw-1', 'repo': 'o/sw', 'runner': {'session': 'session_CUR', 'created': time.time() - 3600, 'runs': 1,
+                     'brief_version': BRIEF_VERSION},
           'retired': [{'session': 'session_RET'}], 'results_seen': None,
           'runs': {'a': {'state': 'done', 'session': 'session_DONE'}, 'b': {'state': 'sent', 'session': 'session_BUSY'},
                    'c': {'state': 'expired', 'session': 'session_RUNNING'}, 'd': {'state': 'done', 'session': 'session_NEW'},
@@ -2343,6 +2417,8 @@ def main():
     p.add_argument('--interval', type=int, default=60)
     p = sub.add_parser('result')
     p.add_argument('run')
+    p.add_argument('--tests', action='store_true', help='print the per-test lines of the run (outcome<TAB>id)')
+    p.add_argument('--grep', metavar='RE', help='with --tests: only the lines matching this regular expression')
     p = sub.add_parser('record-local')
     p.add_argument('--suite', required=True)
     p.add_argument('--exit', type=int, required=True)

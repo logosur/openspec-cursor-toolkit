@@ -17,6 +17,11 @@ probes:
     stdin: {tool_name: Bash, tool_input: {command: "~/.claude/scripts/heavy-job run --kind install -- npm ci"}}
     exit: [0]
     stdout: empty
+  - name: a test runner in a loop over batches is denied
+    stdin: {tool_name: Bash, tool_input: {command: "for b in batch_*; do pytest $(cat $b); done"}}
+    exit: [0]
+    stdout: json
+    contains: '"deny"'
   - name: a corrupt config keeps the gate working
     stdin: {tool_name: Bash, tool_input: {command: "npm ci"}}
     corrupt_config: true

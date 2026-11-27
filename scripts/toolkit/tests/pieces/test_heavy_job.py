@@ -157,7 +157,7 @@ CLASSIFY_CASES = [
     ('npx playwright install', None),
     ('phpunit tests/FooTest.php', None),
     # explicit targets hidden behind a shell expansion
-    ('for f in tests/Unit/*Test.php; do vendor/bin/phpunit $f; done', None),
+    ('for f in tests/Unit/*Test.php; do vendor/bin/phpunit $f; done', 'tests'),  # glob of unknown files: a series
     ('vendor/bin/phpunit "$f"', None),
     ('vendor/bin/phpunit ${TARGET}', None),
     ('vendor/bin/phpunit $(ls tests/Unit/Forum/*Test.php)', None),
@@ -505,7 +505,8 @@ class SlotTestCase(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix='heavy-job-test-')
         self.env = dict(os.environ, HEAVY_JOB_DIR=self.dir, HEAVY_JOB_SLOTS=self.slots, HEAVY_JOB_SCAN=self.scan,
-                        HEAVY_JOB_POLL='0.2', HEAVY_JOB_MIN_AVAIL_GIB='0', HEAVY_JOB_SETTLE='0')
+                        HEAVY_JOB_POLL='0.2', HEAVY_JOB_MIN_AVAIL_GIB='0', HEAVY_JOB_SETTLE='0',
+                        HEAVY_JOB_SCAN_SCOPE=os.path.basename(self.dir))  # the machine's real jobs stay out of the scan
         self.env.pop('HEAVY_JOB_SLOT', None)
         self.procs = []
 
@@ -1259,7 +1260,7 @@ class ScanTest(SlotTestCase):
                 'm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)\n'
                 'm[0]\n'
                 'data = bytearray(b"x" * (80 << 20))\n'
-                'time.sleep(20)\n')
+                'time.sleep(120)\n')
         env = dict(self.env, HEAVY_JOB_ML_MIN_RSS_MIB='50')
         proc = subprocess.Popen([sys.executable, '-c', code], env=env, start_new_session=True)
         self.procs.append(proc)
@@ -1294,7 +1295,7 @@ class ScanTest(SlotTestCase):
         os.makedirs(worker_dir)
         worker = os.path.join(worker_dir, 'forks.js')
         with open(worker, 'w') as handle:
-            handle.write('import time\ntime.sleep(20)\n')  # python script with a .js name
+            handle.write('import time\ntime.sleep(120)\n')  # python script with a .js name
         pid_file = os.path.join(base, 'pid')
         launcher = (
             'import os, sys\n'

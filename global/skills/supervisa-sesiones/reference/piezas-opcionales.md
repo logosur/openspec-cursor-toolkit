@@ -24,5 +24,13 @@ el informe y se sigue sin ella, sin imitarla a mano.
 | Rutinas de la máquina (`routines`, módulo `routines`) | Avisos de escritorio (`routines notify`) y tareas programadas que no dependen de la cuenta | Los avisos no salen; se dice en el informe |
 | Herramienta de segunda opinión | Un consejo antes de una decisión compleja | El panel |
 
+Con el corredor de pruebas en la nube, al dar un encargo (F2, F6) que vaya a correr tests:
+
+- un conjunto de pasadas que en total es una suite (lotes, varias órdenes seguidas) es una suite: va a la nube si el
+  proyecto la declara, o a una sola pasada con `heavy-job run`;
+- ningún encargo prohíbe `cloud-tests` a una sesión o a un subagente;
+- un run en verde de la nube para el mismo commit se cita como evidencia (`cloud-tests result <run>`, por test con
+  `--tests --grep <patrón>`) en vez de repetirlo en local.
+
 Ninguna de estas piezas concede autorizaciones: commit, publicación, despliegue y archivado siguen pidiendo una regla
 escrita del proyecto o una orden del desarrollador.

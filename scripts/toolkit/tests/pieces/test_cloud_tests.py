@@ -406,7 +406,8 @@ class TestRunnerTitles(Base):
 
     def write_ledger_named(self, key, name, runner='session_CUR'):
         os.makedirs(self.state, exist_ok=True)
-        data = {'project': key, 'repo': 'acme/proj', 'runner': {'session': runner, 'created': time.time() - 600, 'runs': 1},
+        data = {'project': key, 'repo': 'acme/proj',
+                'runner': {'session': runner, 'created': time.time() - 600, 'runs': 1, 'brief_version': 99},
                 'retired': [{'session': 'session_RET'}], 'results_seen': None,
                 'runs': {'a': {'state': 'sent', 'session': 'session_BUSY'}, 'b': {'state': 'done', 'session': 'session_DONE'},
                          'c': {'state': 'done', 'session': 'session_OTHER'}}}
@@ -481,6 +482,122 @@ class TestRunnerTitles(Base):
             self.assertEqual(data['name'], 'demo-checkout')
             with open(os.path.join(self.state, proj.key + '.json')) as f:
                 self.assertEqual(json.load(f)['name'], 'demo-checkout')
+
+
+class TestPerTestResults(Base):
+    """Brief version 2: the runner publishes `runs/<run>.tests.tsv`; `result --tests` reads it from the results branch."""
+
+    def setUp(self):
+        super().setUp()
+        self.origin = self.mkdir('origin.git')
+        self.git('init', '-q', '--bare', '-b', 'main', self.origin, cwd=self.tmp)
+        self.proj = self.repo(remote=self.origin)
+        self.git('push', '-q', 'origin', 'main', cwd=self.proj)
+
+    def publish(self, files):
+        """What the cloud runner does: an orphan results branch with runs/<file>, pushed to origin."""
+        work = self.mkdir('results-clone')
+        self.git('clone', '-q', '--no-checkout', self.origin, work, cwd=self.tmp)
+        self.git('checkout', '-q', '--orphan', 'cloud-tests-results', cwd=work)
+        os.makedirs(os.path.join(work, 'runs'))
+        for name, text in files.items():
+            with open(os.path.join(work, 'runs', name), 'w') as f:
+                f.write(text)
+        self.git('add', 'runs', cwd=work)
+        self.git('commit', '-qm', 'cloud-tests: R [skip ci]', cwd=work)
+        self.git('push', '-q', 'origin', 'HEAD:refs/heads/cloud-tests-results', cwd=work)
+
+    def queued(self, m, **extra):
+        return {'runs': {'r1': dict({'run': 'r1', 'state': 'queued', 'sha': 'a' * 40, 'tree': 'b' * 40, 'suite': 'ci',
+                                     'command': 'make ci', 'timeout_min': 30, 'created': time.time()}, **extra)},
+                'runner': None}
+
+    def test_the_brief_asks_for_junit_and_the_tests_file(self):
+        m = self.module()
+        self.assertEqual(m.BRIEF_VERSION, 2)
+        brief = m.brief_for(m.Project(self.proj))
+        for text in ('CLOUD_TESTS_JUNIT=/tmp/<run>.junit.xml', 'PYTEST_ADDOPTS', '--junitxml=$CLOUD_TESTS_JUNIT',
+                     'runs/<run>.tests.tsv', 'tests_file', 'tests_counts', 'xml.etree.ElementTree', 'junit'):
+            self.assertIn(text, brief)
+        brief.encode('ascii')   # the brief stays plain ASCII
+
+    def test_the_request_line_carries_the_suite_junit_only_when_it_has_one(self):
+        m = self.module()
+        base = {'run': 'r1', 'sha': 's', 'tree': 't', 'suite': 'ci', 'command': 'c', 'timeout_min': 5}
+        self.assertNotIn('junit', json.loads(m.request_line(base).split(' ', 1)[1]))
+        line = json.loads(m.request_line(dict(base, junit='out/junit.xml')).split(' ', 1)[1])
+        self.assertEqual(line['junit'], 'out/junit.xml')
+
+    def test_old_runner_is_not_reused_and_a_new_one_records_the_brief_version(self):
+        m = self.module()
+        m.launch_runner = lambda proj, line: ('session_NEW', None)
+        m.rename_session = lambda session, title: None
+        m.send_followup = mock.Mock(return_value=(True, ''))
+        now = time.time()
+        for old in ({'session': 'session_OLD', 'created': now, 'runs': 1},
+                    {'session': 'session_OLD', 'created': now, 'runs': 1, 'brief_version': 1}):
+            data = self.queued(m)
+            data['runner'] = dict(old)
+            self.assertFalse(m.runner_usable(data['runner'], now))
+            proj = mock.Mock()
+            proj.name = 'demo'
+            self.assertEqual(m.dispatch(proj, data, now), 'r1')
+            m.send_followup.assert_not_called()
+            self.assertEqual(data['runs']['r1']['session'], 'session_NEW')
+            self.assertEqual(data['runner']['brief_version'], m.BRIEF_VERSION)
+            self.assertEqual([x['session'] for x in data['retired']], ['session_OLD'])
+            self.assertTrue(m.runner_usable(data['runner'], now))
+        data = self.queued(m)
+        data['runner'] = {'session': 'session_CUR', 'created': now, 'runs': 1, 'brief_version': m.BRIEF_VERSION}
+        self.assertEqual(m.dispatch(mock.Mock(), data, now), 'r1')
+        m.send_followup.assert_called_once()
+        self.assertEqual(data['runs']['r1']['session'], 'session_CUR')
+
+    def test_sweep_retires_a_runner_of_an_older_brief_like_a_replaced_one(self):
+        m = self.module()
+        now = time.time()
+        quiet = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now - 5 * 3600))
+        sessions = [{'id': 'cse_OLD', 'status': 'active', 'worker_status': 'idle', 'status_bucket': 'completed',
+                     'environment_kind': m.RUNNER_ENV_KIND, 'last_event_at': quiet,
+                     'config': {'sources': [{'url': 'https://github.com/acme/proj'}]}}]
+        old = {'repo': 'acme/proj', 'runs': {}, 'runner': {'session': 'session_OLD', 'created': now - 600, 'runs': 1}}
+        self.assertEqual([s['id'] for s in m.sweep_targets(old, sessions, now)], ['cse_OLD'])
+        new = dict(old, runner=dict(old['runner'], brief_version=m.BRIEF_VERSION))
+        self.assertEqual(m.sweep_targets(new, sessions, now), [])
+
+    def test_per_test_lines(self):
+        lines = 'passed\ttests/test_a.py::test_x\nfailed\ttests/test_b.py::test_y\nskipped\ttests/test_a.py::test_z\n'
+        self.publish({'R.tests.tsv': lines, 'R.json': '{"exit": 1}'})
+        r = self.cli('result', 'R', '--tests', '--grep', 'test_a', cwd=self.proj)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.splitlines(), ['passed\ttests/test_a.py::test_x', 'skipped\ttests/test_a.py::test_z'])
+        r = self.cli('result', 'R', '--tests', cwd=self.proj)
+        self.assertEqual(r.stdout, lines)
+        r = self.cli('result', 'R', '--tests', '--grep', 'nothing-like-this', cwd=self.proj)
+        self.assertEqual((r.returncode, r.stdout), (0, ''))
+        self.assertIn('NONE', r.stderr)
+        r = self.cli('result', 'R', '--tests', '--grep', '(', cwd=self.proj)
+        self.assertEqual(r.returncode, 2, r.stdout)
+
+    def test_no_per_test_file_exits_3(self):
+        self.publish({'R.json': '{"exit": 0}'})
+        r = self.cli('result', 'R', '--tests', cwd=self.proj)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn('NO_TESTS_FILE R', r.stdout)
+        self.assertIn('no per-test result', r.stdout)
+
+    def test_no_results_branch_exits_3_and_a_bad_run_id_is_unknown(self):
+        r = self.cli('result', 'R', '--tests', cwd=self.proj)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn('NO_TESTS_FILE R', r.stdout)
+        r = self.cli('result', '../x', '--tests', cwd=self.proj)
+        self.assertEqual((r.returncode, r.stdout.strip()), (3, 'UNKNOWN ../x'))
+
+    def test_result_without_tests_is_unchanged(self):
+        r = self.cli('result', 'nope', cwd=self.proj)
+        self.assertEqual((r.returncode, r.stdout.strip()), (3, 'UNKNOWN nope'))
+        r = self.cli('result', 'nope', '--grep', 'x', cwd=self.proj)
+        self.assertEqual(r.returncode, 2)
 
 
 class TestSupervisorLockProvider(Base):

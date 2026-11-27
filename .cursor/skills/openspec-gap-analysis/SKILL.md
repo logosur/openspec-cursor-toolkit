@@ -11,7 +11,7 @@ description: "Honest OpenSpec gap analysis — multiagent loop (max 5 iter), evi
 
 You are running **openspec-gap-analysis** (slash command **or natural language**): find **evidence-backed** spec gaps the user did not specify. **Gap discovery only** — no product code, no APPLY.
 
-**MANDATORY:** operate under **`hazlo-en-modo-multiagente`** — orchestrator delegates via `Task`; subagents search/read only.
+**Delegation:** operate under **`hazlo-en-modo-multiagente`** in its lean form by default: one subagent at a time, given a context packet (the spec, the seed list of suspected gap classes, the exact files to read, where throwaway probes may be written), that searches, reads and runs single probes only; the orchestrator re-verifies every FACT row before writing it. Parallel subagents are an opt-in when the budget has room. See `docs/openspec/README.md`, "Budget and the lean mode".
 
 ## When to use (natural language)
 
@@ -228,6 +228,8 @@ For each candidate:
 2. **FACT** only with `path:line` or command output in Evidence column.
 3. Increment gap IDs (`G-01`, `G-02`, …) — do not reuse IDs for different gaps.
 4. If FACT and missing from spec → note proposed REQ id in **Req** column as `(proposed REQ-XX-NN)` — **do not edit spec.md** in this skill unless user explicitly asks hydrate in same message.
+5. Name the **root-cause class** of each FACT gap in its Notes (the concern it breaks: who reads input, who owns child processes, who may draw, who mutates a buffer...). Compare with the findings already fixed in this change or recorded in earlier GAPS files.
+6. When **two or more** FACT gaps or past findings share a class, add one row with taxonomy **ARCHITECTURE**: the invariant that is broken, every gap and finding in the class, and a proposed owner design with a check that fails when the invariant breaks. Those gaps are then fixed through that owner, not one by one. Read the change's design first: if it scoped this concern out, quote that line in the row.
 
 Update the iteration table after each iter with **honest** outcome (including "0 FACT gaps").
 

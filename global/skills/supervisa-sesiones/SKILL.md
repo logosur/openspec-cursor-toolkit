@@ -108,6 +108,7 @@ lee al entrar en cada fase. `$L skill-lint` lo comprueba.
 | Registro, parada, modo manual, presupuesto, informe | `reference/registro-y-cierre.md` |
 | Modo «publicar primero» | `reference/modo-publicar-primero.md` |
 | Piezas opcionales que el toolkit no incluye | `reference/piezas-opcionales.md` |
+| Subsupervisión del consumo (una sesión por máquina, módulo `usage`) | `reference/subsupervision-consumo.md` |
 | Qué hacer una vez al recargar tras un cambio | `reference/cambios.md` |
 | Anti-patrones | `reference/anti-patrones.md` |
 

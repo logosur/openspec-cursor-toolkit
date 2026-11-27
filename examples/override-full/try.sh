@@ -79,6 +79,11 @@ if [ -f "$target/scripts/supervisor-lock" ]; then
 else
     skip_step "supervisor-lock self-test" "the supervision module is not installed"
 fi
+if [ -f "$target/scripts/usage-watch" ]; then
+    run_step "usage-watch self-test" "${sandbox[@]}" "$py" "$target/scripts/usage-watch" self-test
+else
+    skip_step "usage-watch self-test" "the usage module is not installed"
+fi
 if [ -f "$target/scripts/test-account" ]; then
     run_step "test-account self-test" "${sandbox[@]}" "$py" "$target/scripts/test-account" self-test
 else

@@ -1,0 +1,48 @@
+name: usage
+summary: >-
+  Token usage watch for a machine that runs many unattended sessions: usage-watch counts the usage of every model
+  response in the local transcripts (sessions and subagents, without a model), detects usage far above normal with
+  nine configurable rules, and records each detection once as a finding with its evidence and a proposed
+  optimisation. Nothing is applied by itself: with the supervision module, one session per machine asks each finding
+  through the question queue and applies only what the developer's recorded answer authorised.
+depends: [core]
+requires:
+  python: "3.10"
+  os: linux
+  binaries: [python3, git]
+optional:
+  binaries:
+    systemctl: "`usage-watch timer install` enables a systemd --user timer that runs `usage-watch tick`"
+notes:
+  - Opt-in, never a default. The transcripts are only read; the measuring commands write only under state_dir and page_path.
+  - >-
+    The installer writes no timer. To measure periodically, run `python3 ~/.claude/scripts/usage-watch timer install`
+    once (it writes usage-watch.service and usage-watch.timer under ~/.config/systemd/user and enables the timer);
+    `timer print` shows both units without writing anything and `timer uninstall` removes them.
+  - >-
+    Every threshold, pattern and text of the usage-watch config piece is a provisional, generic default. The price
+    table weighs every model the same (relative units) until the override sets real weights; a model that matches
+    no price entry is still counted and listed as unpriced.
+  - >-
+    The sub-supervision role (usage-watch ask, decide, apply, measure, wait) needs the supervision module: one session
+    per machine claims it with `supervisor-lock usage-role --claim`, asks each finding once through ask-queue, and
+    applies only what an answer recorded in the queue authorised. Without supervision, ask, decide and wait exit 6.
+  - >-
+    usage-apply-gate (PreToolUse on the app's set-model and set-effort tools) restricts only the usage role holder: its
+    call passes only against a one-use ticket that `usage-watch apply` wrote for that session and value. Every other
+    session is left alone, and the gate fails open.
+  - >-
+    Roles (supervisor, questions, closer, usage) come from the supervision module's lock files, read as JSON only;
+    without them every session is a worker, a routine, a panel member or a subagent.
+# Named by these pieces and installed by the supervision module: the sub-supervision role (ask, decide, wait) calls
+# them and says that supervision is needed when they are missing. The measuring half works without them.
+project_provided:
+  - scripts/ask-queue
+  - scripts/supervisor-lock
+files:
+  - {src: global/scripts/usage-watch, dest: scripts/usage-watch, mode: "0755"}
+  - {src: global/scripts/lib/usage_watch/, dest: scripts/lib/usage_watch/}
+  - {src: global/hooks/usage-apply-gate, dest: hooks/usage-apply-gate, mode: "0755"}
+hooks:
+  - global/settings/hooks.usage.json
+config: [usage-watch]

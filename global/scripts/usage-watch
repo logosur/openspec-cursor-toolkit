@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+"""usage-watch: measure token usage from the local transcripts, detect usage far above normal, and turn each detection
+into a finding (module `usage`). No model is involved and the transcripts are only read.
+
+  usage-watch collect                       count new responses (incremental, deduplicated by message id)
+  usage-watch detect                        run the nine rules; store new findings (never the same one twice)
+  usage-watch status [--json]               one line: week elapsed, units, pace (information only), findings
+  usage-watch page                          write the self-refreshing HTML page (page_path)
+  usage-watch tick                          collect, detect and page: what the timer runs
+  usage-watch show ID [--json]              one finding with the transcript locations that back it
+  usage-watch list [--project P] [--state S] [--applier A] [--json]
+  usage-watch timer print|install|uninstall|status
+                                            the systemd --user timer that runs tick (print writes nothing)
+  usage-watch self-test                     the counting and every rule on throwaway data
+  usage-watch ask ID [--question Q] [--project DIR]   register a new finding in ask-queue (supervision module)
+  usage-watch decide ID                     authorized or rejected, from the queue item's answer (never an argument)
+  usage-watch apply ID [--how TEXT]         the single apply point: only an authorised finding, re-checked in the queue
+  usage-watch measure ID                    the rule's metric before and after, measure_window_h after the apply
+  usage-watch wait --session ID [--timeout S]   the usage role's watcher: exits on a new finding or an answer
+
+Global option --now (or USAGE_WATCH_NOW) sets a simulated clock. Settings come from the `usage-watch` config piece
+(~/.claude/toolkit/config/usage-watch.json); a missing or corrupt piece gives the defaults. The measuring commands
+write only under state_dir and page_path.
+
+Exit codes: 0 ok · 2 usage error or unknown finding id · 3 refused transition · 4 too early to measure · 5 not the
+usage role holder · 6 supervision pieces not installed.
+"""
+import os
+import sys
+
+ENTRY = os.path.realpath(__file__)
+sys.path.insert(0, os.path.join(os.path.dirname(ENTRY), 'lib'))
+
+from usage_watch import cli  # noqa: E402
+
+if __name__ == '__main__':
+    sys.exit(cli.main(sys.argv[1:], script=ENTRY))

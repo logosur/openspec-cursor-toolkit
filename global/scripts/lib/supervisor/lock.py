@@ -467,12 +467,17 @@ def cmd_list(args):
                 rows.append(owner)
     legacy = os.path.join(util.home(), 'MASTER.lock.d')
     has_legacy = os.path.isdir(legacy)
+    from . import usage_role  # the machine-wide usage role (usage-watch), null when free
+    role = usage_role.with_age(usage_role.read())
     if args.json:
-        print(json.dumps({'locks': [with_age(o) for o in rows], 'legacy': legacy if has_legacy else None},
-                         indent=2, sort_keys=True))
+        print(json.dumps({'locks': [with_age(o) for o in rows], 'legacy': legacy if has_legacy else None,
+                          'usage_role': role}, indent=2, sort_keys=True))
         return 0
     for owner in rows:
         print(status_line(owner, with_checkout=True))
+    if role:
+        print(f'USAGE-ROLE {role["status"]} session={role.get("session_id")} heartbeat_age_s={role["heartbeat_age_s"]} '
+              f'home={role.get("home_project") or "-"}')
     if has_legacy:
         print(f'LEGACY {legacy} present (old multi-project supervisor)')
     return 0

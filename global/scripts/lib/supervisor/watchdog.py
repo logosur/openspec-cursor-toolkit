@@ -4,7 +4,7 @@ import os
 import time
 from datetime import datetime
 
-from . import census, cloud, lock as lock_mod, providers, revival, settings, transcripts, util
+from . import census, cloud, lock as lock_mod, providers, revival, settings, titles, transcripts, util
 
 
 def stale_reason(rec, now, window):
@@ -199,4 +199,8 @@ def cmd_watchdog_with_nudge(args):
     code = cmd_watchdog(args, frozenset(woken))
     if lines:
         print('\n'.join(lines))
+    try:
+        titles.watchdog_sync()   # `titles --fix`: it never changes the watchdog's output contract or exit code
+    except Exception as err:
+        print(f'TITLES-FAILED {str(err)[:200] or type(err).__name__}')
     return code

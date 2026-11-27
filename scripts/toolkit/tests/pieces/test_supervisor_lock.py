@@ -20,7 +20,7 @@ ENTRY = str(REPO_ROOT / 'global/scripts/supervisor-lock')
 SKILL = REPO_ROOT / 'global/skills/supervisa-sesiones/SKILL.md'
 SUBCOMMANDS = ('project', 'registry-dir', 'acquire', 'reclaim', 'beat', 'release', 'open', 'closable', 'hold', 'cloud',
                'cloud-archive', 'cloud-send', 'status', 'backlog', 'skill-lint', 'wait-closer', 'mode', 'list',
-               'sessions', 'wait', 'watchdog', 'revive', 'hook', 'self-test')
+               'sessions', 'wait', 'watchdog', 'titles', 'revive', 'hook', 'self-test')
 EXPORTS = ('cli_dir', 'collect_sessions', 'pid_alive', 'read_json_files', 'read_locks', 'resolve', 'git', 'span',
            'ASK_GATE_MAILBOX_TITLES', 'NOT_HUMAN_PREFIXES', 'app_glob', 'fold_text', 'session_role',
            'title_names_project', 'session_files', 'last_human_input')
@@ -171,7 +171,10 @@ print(json.dumps({'presence': s.PRESENCE_MIN, 'fresh': s.FRESH_MIN, 'deploy': s.
                   'excluded': list(s.EXCLUDED_PROJECTS), 'anchors': list(s.SKILL_ANCHORS), 'rule': s.DEPLOY_RULE,
                   'titles': list(s.QUESTIONS_TITLES), 'title': s.questions_title('p'), 'glob': s.APP_SESSIONS_GLOB,
                   'queued_min': s.QUEUED_REANNOUNCE_MIN, 'slotheld_min': s.SLOTHELD_REANNOUNCE_MIN,
-                  'backoff_max_min': s.ALL_IDLE_BACKOFF_MAX_MIN}))
+                  'backoff_max_min': s.ALL_IDLE_BACKOFF_MAX_MIN,
+                  'supervisor_title': s.supervisor_title('p'), 'closer_title': s.closer_title('p'),
+                  'worker_title': s.worker_title('p', 'tarea'), 'suffix': s.REMOTE_PREVIOUS_SUFFIX,
+                  'titles_sync': s.TITLES_SYNC}))
 '''))
 
     def test_defaults_match_the_shipped_config_piece(self):
@@ -189,6 +192,32 @@ print(json.dumps({'presence': s.PRESENCE_MIN, 'fresh': s.FRESH_MIN, 'deploy': s.
         self.assertEqual((got['queued_min'], got['slotheld_min'], got['backoff_max_min']), (120, 120, 120))
         self.assertEqual(got['anchors'][0], '## Prohibido')
         self.assertIn('## Motivo de la guardia', got['anchors'])
+
+    def test_the_title_settings_default_and_can_be_overridden(self):
+        got = self.settings()
+        self.assertEqual((got['supervisor_title'], got['closer_title'], got['worker_title'], got['suffix'], got['titles_sync']),
+                         ('Supervisora de p', 'Cierre de sesiones de p', 'p · tarea', ' (conexión anterior)', True))
+        got = self.settings(json.dumps({'supervisor_session_title': 'Boss of {project}', 'worker_session_title': '{task} @ {project}',
+                                        'remote_previous_suffix': ' (old)', 'titles_sync': False}))
+        self.assertEqual((got['supervisor_title'], got['worker_title'], got['suffix'], got['titles_sync']),
+                         ('Boss of p', 'tarea @ p', ' (old)', False))
+        wrong = self.settings(json.dumps({'supervisor_session_title': '', 'closer_session_title': 3,
+                                          'remote_previous_suffix': 7, 'titles_sync': 'no'}))
+        self.assertEqual(wrong, self.settings('{}'))
+
+    def test_the_default_titles_keep_the_role_recognisers_apart(self):
+        out = self.python(LOADER + '''
+import json
+lock = load('supervisor_lock')
+s, roles, util = lock._module('settings'), lock._module('session_roles'), lock._module('util')
+questions = lambda t: any(util.fold_text(m) in util.fold_text(t) for m in roles.ASK_GATE_MAILBOX_TITLES)
+closer = lambda t: any(c in util.fold_text(t) for c in s.CLOSER_TITLES)
+titles = {'questions': s.questions_title('p'), 'closer': s.closer_title('p'),
+          'supervisor': s.supervisor_title('p'), 'worker': s.worker_title('p', 'tarea')}
+print(json.dumps({k: [questions(t), closer(t)] for k, t in titles.items()}))
+''')
+        self.assertEqual(json.loads(out), {'questions': [True, False], 'closer': [False, True],
+                                           'supervisor': [False, False], 'worker': [False, False]})
 
     def test_a_corrupt_config_gives_the_defaults(self):
         self.assertEqual(self.settings('{not json'), self.settings('{}'))
@@ -330,6 +359,357 @@ print(json.dumps([watch.allidle_line('p', busy, 20000.0, 900, 7200, 0.0),
         with open(os.path.join(path, 'proj.allidle.json'), 'w') as fh:
             fh.write('{not json')
         self.assertEqual(self.run_steps([(10000, [0]), (10900, [900])]), [None, 'ALLIDLE 900s'])
+
+
+CLOUD_TESTS = str(REPO_ROOT / 'global/scripts/cloud-tests')
+
+
+class TitlesBase(Base):
+    """A project with a lock, app records in a folder of their own and the real cloud-tests script on a fake API."""
+
+    def setUp(self):
+        super().setUp()
+        self.app = self.mkdir('app')
+        self.api_file = os.path.join(self.tmp, 'api.json')
+        self.cloud_env = {'SUPERVISOR_APP_SESSIONS_GLOB': os.path.join(self.app, '*', '*', 'local_*.json'),
+                          'SUPERVISOR_CLOUD_TESTS': CLOUD_TESTS, 'CLOUD_TESTS_API_FAKE': self.api_file,
+                          'CLOUD_TESTS_STATE': self.mkdir('ct-state'), 'SUPERVISOR_NUDGE': '', 'SUPERVISOR_NOTIFY': ''}
+        self.env.update(self.cloud_env)
+        self.repo_dir = self.repo('demo', 'https://github.com/t/demo.git')
+
+    def record(self, local_id, title, cwd=None, bridges=(), account='acct', **extra):
+        rec = {'sessionId': local_id, 'title': title, 'cwd': cwd or self.repo_dir, 'lastActivityAt': 5,
+               'bridgeSessionIds': list(bridges), **extra}
+        folder = self.mkdir(os.path.join('app', account, 'org'))
+        path = os.path.join(folder, local_id + '.json')
+        with open(path, 'w') as fh:
+            json.dump(rec, fh)
+        return path
+
+    def bridge(self, cse_id, title, last='2026-11-27T10:00:00Z', kind='bridge', status='active'):
+        return {'id': cse_id, 'title': title, 'status': status, 'environment_kind': kind, 'last_event_at': last,
+                'worker_status': 'idle', 'status_bucket': 'completed',
+                'config': {'sources': [{'url': 'https://github.com/t/demo'}]}}
+
+    def api(self, *rows):
+        with open(self.api_file, 'w') as fh:
+            json.dump({'sessions': list(rows)}, fh)
+
+    def api_state(self):
+        with open(self.api_file) as fh:
+            return json.load(fh)
+
+    def take_lock(self, *extra):
+        r = self.run_cli('acquire', '--dir', self.repo_dir, '--session', 'local_sup', *extra)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.run_cli('beat', '--dir', self.repo_dir, '--session', 'local_sup', '--mailbox', 'local_box',
+                         '--closer', 'local_closer')
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def lock_title(self):
+        return json.loads(self.run_cli('status', '--dir', self.repo_dir, '--json').stdout)['title']
+
+
+class LockTitleTest(TitlesBase):
+    def test_acquire_without_a_title_uses_the_supervisor_title_of_the_project(self):
+        self.take_lock()
+        self.assertEqual(self.lock_title(), 'Supervisora de demo')
+
+    def test_an_explicit_title_still_wins_and_a_resume_keeps_the_title_when_none_is_given(self):
+        self.take_lock('--title', 'Mi supervisión')
+        self.assertEqual(self.lock_title(), 'Mi supervisión')
+        r = self.run_cli('acquire', '--dir', self.repo_dir, '--session', 'local_sup')
+        self.assertIn('RESUMED', r.stdout)
+        self.assertEqual(self.lock_title(), 'Mi supervisión')
+
+    def test_a_title_that_looks_like_supervisor_lock_output_is_refused(self):
+        self.take_lock()
+        bad = ('HELD demo-1a2b session=local_x state=running', 'STALE k', '  MINE k', 'FREE k', 'ACQUIRED k', 'RESUMED k',
+               'Algo session=local_abc', 'Algo heartbeat_age_s=3')
+        for title in bad:
+            with self.subTest(title=title):
+                for args in (('acquire', '--session', 'local_new'),
+                             ('reclaim', '--session', 'local_new', '--from', 'local_sup'),
+                             ('beat', '--session', 'local_sup')):
+                    r = self.run_cli(*args, '--dir', self.repo_dir, '--title', title)
+                    self.assertEqual(r.returncode, 2, (args, r.stdout, r.stderr))
+                    self.assertIn('TITLE REFUSED', r.stderr)
+        self.assertEqual(self.lock_title(), 'Supervisora de demo')
+        for fine in ('Supervisora de demo', 'Helden de la guardia', 'FREEDOM'):
+            r = self.run_cli('beat', '--dir', self.repo_dir, '--session', 'local_sup', '--title', fine)
+            self.assertEqual(r.returncode, 0, (fine, r.stderr))
+            self.assertEqual(self.lock_title(), fine)
+
+    def test_beat_title_belongs_to_the_owner(self):
+        self.take_lock()
+        r = self.run_cli('beat', '--dir', self.repo_dir, '--session', 'local_other', '--title', 'Otra')
+        self.assertEqual(r.returncode, 5)
+        self.assertEqual(self.lock_title(), 'Supervisora de demo')
+
+
+class RenameHintTest(TitlesBase):
+    def test_beat_lists_the_sessions_that_carry_another_title(self):
+        self.take_lock()
+        self.record('local_sup', 'Supervisora de demo')
+        self.record('local_box', 'Pregunta cualquiera')
+        self.record('local_closer', 'Cierre')
+        r = self.run_cli('beat', '--dir', self.repo_dir, '--session', 'local_sup', '--phase', 'F2')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        lines = [ln for ln in r.stderr.splitlines() if ln.startswith('RENAME')]
+        self.assertEqual(lines, [
+            'RENAME local_box questions «Pregunta cualquiera» -> «Sesión de preguntas de demo»',
+            'RENAME local_closer closer «Cierre» -> «Cierre de sesiones de demo»'])
+
+    def test_no_line_when_the_titles_match_or_the_sessions_have_no_record(self):
+        self.take_lock()
+        r = self.run_cli('beat', '--dir', self.repo_dir, '--session', 'local_sup')
+        self.assertEqual((r.returncode, r.stderr), (0, ''), r.stderr)
+        self.record('local_sup', 'Supervisora de demo')
+        self.record('local_box', 'Sesión de preguntas de demo')
+        self.record('local_closer', 'Cierre de sesiones de demo')
+        r = self.run_cli('beat', '--dir', self.repo_dir, '--session', 'local_sup')
+        self.assertEqual((r.returncode, r.stderr), (0, ''))
+
+    def test_titles_sync_off_silences_the_hint(self):
+        with open(os.path.join(self.config, 'supervision.json'), 'w') as fh:
+            json.dump({'titles_sync': False}, fh)
+        self.take_lock()
+        self.record('local_sup', 'Otro')
+        r = self.run_cli('beat', '--dir', self.repo_dir, '--session', 'local_sup')
+        self.assertEqual((r.returncode, r.stderr), (0, ''))
+
+
+class TitlesCommandTest(TitlesBase):
+    def titles(self, *args):
+        r = self.run_cli('titles', *args)
+        self.assertNotIn('Traceback', r.stderr)
+        return r
+
+    def test_it_lists_a_rename_per_role_and_never_edits_the_app_records(self):
+        self.take_lock()
+        paths = [self.record('local_sup', 'Vieja'), self.record('local_box', 'Vieja 2'),
+                 self.record('local_closer', 'Cierre de sesiones de demo')]
+        def read_all():
+            data = []
+            for path in paths:
+                with open(path, 'rb') as fh:
+                    data.append(fh.read())
+            return data
+        before = read_all()
+        r = self.titles('--fix')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        renames = [ln for ln in r.stdout.splitlines() if ln.startswith('RENAME')]
+        self.assertEqual(renames, ['RENAME local_sup supervisor «Vieja» -> «Supervisora de demo»',
+                                   'RENAME local_box questions «Vieja 2» -> «Sesión de preguntas de demo»'])
+        self.assertEqual(read_all(), before)
+
+    def test_fix_rewrites_only_the_lock_title(self):
+        self.take_lock('--title', 'Supervisión 2026')
+        self.record('local_sup', 'Supervisora de demo')
+        r = self.titles()
+        self.assertIn('LOCK demo', r.stdout)
+        self.assertIn('«Supervisión 2026» -> «Supervisora de demo»', r.stdout)
+        self.assertEqual(self.lock_title(), 'Supervisión 2026')
+        self.titles('--fix')
+        self.assertEqual(self.lock_title(), 'Supervisora de demo')
+        self.assertNotIn('LOCK demo', self.titles().stdout)
+
+    def test_a_corrupted_lock_title_is_repaired(self):
+        self.take_lock()
+        lock_dir = os.path.join(self.home, '.claude', 'supervisor', 'locks')
+        path = os.path.join(lock_dir, os.listdir(lock_dir)[0])
+        with open(path) as fh:
+            lock = json.load(fh)
+        lock['title'] = 'STALE demo session=local_sup state=running'
+        with open(path, 'w') as fh:
+            json.dump(lock, fh)
+        self.titles('--fix')
+        self.assertEqual(self.lock_title(), 'Supervisora de demo')
+
+    def test_session_limits_the_output_to_that_project_and_an_unknown_one_is_an_error(self):
+        other = self.repo('other', 'https://github.com/t/other.git')
+        self.take_lock()
+        r = self.run_cli('acquire', '--dir', other, '--session', 'local_osup')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.record('local_sup', 'Uno')
+        self.record('local_osup', 'Dos', cwd=other)
+        both = self.titles().stdout
+        self.assertIn('local_sup', both)
+        self.assertIn('local_osup', both)
+        mine = self.titles('--session', 'local_box').stdout
+        self.assertIn('RENAME local_sup', mine)
+        self.assertNotIn('local_osup', mine)
+        self.assertNotIn('«Dos»', mine)
+        r = self.titles('--session', 'local_unknown')
+        self.assertEqual(r.returncode, 2)
+
+    def test_remote_control_copies_follow_the_local_title_and_older_ones_say_so(self):
+        self.take_lock()
+        self.record('local_work', 'demo · tarea', bridges=['session_NEW', 'session_OLD'])
+        self.record('local_untitled', '', bridges=['session_BLANK'])
+        self.api(self.bridge('cse_NEW', 'host-example-brave-otter', last='2026-11-27T11:00:00Z'),
+                 self.bridge('cse_OLD', 'Título antiguo', last='2026-11-20T11:00:00Z'),
+                 self.bridge('cse_BLANK', 'Se queda', last='2026-11-20T11:00:00Z'),
+                 self.bridge('cse_STRANGER', 'Sin ficha local'),
+                 self.bridge('cse_DONE', 'Archivada', status='archived'),
+                 self.bridge('cse_CLOUD', 'Nube', kind='anthropic_cloud'))
+        r = self.titles()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        remote = [ln for ln in r.stdout.splitlines() if ln.startswith('REMOTE')]
+        self.assertEqual(remote, ['REMOTE cse_NEW «host-example-brave-otter» -> «demo · tarea»',
+                                  'REMOTE cse_OLD «Título antiguo» -> «demo · tarea (conexión anterior)»'])
+        self.assertNotIn('renamed', self.api_state())
+        self.titles('--fix')
+        state = self.api_state()
+        self.assertEqual(sorted(state['renamed']),
+                         [['cse_NEW', 'demo · tarea'], ['cse_OLD', 'demo · tarea (conexión anterior)']])
+        titles = {x['id']: x['title'] for x in state['sessions']}
+        self.assertEqual((titles['cse_BLANK'], titles['cse_STRANGER'], titles['cse_CLOUD']),
+                         ('Se queda', 'Sin ficha local', 'Nube'))
+        # the shared cache already holds the new titles: the next run has nothing to rename and calls nothing
+        again = self.titles('--fix')
+        self.assertEqual([ln for ln in again.stdout.splitlines() if ln.startswith('REMOTE')], [])
+        self.assertEqual(len(self.api_state()['renamed']), 2)
+
+    def test_a_remote_copy_with_a_local_title_that_looks_like_lock_output_is_left_alone(self):
+        self.record('local_bad', 'HELD demo session=local_x', bridges=['session_X'])
+        self.api(self.bridge('cse_X', 'Nombre'))
+        self.titles('--fix')
+        self.assertNotIn('renamed', self.api_state())
+
+    def adopt_lines(self, **kw):
+        r = self.titles('--session', 'local_sup')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return [ln for ln in r.stdout.splitlines() if ln.startswith('ADOPT')]
+
+    def test_adopt_lists_the_helpers_that_are_not_children_of_the_supervisor(self):
+        self.take_lock()
+        self.record('local_sup', 'Supervisora de demo')
+        box = ('local_box', 'Sesión de preguntas de demo')
+        closer = ('local_closer', 'Cierre de sesiones de demo')
+        # children of the owner: nothing
+        self.record(*box, spawnedFrom={'sessionId': 'local_sup'})
+        self.record(*closer, spawnedFrom={'sessionId': 'local_sup'}, lineageDetached=False)
+        self.assertEqual(self.adopt_lines(), [])
+        # opened by another session (a previous supervisor): ADOPT, naming the parent
+        self.record(*box, spawnedFrom={'sessionId': 'local_old'})
+        self.assertEqual(self.adopt_lines(), ['ADOPT local_box questions (abierta por local_old)'])
+        # moved to the top level: ADOPT, even when it was once the owner's child
+        self.record(*closer, spawnedFrom={'sessionId': 'local_sup'}, lineageDetached=True)
+        self.assertEqual(self.adopt_lines(), ['ADOPT local_box questions (abierta por local_old)',
+                                              'ADOPT local_closer closer (abierta por local_sup)'])
+        self.record(*closer, lineageDetached=True)
+        self.assertEqual(self.adopt_lines()[1], 'ADOPT local_closer closer (abierta por -)')
+
+    def test_adopt_prints_nothing_without_a_record_or_without_the_fields(self):
+        self.take_lock()
+        self.assertEqual(self.adopt_lines(), [])                      # no records at all
+        self.record('local_sup', 'Supervisora de demo', spawnedFrom={'sessionId': 'local_elsewhere'}, lineageDetached=True)
+        self.record('local_box', 'Sesión de preguntas de demo')       # neither field
+        self.record('local_closer', 'Cierre de sesiones de demo', spawnedFrom={})
+        self.assertEqual(self.adopt_lines(), [])                      # the supervisor itself is never adopted
+
+    def test_beat_shows_the_adopt_lines_too(self):
+        self.take_lock()
+        self.record('local_sup', 'Supervisora de demo')
+        self.record('local_box', 'Sesión de preguntas de demo', spawnedFrom={'sessionId': 'local_old'})
+        self.record('local_closer', 'Cierre de sesiones de demo', lineageDetached=True)
+        r = self.run_cli('beat', '--dir', self.repo_dir, '--session', 'local_sup')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual([ln for ln in r.stderr.splitlines() if ln.startswith(('ADOPT', 'RENAME'))],
+                         ['ADOPT local_box questions (abierta por local_old)', 'ADOPT local_closer closer (abierta por -)'])
+
+    def test_one_unreadable_lock_does_not_stop_the_other_work(self):
+        self.take_lock()
+        self.record('local_sup', 'Vieja')
+        lock_dir = os.path.join(self.home, '.claude', 'supervisor', 'locks')
+        with open(os.path.join(lock_dir, 'broken.json'), 'w') as fh:
+            json.dump({'session_id': 'local_broken', 'project': 'x'}, fh)   # no `key`
+        r = self.titles('--fix')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('unreadable', r.stdout)
+        self.assertIn('RENAME local_sup', r.stdout)
+        self.assertEqual(self.lock_title(), 'Supervisora de demo')
+
+    def test_without_the_provider_or_the_api_it_says_so_and_exits_zero(self):
+        self.take_lock()
+        self.record('local_sup', 'Vieja')
+        self.env['SUPERVISOR_CLOUD_TESTS'] = os.path.join(self.tmp, 'missing')
+        r = self.titles('--fix')
+        self.assertEqual(r.returncode, 0)
+        self.assertIn('REMOTE unavailable', r.stdout)
+        self.assertEqual(self.lock_title(), 'Supervisora de demo')
+        # the provider is present but the API refuses to answer
+        self.env.update(SUPERVISOR_CLOUD_TESTS=CLOUD_TESTS, CLOUD_TESTS_API_FAKE='',
+                        CLOUD_TESTS_CREDENTIALS=os.path.join(self.tmp, 'no-login.json'),
+                        CLOUD_TESTS_API='http://127.0.0.1:9')
+        r = self.titles('--fix')
+        self.assertEqual(r.returncode, 0)
+        self.assertIn('REMOTE unavailable', r.stdout)
+
+    def test_http_403_and_404_are_skipped_and_counted_and_other_errors_reported(self):
+        self.record('local_a', 'Uno', bridges=['session_A'])
+        self.record('local_b', 'Dos', bridges=['session_B'])
+        self.record('local_c', 'Tres', bridges=['session_C'])
+        self.api(self.bridge('cse_A', 'x'), self.bridge('cse_B', 'x'), self.bridge('cse_C', 'x'))
+        out = self.python(LOADER + '''
+import json
+lock = load('supervisor_lock')
+titles, providers = lock._module('titles'), lock._module('providers')
+ct = providers.cloud_tests_module()
+codes = {'cse_A': 403, 'cse_B': 404, 'cse_C': 500}
+listing = ct.api_call
+ct.api_call = (lambda method, path, body=None: listing(method, path, body) if method == 'GET'
+               else (codes[path.rsplit('/', 1)[1]], {}))
+lines = []
+counts = titles.sync_remote(titles.app_records(), True, lines.append)
+print(json.dumps([counts, lines]))
+''', env=self.cloud_env)
+        counts, lines = json.loads(out)
+        self.assertEqual(counts, {'fixed': 0, 'skipped': 2, 'failed': 1})
+        self.assertIn('REMOTE cse_C HTTP 500', lines)
+        self.assertTrue(any(ln.startswith('REMOTE skipped 2') for ln in lines), lines)
+        self.assertFalse(any('unavailable' in ln for ln in lines), lines)
+
+
+class WatchdogTitlesTest(TitlesBase):
+    def setUp(self):
+        super().setUp()
+        self.take_lock('--title', 'Supervisión 2026')
+        self.record('local_work', 'demo · tarea', bridges=['session_NEW'])
+        self.api(self.bridge('cse_NEW', 'host-example-calm-fox'))
+
+    def test_a_watchdog_run_renames_the_bridge_and_the_lock_without_adding_output(self):
+        base = self.run_cli('watchdog', env={'SUPERVISOR_WATCHDOG_CLOUD': '0', 'CLOUD_TESTS_API_FAKE': ''})
+        self.assertEqual(base.returncode, 0, base.stderr)
+        self.assertEqual(self.lock_title(), 'Supervisora de demo')   # the lock title is repaired even with no cloud
+        r = self.run_cli('watchdog')
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, base.stdout, ''))
+        self.assertEqual(self.api_state()['renamed'], [['cse_NEW', 'demo · tarea']])
+
+    def test_titles_sync_off_leaves_everything_as_it_was(self):
+        with open(os.path.join(self.config, 'supervision.json'), 'w') as fh:
+            json.dump({'titles_sync': False}, fh)
+        r = self.run_cli('watchdog')
+        self.assertEqual((r.returncode, r.stdout), (0, ''))
+        self.assertNotIn('renamed', self.api_state())
+        self.assertEqual(self.lock_title(), 'Supervisión 2026')
+
+    def test_a_failing_sync_is_one_line_and_never_changes_the_exit_code(self):
+        out = self.python(LOADER + '''
+import argparse, io, contextlib
+lock = load('supervisor_lock')
+watchdog, titles = lock._module('watchdog'), lock._module('titles')
+def boom():
+    raise RuntimeError('broken on purpose')
+titles.watchdog_sync = boom
+args = argparse.Namespace(notify=False, nudge=False, dead_after=600, stale_after=2700, realert_after=0)
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    code = watchdog.cmd_watchdog_with_nudge(args)
+print(code, repr(buf.getvalue()))
+''', env=self.cloud_env)
+        self.assertEqual(out.strip(), "0 'TITLES-FAILED broken on purpose\\n'")
 
 
 class FakeHeavyJob(Base):
@@ -483,6 +863,44 @@ class DegradationTest(Base):
                 self.assert_clean(r, codes)
         revive = self.run_cli('revive', '--json')
         self.assertEqual(set(json.loads(revive.stdout)), {'targets', 'notes'})
+
+    def test_a_supervisor_on_guard_is_stalled_only_when_its_turn_was_cut_by_the_limit(self):
+        # the process of a cut supervisor stays alive and its heartbeat stays still, which on guard is normal: only the
+        # limit's error as the newest record of its main transcript tells the two apart
+        lock_home, projects = self.mkdir('sup-home'), self.mkdir('sup-projects')
+        out = self.python(LOADER + '''
+import datetime, json, os, time
+lock = load('supervisor_lock')
+revival = lock._module('revival')
+home, projects = os.environ['SUPERVISOR_LOCK_HOME'], os.environ['SUPERVISOR_PROJECTS_DIR']
+now = time.time()
+iso = lambda ago: time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(now - ago)) + '.000Z'
+beat = lambda ago: datetime.datetime.fromtimestamp(now - ago).astimezone().isoformat(timespec='seconds')
+text = {'role': 'assistant', 'content': [{'type': 'text', 'text': "You've hit your limit"}]}
+fine = [{'type': 'assistant', 'timestamp': iso(4000), 'message': text}]
+cut = fine + [{'type': 'assistant', 'timestamp': iso(3900), 'isApiErrorMessage': True, 'error': 'rate_limit',
+               'message': text}]
+os.makedirs(os.path.join(home, 'locks'))
+live = {}
+for key, phase, records in (('guard-cut', 'guardia', cut), ('guard-quiet', 'guardia', fine), ('work-cut', 'F3', cut),
+                            ('work-quiet', 'F3', fine)):
+    sid = 'local_' + key
+    json.dump({'key': key, 'session_id': sid, 'state': 'running', 'phase': phase, 'project': 'demo',
+               'checkout': home + '/none', 'heartbeat': beat(3600)},
+              open(os.path.join(home, 'locks', key + '.json'), 'w'))
+    path = os.path.join(projects, 'p', 'cli-' + key + '.jsonl')
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, 'w').write(''.join(json.dumps(r) + '\\n' for r in records))
+    os.utime(path, (now - 3900, now - 3900))
+    live[sid] = {'sessionId': 'cli-' + key, 'cwd': '/work/demo', 'status': 'idle'}
+revival.live_hosts = lambda: live
+print(json.dumps({k: v[0] for k, _, v in revival.stalled_supervisors(revival.STALLED_AFTER_S, now)}))
+''', env={'SUPERVISOR_LOCK_HOME': lock_home, 'SUPERVISOR_PROJECTS_DIR': projects})
+        got = json.loads(out)
+        self.assertEqual(got.get('guard-cut'), 'limit')
+        self.assertEqual(got.get('work-cut'), 'limit')
+        self.assertNotIn('guard-quiet', got)      # quiet on guard is normal
+        self.assertIn('work-quiet', got)          # quiet in a working phase is not
 
     def test_open_accepts_the_asking_session_like_status_does(self):
         # supervisors pass `--session <their id>` to `open` as they do to `status`; it is not a usage error and it

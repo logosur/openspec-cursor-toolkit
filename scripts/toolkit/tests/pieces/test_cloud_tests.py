@@ -135,7 +135,8 @@ class TestConfig(Base):
         m = self.module()
         self.assertEqual((m.EXCLUDED_NAMES, m.EXCLUDED_OWNERS), (set(), set()))
         with open(REPO_ROOT / 'global/config/cloud-tests.json') as f:
-            self.assertEqual(json.load(f), {'excluded_names': [], 'excluded_owners': []})
+            self.assertEqual(json.load(f), {'excluded_names': [], 'excluded_owners': [],
+                                            'runner_session_title': 'Tests en la nube de {project}'})
 
     def test_configured_names_and_owners_are_excluded_case_blind(self):
         self.write_config({'excluded_names': ['Private-App'], 'excluded_owners': ['Team-Org']})
@@ -329,6 +330,157 @@ class TestOptionalPieces(Base):
         r = self.cli('sweep', '--dry-run')
         self.assertEqual(r.returncode, 0)
         self.assertTrue(r.stdout.startswith('SKIP no CLI login'), r.stdout)
+
+
+class TestRunnerTitles(Base):
+    """The runners of a project carry «Tests en la nube de <project>»: set when the runner is launched and by `sweep`."""
+
+    def setUp(self):
+        super().setUp()
+        self.api = os.path.join(self.tmp, 'api.json')
+        self.iso = lambda age_s: time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - age_s))
+
+    def write_api(self, *rows):
+        with open(self.api, 'w') as f:
+            json.dump({'sessions': list(rows)}, f)
+
+    def api_state(self):
+        with open(self.api) as f:
+            return json.load(f)
+
+    def session(self, sid, **kw):
+        return dict({'id': sid, 'status': 'active', 'worker_status': 'idle', 'status_bucket': 'completed',
+                     'environment_kind': 'anthropic_cloud', 'last_event_at': self.iso(5 * 3600), 'title': 'Cloud runner',
+                     'config': {'sources': [{'url': 'https://github.com/acme/proj'}]}}, **kw)
+
+    def test_the_title_comes_from_the_config_piece(self):
+        self.assertEqual(self.module().runner_title('demo'), 'Tests en la nube de demo')
+        self.write_config({'runner_session_title': 'Runner of {project}'})
+        self.assertEqual(self.module().runner_title('demo'), 'Runner of demo')
+        self.write_config({'runner_session_title': ''})
+        self.assertEqual(self.module().runner_title('demo'), 'Tests en la nube de demo')
+
+    def test_rename_session_puts_the_title_on_the_cse_id_and_reports_the_status(self):
+        m = self.module(CLOUD_TESTS_API_FAKE=self.api)
+        self.write_api(self.session('cse_ABC'))
+        self.assertEqual(m.rename_session('session_ABC', 'Nuevo'), 200)
+        self.assertEqual(self.api_state()['renamed'], [['cse_ABC', 'Nuevo']])
+        self.assertEqual(self.api_state()['sessions'][0]['title'], 'Nuevo')
+        self.assertEqual(m.rename_session('session_NOPE', 'x'), 404)
+
+    def test_rename_session_never_raises(self):
+        m = self.module()   # no fake and no CLI login
+        self.assertIsNone(m.rename_session('session_ABC', 'x'))
+        m.api_call = mock.Mock(side_effect=RuntimeError('boom'))
+        self.assertIsNone(m.rename_session('session_ABC', 'x'))
+
+    def queued(self, m):
+        data = {'runs': {'r1': {'run': 'r1', 'state': 'queued', 'sha': 'a' * 40, 'tree': 'b' * 40, 'suite': 'ci',
+                                'command': 'make ci', 'timeout_min': 30, 'created': time.time()}}, 'runner': None}
+        return data
+
+    def test_a_new_runner_is_renamed_as_soon_as_its_session_id_is_known(self):
+        m = self.module(CLOUD_TESTS_API_FAKE=self.api)
+        self.write_api(self.session('cse_NEWRUN'))
+        m.launch_runner = lambda proj, line: ('session_NEWRUN', None)
+        proj = mock.Mock()
+        proj.name = 'demo'
+        data = self.queued(m)
+        self.assertEqual(m.dispatch(proj, data, time.time()), 'r1')
+        self.assertEqual(self.api_state()['renamed'], [['cse_NEWRUN', 'Tests en la nube de demo']])
+        self.assertEqual(data['runner']['session'], 'session_NEWRUN')
+
+    def test_a_failed_rename_never_fails_the_launch(self):
+        m = self.module()
+        m.launch_runner = lambda proj, line: ('session_NEWRUN', None)
+        for failure in (m.ApiUnavailable('network down'), RuntimeError('boom')):
+            m.api_call = mock.Mock(side_effect=failure)
+            proj = mock.Mock()
+            proj.name = 'demo'
+            data = self.queued(m)
+            self.assertEqual(m.dispatch(proj, data, time.time()), 'r1')
+            self.assertEqual((data['runs']['r1']['state'], data['runs']['r1']['session']), ('sent', 'session_NEWRUN'))
+        m.api_call = mock.Mock(return_value=(500, {}))
+        data = self.queued(m)
+        self.assertEqual(m.dispatch(mock.Mock(), data, time.time()), 'r1')
+
+    def write_ledger_named(self, key, name, runner='session_CUR'):
+        os.makedirs(self.state, exist_ok=True)
+        data = {'project': key, 'repo': 'acme/proj', 'runner': {'session': runner, 'created': time.time() - 600, 'runs': 1},
+                'retired': [{'session': 'session_RET'}], 'results_seen': None,
+                'runs': {'a': {'state': 'sent', 'session': 'session_BUSY'}, 'b': {'state': 'done', 'session': 'session_DONE'},
+                         'c': {'state': 'done', 'session': 'session_OTHER'}}}
+        if name:
+            data['name'] = name
+        with open(os.path.join(self.state, key + '.json'), 'w') as f:
+            json.dump(data, f)
+
+    def sweep(self, *args):
+        r = self.cli('sweep', *args, env={'CLOUD_TESTS_API_FAKE': self.api})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout
+
+    def sessions_for_sweep(self):
+        want = 'Tests en la nube de demo'
+        return [self.session('cse_CUR', last_event_at=self.iso(60)),                       # usable runner: kept, renamed
+                self.session('cse_BUSY', worker_status='running'),                        # working: kept, renamed
+                self.session('cse_RET'),                                                  # retired, quiet: archived only
+                self.session('cse_DONE', title=want, last_event_at=self.iso(60)),         # right title already
+                self.session('cse_OTHER', config={'sources': [{'url': 'https://github.com/acme/elsewhere'}]}),
+                self.session('cse_STRANGER'),                                             # not in the ledger
+                self.session('cse_BRIDGE', environment_kind='bridge')]
+
+    def test_sweep_renames_the_runners_the_ledger_proves_and_nothing_else(self):
+        self.write_ledger_named('proj-test', 'demo')
+        self.write_api(*self.sessions_for_sweep())
+        out = self.sweep()
+        state = self.api_state()
+        self.assertEqual(sorted(state['renamed']), [['cse_BUSY', 'Tests en la nube de demo'],
+                                                   ['cse_CUR', 'Tests en la nube de demo']], out)
+        self.assertEqual(state['archived'], ['cse_RET'])
+        titles = {x['id']: x['title'] for x in state['sessions']}
+        self.assertEqual((titles['cse_RET'], titles['cse_OTHER'], titles['cse_STRANGER'], titles['cse_BRIDGE']),
+                         ('Cloud runner',) * 4)
+        self.assertIn('RENAMED proj-test cse_CUR', out)
+        again = self.sweep()
+        self.assertNotIn('RENAMED', again)
+        self.assertEqual(len(self.api_state()['renamed']), 2)
+
+    def test_sweep_dry_run_changes_nothing_and_a_ledger_without_a_name_is_never_guessed(self):
+        self.write_ledger_named('proj-test', 'demo')
+        self.write_api(*self.sessions_for_sweep())
+        out = self.sweep('--dry-run')
+        self.assertIn('WOULD_RENAME proj-test cse_CUR', out)
+        self.assertNotIn('renamed', self.api_state())
+        self.write_ledger_named('proj-test', None)
+        self.assertNotIn('RENAME', self.sweep())
+        self.assertNotIn('renamed', self.api_state())
+
+    def test_an_old_ledger_takes_the_name_from_its_git_common_dir(self):
+        self.write_ledger_named('proj-test', None)
+        path = os.path.join(self.state, 'proj-test.json')
+        with open(path) as f:
+            data = json.load(f)
+        data['common'] = '/somewhere/old-name/.git'
+        with open(path, 'w') as f:
+            json.dump(data, f)
+        self.write_api(*self.sessions_for_sweep())
+        self.assertIn('RENAMED proj-test cse_CUR «Cloud runner» -> «Tests en la nube de old-name»', self.sweep())
+        data['common'] = '/somewhere/bare.git'
+        with open(path, 'w') as f:
+            json.dump(data, f)
+        self.assertNotIn('RENAME', self.sweep())
+
+    def test_the_ledger_records_the_project_name(self):
+        repo = self.repo('demo-checkout', remote='https://github.com/acme/proj.git')
+        m = self.module()
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            proj = m.Project(repo)
+            with m.ledger(proj) as data:
+                pass
+            self.assertEqual(data['name'], 'demo-checkout')
+            with open(os.path.join(self.state, proj.key + '.json')) as f:
+                self.assertEqual(json.load(f)['name'], 'demo-checkout')
 
 
 class TestSupervisorLockProvider(Base):

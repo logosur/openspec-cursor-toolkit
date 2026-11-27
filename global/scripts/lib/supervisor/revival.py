@@ -24,7 +24,8 @@ DEAD_ALERT_GRACE_S = 50 * 60  # a DEAD supervisor reaches the developer only aft
 # dead, and nothing wakes it once the account has usage again. `revive` wakes a live, idle supervisor whose lock is
 # running in a working phase (not `guardia`, where a still heartbeat is normal) and whose heartbeat is older than
 # STALLED_AFTER_S, the 45 min the skill allows without attending; only while the account has usage. A turn cut by the
-# usage limit (its newest record is the limit's error) counts after LIMIT_CUT_AFTER_S instead.
+# usage limit (its newest record is the limit's error) counts after LIMIT_CUT_AFTER_S instead, on guard too: the
+# wake-up turn of a guard supervisor can be the one the limit cuts.
 STALLED_AFTER_S = 45 * 60
 
 
@@ -92,10 +93,12 @@ def revive_text(owner):
 
 
 def stalled_supervisors(stalled_after, now=None):
-    """[(key, owner, verdict)] of live owners (project not paused) whose lock is running in a phase other than
-    `guardia` with a heartbeat older than `stalled_after` s, or older than LIMIT_CUT_AFTER_S when its main transcript
-    ends in the usage limit's error (limit_cut). verdict is ('busy', None, '') when the session works now (its CLI
-    status, or a transcript touched within `stalled_after`), else the watchdog's (reason, epoch, detail)."""
+    """[(key, owner, verdict)] of live owners (project not paused) whose lock is running with a heartbeat older than
+    `stalled_after` s, or older than LIMIT_CUT_AFTER_S when its main transcript ends in the usage limit's error
+    (limit_cut). A supervisor on guard (phase `guardia`) counts only for that cut: a quiet heartbeat is normal there,
+    but a watcher wake-up turn cut by the limit leaves it silent for good, because its process stays alive.
+    verdict is ('busy', None, '') when the session works now (its CLI status, or a transcript touched within
+    `stalled_after`), else the watchdog's (reason, epoch, detail)."""
     from . import backlog, watchdog  # imported here: both import this module
     now = time.time() if now is None else now
     live = live_hosts()
@@ -106,7 +109,7 @@ def stalled_supervisors(stalled_after, now=None):
         owner = store.read(key)
         rec = live.get((owner or {}).get('session_id'))
         short = min(LIMIT_CUT_AFTER_S, stalled_after)
-        if (not owner or not rec or owner.get('state') != 'running' or backlog.on_guard(owner)
+        if (not owner or not rec or owner.get('state') != 'running'
                 or util.age_seconds(owner.get('heartbeat')) <= short or providers.pause_of(owner.get('checkout'))):
             continue
         # a turn cut by the usage limit shows at once in the main transcript (its newest record is the limit's error),
@@ -118,7 +121,7 @@ def stalled_supervisors(stalled_after, now=None):
         if cut:
             out.append((key, owner, cut))
             continue
-        if util.age_seconds(owner.get('heartbeat')) <= stalled_after:
+        if backlog.on_guard(owner) or util.age_seconds(owner.get('heartbeat')) <= stalled_after:
             continue
         verdict = None if rec.get('status') == 'busy' else watchdog.stale_reason(rec, now, stalled_after)
         out.append((key, owner, verdict or ('busy', None, '')))

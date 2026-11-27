@@ -13,7 +13,7 @@ Archivar esconde una sesión, detiene su proceso y puede limpiar su worktree. Po
 
 Es una sesión auxiliar del proyecto, para que verificar no distraiga a la supervisora de su trabajo.
 
-- **Título:** `Cierre de sesiones de <project>` (el nombre del proyecto). Modelo de la fila Cierre, el modo heredado, sin
+- **Título:** el de `closer_session_title` en la configuración `supervision`, `Cierre de sesiones de <project>` por defecto (`$L titles --session <id>` lo imprime). Modelo de la fila Cierre, el modo heredado, sin
   worktree.
 - **Cuándo se abre:** en el turno de invocación. Se registra con `$L beat --session <id> --closer <id suyo>` y entra en
   `--exclude` de tu vigilante. Si se presenta una abierta por el desarrollador, compruebas con `get_session` que es del

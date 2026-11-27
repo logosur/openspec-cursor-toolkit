@@ -11,6 +11,11 @@ tener que reanudarlas una a una.
   de la CLI y de las rutinas. Si falta alguno, abre una terminal para que el desarrollador autorice en su navegador.
 - La tarea de la app `account-switch-resume`, que `account-switch arm` deja preparada en cada cuenta inactiva, o la
   primera sesión de la app que arranca después (hook `SessionStart`), recibe la lista y reanuda esas sesiones.
+- Una sesión con rol de supervisión (la dueña de un cerrojo de `supervisor-lock` o su sesión de cierre) pasa los ratos
+  entre turnos esperando a un vigilante en segundo plano, y el cambio de cuenta lo mata sin dejar rastro de corte en su
+  transcripción. `account-switch` la anota como «vigilante» si el latido de su cerrojo es reciente, y le envía el aviso
+  de reanudación con una frase más: rearmar su vigilante (`supervisor-lock wait`, o `wait-closer` la sesión de cierre).
+  Deja de estar pendiente en cuanto recibe el aviso o ejecuta un turno después del cambio.
 - Si la cuenta nueva tampoco tiene uso, el cambio espera a que vuelva (`not_before`) y nadie lo reclama antes.
 
 ## Lo que hace el agente

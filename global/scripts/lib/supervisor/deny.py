@@ -53,6 +53,16 @@ def deny_question(owner, local):
                                               'permissionDecisionReason': reason}})
 
 
+def deny_attached_mailbox(parent):
+    """Deny json, given once, for a questions session that still hangs from another session in the app's sidebar."""
+    reason = (f'Eres la sesión de preguntas y todavía cuelgas de la sesión {parent}: tus diálogos le saldrían al '
+              f'desarrollador en la ventana de esa sesión y no en la tuya. Pásate a nivel superior con la herramienta '
+              f'detach_session y session_id "self", y después vuelve a lanzar la misma pregunta. Este aviso sale una sola '
+              f'vez: el reintento pasa aunque la app no te deje pasarte a nivel superior.')
+    return json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
+                                              'permissionDecisionReason': reason}})
+
+
 PANEL_SKILL = '~/.claude/skills/panel-de-decision/SKILL.md'
 
 

@@ -130,16 +130,22 @@ Justo después de `acquire`, renombra tu propia sesión con `set_session_title` 
 sesión con `set_session_title`. Un título que parezca una salida de `supervisor-lock` (`HELD …`, `session=local_…`) lo
 rechaza el script. Un script nunca edita las fichas de la app: renombra la propia sesión.
 
-**Sesiones hijas en la barra lateral.** Las de preguntas y de cierre deben colgar de ti. Si `titles` o `beat` imprimen
-`ADOPT <id> <rol> (abierta por <id o ->)`, esa sesión no es hija tuya (la abrió otra, por ejemplo una supervisora
-anterior, o se sacó al nivel superior) y ninguna herramienta cambia el padre de una sesión existente. En el siguiente
-turno que el desarrollador inicie en tu sesión:
+**Sesiones hijas en la barra lateral.** La de cierre debe colgar de ti. La de preguntas, no: vive en el nivel
+superior de la barra lateral, porque la app enseña los diálogos pendientes de una sesión hija en la ventana de su madre
+y el desarrollador los vería en la tuya.
 
-1. Abre con `start_session` una sesión nueva con ese rol, hija tuya, con el título configurado.
-2. Regístrala: `$L beat --session <tu id> --mailbox <nueva>` o `--closer <nueva>`; la de cierre nueva arma su vigilante.
-3. Solo entonces archiva la antigua. La de preguntas, solo mientras no tenga un diálogo abierto con el desarrollador.
+- **`DETACH <id> questions (cuelga de <madre>)`** en `titles` o `beat`: la sesión de preguntas cuelga de alguien. Si la
+  madre eres tú, pásala al nivel superior con `detach_session` y su id; si la herramienta no está o la app lo rechaza, no
+  hagas nada más. Si la madre es otra sesión, tampoco: antes de su próximo diálogo el control de preguntas le pide una
+  vez que se pase ella sola (`detach_session` con `"self"`) y después la deja preguntar aunque no lo consiga.
+- **`ADOPT <id> closer (abierta por <id o ->)`**: la de cierre no es hija tuya (la abrió otra, por ejemplo una
+  supervisora anterior, o se sacó al nivel superior) y ninguna herramienta cambia el padre de una sesión existente. En
+  el siguiente turno que el desarrollador inicie en tu sesión:
+  1. Abre con `start_session` una sesión de cierre nueva, hija tuya, con el título configurado.
+  2. Regístrala con `$L beat --session <tu id> --closer <nueva>`; la nueva arma su vigilante.
+  3. Solo entonces archiva la antigua.
 
-Fuera de un turno del desarrollador no haces nada: es solo estética, y el rol sigue funcionando por el cerrojo.
+  Fuera de un turno del desarrollador no haces nada: es solo estética, y el rol sigue funcionando por el cerrojo.
 
 ## F0c: encaje en el proyecto, solo lectura
 

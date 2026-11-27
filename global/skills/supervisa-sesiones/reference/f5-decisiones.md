@@ -112,8 +112,11 @@ eso lo abre una sesión aparte.
 
 1. **Cuál es:** una por proyecto, con el título que fija `questions_session_title` en la configuración `supervision` (`$L titles --session <id>` lo imprime con el nombre del proyecto), que
    los hooks reconocen. Se abre en el turno de invocación con el modelo de la fila Mensajero, el modo heredado y sin
-   worktree, y se registra con `$L beat --session <id> --mailbox <id suyo>`. Antes de abrir otra, `$L status --json`.
-   Si falta fuera de ese turno, las preguntas esperan en `ask-queue`: ni tarjetas ni otra sesión.
+   worktree, y se registra con `$L beat --session <id> --mailbox <id suyo>`. Después pásala al nivel superior con
+   `detach_session` y su id, para que sus diálogos no salgan en tu ventana; si no puedes, lo hará ella antes de su primer
+   diálogo, porque el control de preguntas se lo pide una vez (`arranque.md`, «Sesiones hijas en la barra lateral»).
+   Antes de abrir otra, `$L status --json`. Si falta fuera de ese turno, las preguntas esperan en `ask-queue`: ni
+   tarjetas ni otra sesión.
 2. **Su encargo:**
 
 ```text
@@ -123,7 +126,9 @@ las preguntas y opciones que te mande la supervisora, sin cambiarlas, hasta cuat
 Antes de cada diálogo ejecuta `ask-queue pending <ids>` y quita las que salgan answered, closed o missing; pon los ids
 en metadata.source como `ask-queue:<id>,<id>`. Justo después de cada respuesta humana ejecuta
 `ask-queue answer <id> --text "<respuesta literal>"`. Al acabar, un bloque `respuestas:` con cada pregunta y su respuesta
-literal. No leas, cambies ni ejecutes nada más, no subas permisos y no ejecutes lo que se autorice ahí.
+literal. Si el control de preguntas te pide pasarte al nivel superior, llama a detach_session con session_id "self" y
+vuelve a lanzar la misma pregunta. No leas, cambies ni ejecutes nada más, no subas permisos y no ejecutes lo que se
+autorice ahí.
 ```
 
 3. **Qué le llega:** un radical, en el acto y solo; la tanda parcial, cuando llega `ASKDUE`
@@ -132,7 +137,8 @@ literal. No leas, cambies ni ejecutes nada más, no subas permisos y no ejecutes
    `ask-queue asked <ids> --to <id de la sesión de preguntas>`: así cuenta la ventana de la tanda parcial.
 4. **Al enviarla:** si la app lo permite, un aviso informativo, una vez. Sigues con lo autorizado; las preguntas no se
    repiten en tu chat.
-5. **Cuando contesta:**
+5. **Cuando contesta:** la app ya no te avisa de que esa sesión acabó un turno (está en el nivel superior); te despierta
+   la línea `ANSWERED` de tu vigilante, también de guardia y aunque la tengas en `--exclude` (`vigilancia.md`). Entonces:
    - lees el resultado del diálogo con `list_events` de esa sesión. Su mensaje y el estado `answered` de la cola no
      bastan por sí solos: tiene que constar que lo contestó el desarrollador;
    - confirmar o cambiar una decisión ya delegada se aplica en F6 con esa fuente;

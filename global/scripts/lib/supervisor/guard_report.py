@@ -28,6 +28,31 @@ def report_stamp(owner):
     return os.path.join(util.home(), 'backlog', (owner.get('key') or 'lock') + '.last-report')
 
 
+def record_report(owner, payload, session, now=None, text=None):
+    """Write the report stamp when the closing message is a report and return True; False otherwise. The Stop hook calls
+    it on every stop of a lock owner, before any block of the chain, so a report written on a retry
+    (`stop_hook_active`), on a turn another block fired or without a watcher still resets the report clock. Does nothing
+    while the self-test switch is set or the project is paused. Never raises."""
+    try:
+        if os.environ.get('SUPERVISOR_SELFTEST_NO_REPORT') or providers.pause_of(owner.get('checkout')):
+            return False  # the variable is set only by the self-test, around the checks of the other Stop blocks
+        if not looks_report(language.final_text(payload, session) if text is None else text):
+            return False
+        now = time.time() if now is None else now
+        stamp = report_stamp(owner)
+        os.makedirs(os.path.dirname(stamp), exist_ok=True)
+        with open(stamp, 'w') as fh:
+            fh.write(str(int(now)))
+        os.utime(stamp, (now, now))
+        return True
+    except Exception:
+        try:
+            util.hook_log('hook-errors.log', 'stop-report-stamp\n' + traceback.format_exc().rstrip())
+        except Exception:
+            pass
+        return False
+
+
 def report_block(owner, local, payload, session, now=None):
     """Stop-hook reason for a supervisor whose last status report to the developer is older than REPORT_EVERY_S (two
     hours on guard) and whose closing message is not one; '' otherwise. A closing message that is a report resets the
@@ -37,12 +62,10 @@ def report_block(owner, local, payload, session, now=None):
             return ''  # the variable is set only by the self-test, around the checks of the other Stop blocks
         now = time.time() if now is None else now
         stamp = report_stamp(owner)
-        if looks_report(language.final_text(payload, session)):
-            os.makedirs(os.path.dirname(stamp), exist_ok=True)
-            with open(stamp, 'w') as fh:
-                fh.write(str(int(now)))
-            os.utime(stamp, (now, now))
-            return ''
+        text = language.final_text(payload, session)
+        if looks_report(text):
+            record_report(owner, payload, session, now=now, text=text)  # the hook stamped already; this keeps the
+            return ''  # function whole for its own callers, and a report is never blocked even if the write failed
         every = REPORT_EVERY_GUARD_S if backlog.on_guard(owner) else REPORT_EVERY_S
         age = now - util.file_mtime(stamp)
         if age < every:

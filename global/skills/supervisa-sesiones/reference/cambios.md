@@ -16,6 +16,17 @@ repasar sus aparcados), el paso se escribe aquí, la entrada más reciente arrib
 
 Al recargar, se aplican las entradas desde la última anotada en tu historial y se anota hasta dónde llegaste.
 
+## 2026-11-27 (4): la sesión de preguntas vive en el nivel superior
+
+1. Lee `arranque.md`, «Sesiones hijas en la barra lateral», el punto 1 y el 5 de «La sesión de preguntas» en
+   `f5-decisiones.md` y las filas `ANSWERED` y `DETACH` de `vigilancia.md`. Esto sustituye, para la sesión de
+   preguntas, lo que decía la entrada «nombres de sesión, copias de Control remoto y sesiones hijas» sobre `ADOPT`.
+2. Ejecuta `$L titles --session <tu id>`. Si lista `DETACH <id> questions (cuelga de <madre>)` y la madre eres tú,
+   pásala al nivel superior con `detach_session` y su id; si no puedes, déjalo: el control de preguntas se lo pide a
+   ella antes de su próximo diálogo. Para ella no apliques `ADOPT`.
+3. Rearma el vigilante: el código nuevo te despierta con `ANSWERED` cuando la sesión de preguntas recibe respuesta,
+   también de guardia y con ella en `--exclude`.
+
 ## 2026-11-27 (3): suites troceadas, huérfanos y resultado por test de la nube
 
 1. Lee el paso 3 de la ronda de F4 en `f1-f4.md` y el bloque del corredor de la nube en `piezas-opcionales.md`.

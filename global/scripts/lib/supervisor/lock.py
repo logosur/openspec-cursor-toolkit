@@ -331,8 +331,10 @@ def askdue_hint(project):
 
 
 def rename_hint(owner):
-    """The RENAME and ADOPT lines of the project's supervisor, questions and closing sessions, so a supervisor sees on
-    its next heartbeat which of them carry another title or are not its children. Only reads; a failure never changes what `beat` returns."""
+    """The RENAME, ADOPT and DETACH lines of the project's supervisor, questions and closing sessions, so a supervisor
+    sees on its next heartbeat which of them carry another title, which closing session is not its child, and whether
+    the questions session hangs from a session instead of living at the top level. Only reads; a failure never changes
+    what `beat` returns."""
     if not settings.TITLES_SYNC:
         return
     try:

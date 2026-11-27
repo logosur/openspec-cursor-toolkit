@@ -3,7 +3,9 @@
 A supervisor, its questions session and its closing session have a title fixed by the config piece `supervision`
 (`supervisor_session_title`, `questions_session_title`, `closer_session_title`). This module compares them with the
 titles of the app's session records and says which session has to be renamed (`RENAME …`): a script never edits the
-app's records, the session renames itself with the app tool.
+app's records, the session renames itself with the app tool. It also says which helper sits in the wrong place of the
+app's sidebar: the closing session that is not a child of the supervisor (`ADOPT …`) and the questions session that
+hangs from any session (`DETACH …`), whose dialogs would show in its parent's window.
 
 A Remote Control copy of a local session (an environment of kind `bridge` in the cloud listing) keeps the title it had
 when Remote Control was switched on; it does not follow a later rename. `sync` renames each active copy through the
@@ -14,7 +16,7 @@ import glob
 import os
 import sys
 
-from . import census, cloud, lock as lock_mod, providers, settings, util
+from . import census, cloud, lock as lock_mod, providers, session_roles, settings, util
 
 
 UNAVAILABLE_HTTP = (403, 404)   # a copy of another account's session, or one that is gone: skipped quietly
@@ -74,12 +76,13 @@ def rename_lines(lock, records=None):
 
 
 def adopt_lines(lock, records=None):
-    """`ADOPT <local id> <role> (abierta por <parent id or ->)` for the lock's questions and closing sessions that are not
-    children of the lock owner in the app's sidebar: their record says another session opened them
-    (`spawnedFrom.sessionId`), or was moved to the top level (`lineageDetached`). A session with no record, or whose
-    record says neither, prints nothing. Cosmetic: the role keeps working through the lock."""
+    """`ADOPT <local id> closer (abierta por <parent id or ->)` when the lock's closing session is not a child of the lock
+    owner in the app's sidebar: its record says another session opened it (`spawnedFrom.sessionId`), or it was moved to
+    the top level (`lineageDetached`). No record, or a record that says neither, prints nothing. The questions session
+    is not adopted: its right place is the top level (see detach_lines). Cosmetic: the role keeps working through the
+    lock."""
     owner = lock.get('session_id')
-    wanted = [(role, sid) for role, sid, _ in expected_titles(lock) if role != 'supervisor']
+    wanted = [(role, sid) for role, sid, _ in expected_titles(lock) if role == 'closer']
     if records is None:
         records = app_records([sid for _, sid in wanted])
     lines = []
@@ -95,11 +98,26 @@ def adopt_lines(lock, records=None):
     return lines
 
 
+def detach_lines(lock, records=None):
+    """`DETACH <local id> questions (cuelga de <parent id>)` when the lock's questions session hangs from any session in
+    the app's sidebar, the lock owner included (session_roles.hangs_from). A session that hangs shows its dialogs in its
+    parent's window, so it belongs at the top level. No record, or a top-level record, prints nothing."""
+    wanted = [sid for role, sid, _ in expected_titles(lock) if role == 'questions']
+    if records is None:
+        records = app_records(wanted)
+    lines = []
+    for sid in wanted:
+        parent = session_roles.hangs_from(records.get(sid))
+        if parent is not None:
+            lines.append(f'DETACH {sid} questions (cuelga de {parent})')
+    return lines
+
+
 def hint_lines(lock, records=None):
-    """The RENAME and ADOPT lines of a lock (what `beat` shows its owner)."""
+    """The RENAME, ADOPT and DETACH lines of a lock (what `beat` shows its owner)."""
     if records is None:
         records = app_records([sid for _, sid, _ in expected_titles(lock)])
-    return rename_lines(lock, records) + adopt_lines(lock, records)
+    return rename_lines(lock, records) + adopt_lines(lock, records) + detach_lines(lock, records)
 
 
 def fix_lock_title(lock):

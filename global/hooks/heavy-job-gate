@@ -13,6 +13,12 @@ simple command that really runs `heavy-job run|hold -- CMD` is covered (its CMD 
 buys nothing (`classify_outside_semaphore`).
 Every deny is logged to $HEAVY_JOB_GATE_STATE/decisions.log (default ~/.claude/state/heavy-job-gate/).
 
+Series of batches: a suite cut into light runs of a few files each is one heavy job. For every light test run outside
+the semaphore the gate records the distinct test files per session and checkout (git top level of the cwd, else the
+cwd) in $HEAVY_JOB_GATE_STATE/series.json, and denies the run that takes the distinct files of the last
+`series_window_min` minutes (60) above `series_max_files` (10) (`heavy-job` config piece). Distinct files, not runs:
+repeating the same test while fixing it never trips it. A denied run is not recorded.
+
 What it does not cover: heavy jobs started by project scripts or by processes the agent did not type
 (heavy-job's own `scan` sees those), and anything the classifier considers light. It never scans /proc, so
 it stays fast. It fails open: any error (bad JSON, missing script, import error, classifier crash) is
@@ -21,11 +27,13 @@ appended to errors.log in the state dir and the command goes ahead, so a broken 
 Env: HEAVY_JOB_SCRIPT overrides the path of the classifier script (tests).
 """
 
+import fcntl
 import importlib.machinery
 import importlib.util
 import json
 import os
 import sys
+import time
 import traceback
 from datetime import datetime
 
@@ -63,6 +71,86 @@ def deny(reason):
     sys.exit(0)
 
 
+SERIES_DEFAULTS = {'series_max_files': 10, 'series_window_min': 60}
+
+
+def series_config(lib_dir):
+    try:
+        if lib_dir not in sys.path:
+            sys.path.insert(0, lib_dir)
+        from toolkit_config import load_checked
+        config = load_checked('heavy-job', dict(SERIES_DEFAULTS, default_slots=4))
+    except Exception:
+        config = {}
+    out = dict(SERIES_DEFAULTS)
+    for key in SERIES_DEFAULTS:
+        value = config.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            out[key] = value
+    return out
+
+
+def checkout_of(cwd):
+    cursor = os.path.realpath(cwd or os.getcwd())
+    for _ in range(40):
+        if os.path.exists(os.path.join(cursor, '.git')):
+            return cursor
+        parent = os.path.dirname(cursor)
+        if parent == cursor:
+            break
+        cursor = parent
+    return os.path.realpath(cwd or os.getcwd())
+
+
+def check_series(runs, session, cwd, config):
+    """None when the run may go ahead (and is recorded), else the text of the deny. `runs` is what
+    `light_test_files` returned: [(runner, {path: test files})]."""
+    units = {}
+    for _runner, files in runs:
+        units.update(files)
+    if not units or not session:
+        return None
+    key = '%s|%s' % (session, checkout_of(cwd))
+    window = config['series_window_min'] * 60
+    limit = config['series_max_files']
+    now = time.time()
+    os.makedirs(STATE_DIR, exist_ok=True)
+    path = os.path.join(STATE_DIR, 'series.json')
+    with open(os.path.join(STATE_DIR, 'series.lock'), 'a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            with open(path) as handle:
+                data = json.load(handle)
+            if not isinstance(data, dict):
+                data = {}
+        except (OSError, ValueError):
+            data = {}
+        for k in list(data):
+            entries = data[k] if isinstance(data[k], dict) else {}
+            entries = {p: v for p, v in entries.items()
+                       if isinstance(v, list) and len(v) == 2 and now - v[0] <= window}
+            if entries:
+                data[k] = entries
+            else:
+                del data[k]
+        seen = data.get(key, {})
+        merged = dict((p, v[1]) for p, v in seen.items())
+        merged.update(units)
+        total = sum(int(n) if isinstance(n, int) else 1 for n in merged.values())
+        if total > limit:
+            return ('serie de lotes: %d ficheros de tests distintos en %g min en este checkout (más de %g), lote '
+                    'tras lote es la suite troceada; córrela en una sola pasada (o con cloud-tests si el proyecto la '
+                    'declara)' % (total, config['series_window_min'], limit))
+        for p, n in units.items():
+            seen[p] = [now, n]
+        data[key] = seen
+        tmp = path + '.%d.tmp' % os.getpid()
+        with open(tmp, 'w') as handle:
+            json.dump(data, handle)
+        os.replace(tmp, path)
+    return None
+
+
 def load(name, path):
     loader = importlib.machinery.SourceFileLoader(name, path)
     spec = importlib.util.spec_from_loader(name, loader)
@@ -84,7 +172,15 @@ def main():
                           os.path.join(os.path.dirname(os.path.realpath(SCRIPT)), 'lib', 'heavy_job_classifier.py'))
         result = classifier.classify_outside_semaphore(command, payload.get('cwd') or None)
         if not result:
-            sys.exit(0)
+            try:
+                runs = classifier.light_test_files(command, payload.get('cwd') or None)
+                why = check_series(runs, payload.get('session_id'), payload.get('cwd'),
+                                   series_config(os.path.join(os.path.dirname(os.path.realpath(SCRIPT)), 'lib')))
+            except Exception:
+                fail_open('series')
+            if not why:
+                sys.exit(0)
+            result = ('tests', why)
         # only a deny needs the script (the slot numbers); without a working one the command goes ahead
         module = load('heavy_job', SCRIPT)
         kind, why = result

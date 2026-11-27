@@ -16,6 +16,14 @@ repasar sus aparcados), el paso se escribe aquí, la entrada más reciente arrib
 
 Al recargar, se aplican las entradas desde la última anotada en tu historial y se anota hasta dónde llegaste.
 
+## 2026-11-27 (3): suites troceadas, huérfanos y resultado por test de la nube
+
+1. Lee el paso 3 de la ronda de F4 en `f1-f4.md` y el bloque del corredor de la nube en `piezas-opcionales.md`.
+2. Ejecuta una vez `~/.claude/scripts/heavy-job scan`. Para por PID los HUÉRFANOS de trabajos ya terminados; los
+   trabajos pesados sin envolver de tu proyecto (lotes, scripts) se le corrigen a quien los lanzó.
+3. En el próximo encargo con tests, da las tres reglas de la nube (suite troceada, nadie prohíbe `cloud-tests`, el
+   verde de la nube como evidencia).
+
 ## 2026-11-27 (2): tanda parcial de las preguntas que bloquean
 
 1. Lee `f5-decisiones.md`, «Antes del final: rumbo radical y tanda parcial», y la fila `ASKDUE` de `vigilancia.md`.

@@ -16,6 +16,7 @@ When `/verifica-tarea [<slug>]` runs, **read this skill in the same turn** and e
 
 - **`<slug>` optional** — resolve per REQ-VT-SLUG-01 (command token → prompt → conversation context).
 - **Local stack** running for tests/CLI when rows need runtime — resolve commands from the target project's stack rule (`00-openspec-stack-agnostic.mdc`); do not assume DDEV/Drupal.
+- **Cloud test results:** when the project runs its suites in the cloud (`.claude/cloud-tests.json` and the `cloud-tests` tool), a green run for the same commit is evidence: cite `cloud-tests result <run>` and, per scenario, `cloud-tests result <run> --tests --grep <test id>` instead of rerunning the suite locally.
 - **Host scope:** default **local dev** documented for the project; no PRO/staging unless user explicitly scopes host in the same message (REQ-VT-SCOPE-HOST-01).
 - UI rows: base URL from project docs (Compose, `.env`, documented smoke script) — never hardcode host/port from another repo (REQ-VT-URL-01).
 - Auth: use the **project E2E auth helper** when documented; one attempt per user; flood → `BLOCKED (credentials)` (`auth-credential-failure-no-retry.mdc`).

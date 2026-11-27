@@ -1,7 +1,9 @@
 """Classifier of heavy development commands, shared by heavy-job and heavy-job-gate.
 
-Is this command line heavy, of which kind, and which pool does it take? It only reads the command and, to count the
-test files a runner targets, the directory named in it: no state, no /proc, no config.
+Is this command line heavy, of which kind, and which pool does it take? It reads the command and, besides, only
+small files the command names: the directory a test runner targets (to count its test files), a shell script the
+command executes (at most SCRIPT_MAX_BYTES, to judge its own commands) and the project's cloud recipe
+(`.claude/cloud-tests.json`, whose `local_commands` are heavy). No state, no /proc, no config.
 """
 import fnmatch
 import glob
@@ -93,6 +95,16 @@ JEST_FILTER_OPTS = ('-t', '--testNamePattern', '--test-name-pattern', '--findRel
                     '--onlyChanged', '-o', '--onlyFailures', '--testPathPattern', '--related')
 # A directory with at most this many test files is a small run; more (or one that cannot be inspected) is a suite.
 MAX_LIGHT_TEST_FILES = 5
+SCRIPT_MAX_BYTES = 256 * 1024
+RECIPE = os.path.join('.claude', 'cloud-tests.json')
+RECIPE_MAX_UP = 20
+TEST_RUNNERS = {'pytest', 'py.test', 'phpunit', 'jest', 'vitest'}
+XARGS_VALUE_OPTS = {'-n', '-L', '-P', '-I', '-d', '-E', '-s', '-a', '--max-args', '--max-lines', '--max-procs',
+                    '--delimiter', '--eof', '--max-chars', '--arg-file', '--replace'}
+PARALLEL_VALUE_OPTS = {'-j', '--jobs', '-S', '--sshlogin', '--joblog', '--results', '-a', '--arg-file', '--delay',
+                       '--timeout', '--tmpdir', '-N', '-n', '--max-args', '-L', '--max-lines'}
+SHELL_SHEBANG_RE = re.compile(rb'^#!\s*\S*(/|\s)(env\s+)?(bash|sh|zsh|dash|ash)\b')
+VAR_RE = re.compile(r'\$(\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))')
 TEST_FILE_GLOBS = ('test_*.py', '*_test.py', '*Test.php', '*.test.*', '*.spec.*')
 TEST_SCAN_SKIP_DIRS = {'node_modules', 'vendor', '.git', '.venv', 'venv', '__pycache__', '.tox'}
 TEST_SCAN_MAX_ENTRIES = 20000
@@ -372,6 +384,21 @@ def _wrapper_step(prog, args):
     if prog == 'sudo':
         return ('argv', _skip_opts(args, {'-u', '-g', '-h', '-p', '-C', '-D', '-R', '-T', '-U', '--user',
                                           '--group', '--host', '--prompt', '--chdir', '--chroot'}))
+    if prog == 'xargs':
+        return ('batch', _skip_opts(args, XARGS_VALUE_OPTS))
+    if prog == 'parallel':
+        rest = _skip_opts(args, PARALLEL_VALUE_OPTS)
+        return ('batch', rest[:rest.index(':::')] if ':::' in rest else rest)
+    if prog == 'find':
+        for opt in ('-exec', '-execdir', '-ok', '-okdir'):
+            if opt in args:
+                rest = args[args.index(opt) + 1:]
+                for end in (';', '\\;', '+'):
+                    if end in rest:
+                        rest = rest[:rest.index(end)]
+                        break
+                return ('batch', rest)
+        return ('light',)
     if prog == 'heavy-job':
         if args and args[0] in ('run', 'hold') and '--' in args:
             return ('argv', args[args.index('--') + 1:])
@@ -433,6 +460,11 @@ def _gradle_tasks(args):
 # Directory the commands run in, for resolving relative test paths. classify_command tracks `cd X` and the
 # hook passes the session cwd; None means os.getcwd().
 _CWD = None
+_VARS = {}        # variables assigned earlier in the line being classified (`S=/dir; $S/run.sh`)
+_LOOP = 0         # depth of the shell loops (`for`/`while`/`until`) around the simple command being classified
+_LOOPS = []       # one flag per open loop: True when it counts (see `_loop_counts`)
+_COLLECT = None   # list: light test runs (runner, {path: test files}) found by `light_test_files`
+_RECIPES = {}     # directory -> its cloud recipe's local commands (argv lists), cached for one process
 
 
 def _is_expansion(arg):
@@ -495,6 +527,190 @@ def _small_test_target(operands):
             if total > MAX_LIGHT_TEST_FILES:
                 return False
     return total > 0
+
+
+def _target_units(operands):
+    """{path: number of test files} of the directories and files a small run targets (for the series of batches)."""
+    units = {}
+    for operand in operands:
+        path = _resolve_path(operand)
+        for match in (glob.glob(path) if glob.has_magic(path) else [path]):
+            if os.path.isdir(match):
+                units[os.path.normpath(match)] = _count_test_files(match) or 0
+            elif os.path.isfile(match):
+                units[os.path.normpath(match)] = 1
+    return units
+
+
+def _test_runner(argv):
+    """Name of the test runner this unwrapped argv runs, else None."""
+    prog = _base(argv[0])
+    if prog in TEST_RUNNERS:
+        return prog
+    if prog == 'playwright' and _positionals(argv[1:])[:1] == ['test']:
+        return 'playwright'
+    return None
+
+
+def _expand_vars(arg):
+    """`arg` with `~`, `$VAR` and `${VAR}` expanded from the line's own assignments and the environment, or None when
+    a variable is unknown or another expansion (`$(...)`, a backtick) is left."""
+    def value(match):
+        name = match.group(2) or match.group(3)
+        if name in _VARS:
+            return _VARS[name]
+        if name in os.environ:
+            return os.environ[name]
+        raise KeyError(name)
+    try:
+        out = VAR_RE.sub(value, arg)
+    except KeyError:
+        return None
+    if '$' in out or '`' in out:
+        return None
+    return os.path.expanduser(out)
+
+
+def _loop_counts(header):
+    """Does a loop header make the test runs in its body a series? `while`, `until` and `for ((...))` always do. A
+    `for VAR in WORDS` does not when every word is literal (no expansion, no `$(...)`), names test files or plain
+    words (a group, a name; not a file that is not a test, such as a list of batches) and they are at most
+    MAX_LIGHT_TEST_FILES in all (`for f in a_test.py b_test.py`, `for g in G1 G2`): that is a
+    handful of explicit targets, not a walk over the suite."""
+    if header[0] != 'for' or len(header) < 3 or header[2] != 'in':
+        return True
+    words = header[3:]
+    if not words or any(_is_expansion(w) or '$' in w or '`' in w for w in words):
+        return True
+    def test_file(path):
+        return any(fnmatch.fnmatch(os.path.basename(path), g) for g in TEST_FILE_GLOBS)
+
+    total = 0
+    for w in words:
+        path = _resolve_path(w)
+        if glob.has_magic(path):
+            matches = glob.glob(path)
+            if not matches or not all(test_file(m) for m in matches):
+                return True         # unknown, or files that are not tests (lists of batches)
+            total += len(matches)
+        elif os.path.exists(path) and not test_file(path):
+            return True
+        else:
+            total += 1
+        if total > MAX_LIGHT_TEST_FILES:
+            return True
+    return False
+
+
+def _runs_heavy_job(text, depth=0):
+    """True if a simple command of this shell text really runs `heavy-job run|hold`: the script gates itself."""
+    if depth > MAX_DEPTH:
+        return False
+    for argv in _split_commands(text):
+        for _ in range(40):
+            argv = _strip_leading(argv)
+            if not argv:
+                break
+            prog = _base(argv[0])
+            if prog == 'heavy-job':
+                if argv[1:2] and argv[1] in ('run', 'hold'):
+                    return True
+                break
+            step = _wrapper_step(prog, argv[1:]) or _interpreter_step(prog, argv[1:])
+            if step is None or step[0] in ('light', 'hit'):
+                break
+            if step[0] == 'cmd':
+                if _runs_heavy_job(step[1], depth + 1):
+                    return True
+                break
+            argv = step[1]
+    return False
+
+
+def _script_check(path_arg, via_shell, depth, outside):
+    """The verdict on a shell script the command executes, judged by its own commands, or None. Read only when it is
+    a regular file of at most SCRIPT_MAX_BYTES, text, and a shell runs it (`bash x`, or a shell shebang, or no
+    shebang at all); a script that really runs `heavy-job run|hold` gates itself and is not judged."""
+    global _VARS
+    if depth >= MAX_DEPTH or not path_arg:
+        return None
+    if not via_shell and '/' not in path_arg:
+        return None             # a program found in PATH, not a script named by the command
+    expanded = _expand_vars(path_arg)
+    if not expanded:
+        return None
+    path = os.path.normpath(_resolve_path(expanded))
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) > SCRIPT_MAX_BYTES:
+            return None
+        with open(path, 'rb') as handle:
+            data = handle.read(SCRIPT_MAX_BYTES + 1)
+    except OSError:
+        return None
+    if b'\0' in data[:4096]:
+        return None
+    if data.startswith(b'#!') and not SHELL_SHEBANG_RE.match(data) and not via_shell:
+        return None
+    text = data.decode('utf-8', 'replace')
+    if _runs_heavy_job(text):
+        return None
+    saved = _VARS
+    _VARS = {}
+    try:
+        hit = classify_command(text, depth + 1, outside)
+    finally:
+        _VARS = saved
+    if hit:
+        return (hit[0], f'el script {_base(path)} corre {hit[1]}')
+    return None
+
+
+def _find_recipe(start):
+    """Local commands (argv lists, leading assignments dropped) of the cloud recipe of the checkout `start` is in."""
+    directory = os.path.realpath(start)
+    if directory in _RECIPES:
+        return _RECIPES[directory]
+    found = []
+    cursor = directory
+    for _ in range(RECIPE_MAX_UP):
+        candidate = os.path.join(cursor, RECIPE)
+        if os.path.isfile(candidate):
+            try:
+                import json
+                with open(candidate) as handle:
+                    recipe = json.load(handle)
+                for suite in (recipe.get('suites') or {}).values():
+                    for cmd in (suite.get('local_commands') or []) if isinstance(suite, dict) else []:
+                        if isinstance(cmd, str):
+                            argv = _strip_leading(shlex.split(cmd))
+                            if argv:
+                                found.append(argv)
+            except (OSError, ValueError, AttributeError):
+                found = []
+            break
+        if os.path.exists(os.path.join(cursor, '.git')):
+            break
+        parent = os.path.dirname(cursor)
+        if parent == cursor:
+            break
+        cursor = parent
+    _RECIPES[directory] = found
+    return found
+
+
+def _declared_heavy(argv):
+    """('gate', ...) when this unwrapped argv is one of the local commands the project's cloud recipe declares."""
+    argv = _strip_leading(argv)
+    if not argv:
+        return None
+    try:
+        declared = _find_recipe(_CWD or os.getcwd())
+    except OSError:
+        return None
+    for cmd in declared:
+        if [_base(cmd[0])] + cmd[1:] == [_base(argv[0])] + argv[1:]:
+            return ('gate', f'{" ".join(argv)} (el proyecto lo declara suite en local_commands de {RECIPE})')
+    return None
 
 
 def _check(argv):
@@ -563,17 +779,55 @@ def _check_ffmpeg(args):
     return None
 
 
+def _explicit_files(operands, is_file):
+    """{resolved path: 1} for the operands that name test files (node ids `f.py::t` and `f.ts:42` count as their
+    file; a glob counts each file it matches)."""
+    files = {}
+    for a in operands:
+        if _is_expansion(a):
+            continue
+        name = a.split('::', 1)[0]
+        tail = name.rsplit(':', 1)
+        if len(tail) == 2 and tail[1].isdigit():
+            name = tail[0]
+        if not is_file(name):
+            continue
+        path = _resolve_path(name)
+        for match in (glob.glob(path) if glob.has_magic(path) else [path]):
+            files[os.path.normpath(match)] = 1
+    return files
+
+
+def _too_many_files(files, runner):
+    if len(files) > MAX_LIGHT_TEST_FILES:
+        kind = 'e2e' if runner == 'playwright' else 'tests'
+        return (kind, f'{runner} con {len(files)} ficheros de tests (más de {MAX_LIGHT_TEST_FILES}: es un trozo '
+                      'de la suite)')
+    return None
+
+
+def _note_light_run(runner, files):
+    """Remember a light test run for `light_test_files` (the gate's series of batches)."""
+    if _COLLECT is not None and files:
+        _COLLECT.append((runner, dict(files)))
+
+
 def _check_pytest(args):
     if any(a in PYTEST_NO_RUN_OPTS or a.startswith('--list-') for a in args):
         return None
+    operands = _positionals(args, PYTEST_VALUE_OPTS)
+    files = _explicit_files(operands, lambda a: a.endswith('.py'))
     if any('.py' in a or '::' in a for a in args):
-        return None
+        hit = _too_many_files(files, 'pytest')
+        if not hit:
+            _note_light_run('pytest', files)
+        return hit
     if any(a == '-k' or (a.startswith('-k') and not a.startswith('--')) for a in args):
         return None
-    operands = _positionals(args, PYTEST_VALUE_OPTS)
     if any(_is_expansion(a) for a in operands):
         return None
     if _small_test_target(operands):
+        _note_light_run('pytest', _target_units(operands))
         return None
     return ('tests', 'pytest sin fichero ni filtro (suite completa)')
 
@@ -581,13 +835,19 @@ def _check_pytest(args):
 def _check_phpunit(args):
     if any(a in PHPUNIT_NO_RUN_OPTS or a.startswith('--list-') for a in args):
         return None
-    if any(a in PHPUNIT_FILTER_OPTS or a.startswith(tuple(o + '=' for o in PHPUNIT_FILTER_OPTS)) or a.endswith('.php')
-           for a in args):
-        return None
     operands = _positionals(args, PHPUNIT_VALUE_OPTS)
+    if any(a in PHPUNIT_FILTER_OPTS or a.startswith(tuple(o + '=' for o in PHPUNIT_FILTER_OPTS)) for a in args):
+        return None
+    if any(a.endswith('.php') for a in operands):
+        files = _explicit_files(operands, lambda a: a.endswith('.php'))
+        hit = _too_many_files(files, 'phpunit')
+        if not hit:
+            _note_light_run('phpunit', files)
+        return hit
     if any(_is_expansion(a) for a in operands):
         return None
     if _small_test_target(operands):
+        _note_light_run('phpunit', _target_units(operands))
         return None
     return ('tests', 'phpunit sin filtro ni fichero (suite completa)')
 
@@ -598,11 +858,18 @@ def _check_playwright(args):
     if any(a in ('--grep', '-g') or a.startswith('--grep=') for a in args):
         return None
     operands = _positionals(args, PLAYWRIGHT_VALUE_OPTS)[1:]   # drop the `test` subcommand
+    files = _explicit_files(operands, lambda a: a.endswith(('.ts', '.js', '.mjs', '.tsx')))
     for a in operands:
         spec = a.rsplit(':', 1)[0] if a.rsplit(':', 1)[-1].isdigit() else a    # file.spec.ts:42
-        if _is_expansion(a) or spec.endswith(('.ts', '.js', '.mjs', '.tsx')):
+        if spec.endswith(('.ts', '.js', '.mjs', '.tsx')):
+            hit = _too_many_files(files, 'playwright')
+            if not hit:
+                _note_light_run('playwright', files)
+            return hit
+        if _is_expansion(a):
             return None
     if _small_test_target(operands):
+        _note_light_run('playwright', _target_units(operands))
         return None
     return ('e2e', 'playwright test (suite e2e)')
 
@@ -635,10 +902,18 @@ def _check_jest(prog, args):
            for a in args):
         return None
     operands = _positionals(args, JEST_VALUE_OPTS)
-    for a in operands:
-        if '/' in a or a.endswith(PATH_EXTS) or _is_expansion(a):
-            return None
-    if _small_test_target([a for a in operands if a not in ('run', 'watch', 'dev', 'related')]):
+    paths = [a for a in operands if ('/' in a or a.endswith(PATH_EXTS)) and not _is_expansion(a)]
+    if paths:
+        files = _explicit_files(paths, lambda a: True)
+        hit = _too_many_files(files, prog)
+        if not hit:
+            _note_light_run(prog, files)
+        return hit
+    if any(_is_expansion(a) for a in operands):
+        return None
+    targets = [a for a in operands if a not in ('run', 'watch', 'dev', 'related')]
+    if _small_test_target(targets):
+        _note_light_run(prog, _target_units(targets))
         return None
     return ('tests', f'{prog} sin ruta de fichero (suite completa)')
 
@@ -682,6 +957,8 @@ def classify_argv(argv, _depth=0, _outside=False):
     argv = [str(a) for a in argv]
     if _depth > MAX_DEPTH:
         return None
+    batched = False
+    via_shell = False
     for _ in range(40):
         argv = _strip_leading(argv)
         if not argv:
@@ -692,9 +969,11 @@ def classify_argv(argv, _depth=0, _outside=False):
         step = _wrapper_step(prog, argv[1:])
         if step is None:
             step = _interpreter_step(prog, argv[1:])
+            via_shell = step is not None and step[0] == 'argv' and prog in SHELLS
         if step is None:
-            return _check(argv)
-        if step[0] == 'argv':
+            return _judge(argv, batched, via_shell, _depth, _outside)
+        if step[0] in ('argv', 'batch'):
+            batched = batched or step[0] == 'batch'
             argv = step[1]
             if len(argv) == 1 and re.search(r'\s', argv[0]):  # `ddev exec "npm ci && npm test"`
                 return classify_command(argv[0], _depth + 1, _outside)
@@ -707,15 +986,48 @@ def classify_argv(argv, _depth=0, _outside=False):
     return None
 
 
+def _judge(argv, batched, via_shell, depth, outside):
+    """The verdict on a fully unwrapped argv: the heavy rules, then a test runner run in a loop or by a batcher,
+    then a script judged by its content, then the project's own declared heavy commands."""
+    hit = _check(argv)
+    if hit:
+        return hit
+    runner = _test_runner(argv)
+    if runner and (batched or _LOOP > 0):
+        how = 'por lotes (xargs, parallel o find -exec)' if batched else 'dentro de un bucle'
+        if _COLLECT:
+            _COLLECT.pop()      # it is not a light run after all
+        return ('e2e' if runner == 'playwright' else 'tests',
+                f'{runner} {how}: lote tras lote es la suite entera')
+    if not runner:
+        hit = _script_check(argv[0], via_shell, depth, outside)
+        if hit:
+            return hit
+    return _declared_heavy(argv)
+
+
+def classify_process(argv, cwd=None):
+    """`classify_argv` for a running process (heavy-job's scan): relative paths resolve against its `cwd`."""
+    global _CWD
+    saved = _CWD
+    _CWD = cwd or _CWD
+    try:
+        return classify_argv(argv)
+    finally:
+        _CWD = saved
+
+
 def classify_command(command, _depth=0, _outside=False, cwd=None):
     """Classify a shell command line. Returns (kind, reason) for the first heavy simple command, else None.
 
     `cwd` is the directory the line starts in (default: the process cwd); `cd X` inside the line moves it, so
     relative test directories are counted where the command would really run."""
-    global _CWD
+    global _CWD, _LOOP
     if _depth > MAX_DEPTH:
         return None
     saved = _CWD
+    saved_loop = _LOOP
+    saved_depth = len(_LOOPS)
     if cwd:
         _CWD = cwd
     try:
@@ -723,12 +1035,31 @@ def classify_command(command, _depth=0, _outside=False, cwd=None):
             if argv[:1] == ['cd'] and len(argv) == 2 and not argv[1].startswith('-') and not _is_expansion(argv[1]):
                 _CWD = os.path.normpath(_resolve_path(argv[1]))
                 continue
+            first = argv[0] if argv else ''
+            if first in ('for', 'while', 'until', 'select'):
+                counts = _loop_counts(argv)
+                _LOOPS.append(counts)
+                _LOOP += 1 if counts else 0
+            elif first == 'done':
+                if len(_LOOPS) > saved_depth:
+                    _LOOP -= 1 if _LOOPS.pop() else 0
+                continue
+            words = argv[1:] if first in ('export', 'local', 'declare', 'readonly') else argv
+            if words and all(ASSIGN_RE.match(w) for w in words):
+                for w in words:
+                    name, _, value = w.partition('=')
+                    expanded = _expand_vars(value)
+                    if expanded is not None and not name.endswith('+') and '[' not in name:
+                        _VARS[name] = expanded
+                continue
             result = classify_argv(argv, _depth, _outside)
             if result:
                 return result
         return None
     finally:
         _CWD = saved
+        _LOOP = saved_loop
+        del _LOOPS[saved_depth:]
 
 
 def classify_outside_semaphore(command, cwd=None):
@@ -736,7 +1067,27 @@ def classify_outside_semaphore(command, cwd=None):
     wrapper stripping: `cd X &&`, `VAR=v`, `nohup`, `timeout`, `bash -c "..."`...) counts as covered and its CMD is
     not judged. Every other simple command of the line is judged: `heavy-job run -- npm ci && npm test` is heavy
     because of `npm test`. Merely mentioning `heavy-job` (`echo heavy-job; npm ci`) covers nothing. Used by the hook."""
-    return classify_command(command, 0, True, cwd)
+    global _VARS
+    saved = _VARS
+    _VARS = {}
+    try:
+        return classify_command(command, 0, True, cwd)
+    finally:
+        _VARS = saved
+
+
+def light_test_files(command, cwd=None):
+    """The light test runs of a line outside the semaphore, as a list of (runner, {path: test files}); empty when the
+    line is heavy or runs no test runner on named files (used by the gate for the series of batches)."""
+    global _COLLECT
+    saved = _COLLECT
+    _COLLECT = []
+    try:
+        if classify_outside_semaphore(command, cwd):
+            return []
+        return list(_COLLECT)
+    finally:
+        _COLLECT = saved
 
 
 def _light_tool(prog, args):

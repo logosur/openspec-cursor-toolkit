@@ -1,3 +1,8 @@
 {
-  "default_slots": 4
+  "default_slots": 4,
+  "series_max_files": 10,
+  "series_window_min": 60,
+  "reap_grace_s": 10,
+  "orphan_min_rss_mib": 256,
+  "orphan_min_cpu_pct": 10
 }

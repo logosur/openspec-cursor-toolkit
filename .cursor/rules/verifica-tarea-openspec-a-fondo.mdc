@@ -39,6 +39,7 @@ Before overall PASS on an OpenSpec change:
 ## Host scope (REQ-VT-SCOPE-HOST-01)
 
 - Default: **local dev** documented for the target project (`00-openspec-stack-agnostic.mdc`).
+- **Cloud test results:** when the project runs its suites in the cloud (`.claude/cloud-tests.json` and the `cloud-tests` tool), a green run for the same commit is evidence: cite `cloud-tests result <run>` and, per scenario, `cloud-tests result <run> --tests --grep <test id>` instead of rerunning the suite locally.
 - **Do not** verify PRO/staging without explicit host scope in the user message.
 - Remote scope → document in matrix header; BLOCKED/NOT VERIFIABLE when access missing.
 

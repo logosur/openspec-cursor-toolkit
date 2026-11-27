@@ -2,7 +2,7 @@
 
 Requirement references: **WE** = `specs/supervisor-wake-economy/spec.md`. Design decisions: **D1**–**D5** in `design.md`.
 
-Tasks 1 to 3 were done on 2026-11-26, before this change existed (commit `1bce327`, merge `231e4d2`). They are recorded here with the evidence that was produced then. Task 4 is open.
+Tasks 1 to 3 were done on 2026-11-26, before this change existed (commit `1bce327`, merge `231e4d2`). They are recorded here with the evidence that was produced then. Task 4 was finished on 2026-11-27.
 
 ## 1. Watcher rules
 
@@ -23,9 +23,9 @@ Tasks 1 to 3 were done on 2026-11-26, before this change existed (commit `1bce32
 - [x] 3.4 `examples/override-full/try.sh`, `validate-toolkit` and the privacy check exit 0; CI green on the branch and the pull request.
 - [x] 3.5 Installed; the installed config reads 120, 120 and 120; `skill-lint` ok.
 
-## 4. Field verification (open)
+## 4. Field verification
 
 - [x] 4.1 First comparison, 4 h before against 3 h after, on three live supervisors. Evidence: `evidence/measurement.md`. Result: the targeted notices fell from 3.0 to 1.0 per hour; `QUEUED` repeats exactly every 2 h.
-- [ ] 4.2 24-hour comparison of watcher wakes and their tokens, per signal, against the 24 hours before the change, on the same supervisors. Accept when `ALLIDLE` has at least 10 samples on each side or the report says why it cannot. Add the result to `evidence/measurement.md`.
-- [ ] 4.3 Decide from 4.2 whether the `ALLIDLE` cap or base needs another value, and record the decision in `design.md`.
-- [ ] 4.4 Archive the change (`/archiva-tarea watcher-wake-backoff`) so `supervisor-wake-economy` becomes a spec under `openspec/specs/`.
+- [x] 4.2 24-hour comparison of watcher wakes and their tokens, per signal, against the 24 hours before the change, on the same supervisors. Accept when `ALLIDLE` has at least 10 samples on each side or the report says why it cannot. Add the result to `evidence/measurement.md`. Done: four supervisors; `ALLIDLE` 20 wakes before and 6 after, and the report says why 10 is not reachable on the "after" side.
+- [x] 4.3 Decide from 4.2 whether the `ALLIDLE` cap or base needs another value, and record the decision in `design.md`. Done: D6 keeps the base at 900 s and the cap at 7200 s.
+- [x] 4.4 Archive the change (`/archiva-tarea watcher-wake-backoff`) so `supervisor-wake-economy` becomes a spec under `openspec/specs/`.

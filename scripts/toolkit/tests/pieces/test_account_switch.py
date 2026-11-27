@@ -42,6 +42,23 @@ def answer(text, error=False):
     return entry
 
 
+def zone_where_now_is(hour, minute):
+    """(TZ value for a subprocess, tzinfo) of a fixed-offset zone in which the local time right now is `hour:minute`.
+    The status lines say 'las HH:MM' for a moment on today's local date and 'el DD-MM a las HH:MM' for another day, so
+    a test that must see one wording or the other pins the wall clock instead of depending on the hour it runs at."""
+    seconds_of_day = int(time.time()) % 86400
+    offset = (hour * 3600 + minute * 60 - seconds_of_day + 43200) % 86400 - 43200   # east of UTC, in -12h..+12h
+    sign, magnitude = ('-' if offset >= 0 else '+'), abs(offset)   # a POSIX TZ counts the offset westwards
+    posix = 'TST%s%02d:%02d:%02d' % (sign, magnitude // 3600, magnitude % 3600 // 60, magnitude % 60)
+    return posix, datetime.timezone(datetime.timedelta(seconds=offset))
+
+
+def local_text(moment, tzinfo, other_day):
+    """What the program prints for `moment` as seen in `tzinfo`: the two documented wordings."""
+    shown = datetime.datetime.fromtimestamp(moment, tzinfo)
+    return shown.strftime('el %d-%m a las %H:%M' if other_day else 'las %H:%M')
+
+
 class AccountSwitchTest(unittest.TestCase):
     def setUp(self):
         self.state = tempfile.mkdtemp(prefix='account-switch-state-')
@@ -112,8 +129,9 @@ class AccountSwitchTest(unittest.TestCase):
         return {"type": "user", "isMeta": True, "timestamp": stamp,
                 "origin": {"kind": "peer", "from": "local_x", "body": "[cambio de cuenta] sigue"}}
 
-    def run_cmd(self, *args):
-        out = subprocess.run([sys.executable, SCRIPT, *args], capture_output=True, text=True, env=self.env(),
+    def run_cmd(self, *args, tz=None):
+        env = self.env(**({'TZ': tz} if tz else {}))
+        out = subprocess.run([sys.executable, SCRIPT, *args], capture_output=True, text=True, env=env,
                              timeout=60)
         self.assertEqual(out.returncode, 0, out.stderr)
         return out.stdout
@@ -512,15 +530,18 @@ class AccountSwitchTest(unittest.TestCase):
         self.assertLess(text.index('account-switch release'), text.index('\n1. Envía'))
 
     def test_status_shows_when_the_new_account_has_usage_again(self):
-        until = time.time() + 3 * 3600
-        self.event([('hard1', 'hard')], not_before=until, limit_what='five_hour')
-        out = self.run_cmd('status')
-        self.assertIn('sin uso hasta las ' + time.strftime('%H:%M', time.localtime(until)), out)
-        self.assertIn('según lo anotado', out)   # the test CLI has no credentials: nothing to check it against
-        self.event([('hard1', 'hard')], not_before=time.time() - 60)
-        self.assertNotIn('sin uso', self.run_cmd('status'))
-        self.event([('hard1', 'hard')])
-        self.assertNotIn('sin uso', self.run_cmd('status'))
+        for hour, minute, other_day in ((10, 0, False), (22, 30, True)):   # now + 3 h: later today / past midnight
+            with self.subTest(local_now='%02d:%02d' % (hour, minute)):
+                tz, zone = zone_where_now_is(hour, minute)
+                until = time.time() + 3 * 3600
+                self.event([('hard1', 'hard')], not_before=until, limit_what='five_hour')
+                out = self.run_cmd('status', tz=tz)
+                self.assertIn('sin uso hasta ' + local_text(until, zone, other_day), out)
+                self.assertIn('según lo anotado', out)   # the test CLI has no credentials: nothing to check it against
+                self.event([('hard1', 'hard')], not_before=time.time() - 60)
+                self.assertNotIn('sin uso', self.run_cmd('status', tz=tz))
+                self.event([('hard1', 'hard')])
+                self.assertNotIn('sin uso', self.run_cmd('status', tz=tz))
 
     def fake_account_script(self, org, usage_json):
         """A copy of account-switch whose cli_org()/usage() answer `org`/`usage_json` (None: no answer), run as a
@@ -536,12 +557,12 @@ class AccountSwitchTest(unittest.TestCase):
             fh.write(src)
         return path
 
-    def status_with(self, org, usage_json, **event_extra):
+    def status_with(self, org, usage_json, tz=None, **event_extra):
         until = time.time() + 3 * 3600
         self.event([('hard1', 'hard')], not_before=until, limit_what='five_hour', **event_extra)
         script = self.fake_account_script(org, usage_json)
-        out = subprocess.run([sys.executable, script, 'status'], capture_output=True, text=True, env=self.env(),
-                             timeout=60)
+        out = subprocess.run([sys.executable, script, 'status'], capture_output=True, text=True,
+                             env=self.env(**({'TZ': tz} if tz else {})), timeout=60)
         self.assertEqual(out.returncode, 0, out.stderr)
         return out.stdout, until
 
@@ -555,17 +576,24 @@ class AccountSwitchTest(unittest.TestCase):
         self.assertIn('limit_lifted_at', event)
 
     def test_status_keeps_the_limit_line_when_the_usage_endpoint_confirms_it(self):
-        resets = datetime.datetime.fromtimestamp(time.time() + 7200, datetime.timezone.utc).isoformat()
-        out, until = self.status_with('d', {"five_hour": {"utilization": 100, "resets_at": resets}})
-        self.assertIn('sin uso hasta las ' + time.strftime('%H:%M', time.localtime(time.time() + 7200)), out)
-        self.assertIn('(límite de 5 horas) (comprobado ahora con el uso real)', out)
-        self.assertGreater(self.saved_event()['not_before'], time.time())
+        for hour, minute, other_day in ((10, 0, False), (23, 0, True)):   # now + 2 h: later today / past midnight
+            with self.subTest(local_now='%02d:%02d' % (hour, minute)):
+                tz, zone = zone_where_now_is(hour, minute)
+                moment = time.time() + 7200
+                resets = datetime.datetime.fromtimestamp(moment, datetime.timezone.utc).isoformat()
+                out, until = self.status_with('d', {"five_hour": {"utilization": 100, "resets_at": resets}}, tz=tz)
+                self.assertIn('sin uso hasta ' + local_text(moment, zone, other_day), out)
+                self.assertIn('(límite de 5 horas) (comprobado ahora con el uso real)', out)
+                self.assertGreater(self.saved_event()['not_before'], time.time())
 
     def test_status_says_it_could_not_check_when_the_cli_is_in_another_organization(self):
-        out, until = self.status_with('other-org', {"five_hour": {"utilization": 17}})
-        self.assertIn('sin uso hasta las ' + time.strftime('%H:%M', time.localtime(until)), out)
-        self.assertIn('según lo anotado; sin comprobar: mira get_usage antes de darlo por vigente', out)
-        self.assertEqual(self.saved_event()['not_before'], until)
+        for hour, minute, other_day in ((10, 0, False), (22, 30, True)):   # now + 3 h: later today / past midnight
+            with self.subTest(local_now='%02d:%02d' % (hour, minute)):
+                tz, zone = zone_where_now_is(hour, minute)
+                out, until = self.status_with('other-org', {"five_hour": {"utilization": 17}}, tz=tz)
+                self.assertIn('sin uso hasta ' + local_text(until, zone, other_day), out)
+                self.assertIn('según lo anotado; sin comprobar: mira get_usage antes de darlo por vigente', out)
+                self.assertEqual(self.saved_event()['not_before'], until)
 
     def test_a_hook_session_claims_after_the_limit_was_lifted_early(self):
         self.transcript('hard1', [user('x'), answer(LIMIT, error=True)])

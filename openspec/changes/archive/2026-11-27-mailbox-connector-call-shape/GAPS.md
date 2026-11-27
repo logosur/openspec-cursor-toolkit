@@ -73,4 +73,18 @@ Observation, not a gap: a configured `connector.page_size_max` above 50 (for exa
 which the connector refuses above its own maximum. This is the stated behaviour (spec R-PAGE, design D6: "the owner may know it
 has changed") and a test pins it; the owner who sets it takes the risk.
 
+## After-install check (P3, gap-closure iteration 1)
+
+> **Date:** 2026-11-27. Input: the supervisor ran task 10.1 against the live connector with the installed build (the one merged
+> to `main`); shapes and counts only. The calls of `search`, `show`, `thread` and `whoami` were all accepted. G-15 is answered.
+
+| ID | Sev | Gap | Evidence (FACT) | Status | Where closed |
+|----|-----|-----|-----------------|--------|--------------|
+| G-29 | med | With `--limit` above the page maximum, `paging.how` told the session to repeat the call "adding the connector's pageToken from its previous response". A live search response carried no page token key at all (far more matches than the page size reported by `resultCountEstimate`; also none with a page size of 1 in two views), so a session following the hint could not continue | live check of task 10.1 (installed build); `mail_connector.search_document` printed the old sentence | CLOSED: `how` is one compact sentence true in both cases (a page token: repeat the call adding it as `pageToken`; none: narrow the search with a shorter `--since`/`--until` range or another filter and run `mailbox search` again, `resultCountEstimate` giving an estimate of the matches). The spec no longer states that a response carries a token | spec R-NOTICE (requirement, new scenario "The hint holds with and without a page token"), design D3, proposal "Why", `--help`, `mail_connector.py`, self-test, `ConnectorSearchCall.test_the_notice_is_outside_the_arguments_and_always_present`, task 11.1 |
+| G-30 | low | The new `how` said `resultCountEstimate` "says how many threads match". The live check measured the key and that its value is far above the page size, not its unit nor that it is exact; the sentence claimed both | the after-install check recorded the key and the order of magnitude only | CLOSED: `how` says `resultCountEstimate` "estimates how many results match"; code, design D3, spec scenario "The hint holds with and without a page token", task 11.1 and G-29 agree | `mail_connector.py`, design D3, spec R-NOTICE, tasks 11.1, G-29 |
+
+G-15 (whether a live session continues with `pageToken`) is answered by the live check: the connector may return no token, so the
+hint covers both cases (G-29). The summary view returned one message per thread with `id`, `sender`, `subject`, `threadId` and
+`toRecipients`; no document says it carries a date or a snippet. G-14 stays UNKNOWN (no flag depends on it).
+
 Gaps pending (mejora + apply): 0

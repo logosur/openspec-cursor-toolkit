@@ -1906,8 +1906,15 @@ class ConnectorSearchCall(ConnectorCallBase):
         capped = self.call('search', 'hosted', '--limit', '200')
         self.assertEqual({k: v for k, v in capped['paging'].items() if k != 'how'},
                          {'requested': 200, 'page_size': 50, 'capped': True, 'continue_with': 'pageToken'})
-        self.assertTrue(capped['paging']['how'].strip())
+        how = capped['paging']['how']
+        self.assertIn('page token', how)
+        self.assertIn('pageToken', how)
+        self.assertIn('narrow the search', how)
+        self.assertIn('--since', how)
+        self.assertIn('resultCountEstimate', how)
+        self.assertLess(len(how), 300)
         self.assertEqual(set(capped['arguments']), {'query', 'pageSize', 'view'})
+        self.assertNotIn('how', self.call('search', 'hosted', '--limit', '50')['paging'])
         self.assertEqual(self.call('search', 'hosted', '--limit', '0')['paging']['requested'], 1)
 
     def test_the_header_filter_is_still_refused(self):

@@ -136,15 +136,42 @@ discovery is task 9.6 and runs in CI).
   same set in spec, design and `--help`.
   Evidence: grep of the five names: present in spec, design D6, `--help` and `mail_connector.py`; the value lists in `--help` and the spec agree.
   Evidence: `bash examples/override-full/try.sh` exit 0: every step passed, including `contract probes of every installed piece (verify)` (the new `page_size_max` probe) and the self-tests.
-- [ ] 9.6 [prod-verify] Full test discovery (`python3 -m unittest discover -s scripts/toolkit/tests -t .`) is green in CI on the
+- [x] 9.6 [prod-verify] Full test discovery (`python3 -m unittest discover -s scripts/toolkit/tests -t .`) is green in CI on the
   pushed branch, checked before the branch is integrated (as task 7.6 of `external-access`).
+  Evidence: Done: the `Validate toolkit` workflow, which runs the full discovery, was green on the pushed branch head `16001b3` and again on the pull request to `main`.
 
 ## 10. The installed side
 
-- [ ] 10.1 [prod-verify] Supervisor, after install: with the installed `mailbox`, run `mailbox search`, `show`, `thread` and `whoami` on a
+- [x] 10.1 [prod-verify] Supervisor, after install: with the installed `mailbox`, run `mailbox search`, `show`, `thread` and `whoami` on a
   configured connector account, pass each printed `tool` and `arguments` verbatim to the live mail connector of the session
   (the `paging` key is not part of `arguments`), and record only shapes and counts (no sender, subject or body): that the
   connector accepts each call, the number of messages per thread returned with the default view, with `--limit 200` that one
-  page of at most 50 threads returns and a further page is available with `pageToken`, the keys of the `messageFormat`
-  `PLAIN_TEXT` read, and that `whoami`'s result still carries each message's sender. Check: the connector accepts every printed
-  call without an argument error, and the recorded shapes match the proposal's "Why".
+  page of at most 50 threads returns and what the response offers to continue (a page token if it carries one), the keys of the
+  `messageFormat` `PLAIN_TEXT` read, and that `whoami`'s result still carries each message's sender. Check: the connector accepts
+  every printed call without an argument error, and the recorded shapes match the proposal's "Why".
+  Evidence (the build checked was the one merged to `main` as `067b968`; shapes and counts only):
+  - `search` with a text filter and `--limit 3`: call accepted; 3 threads, one message per thread; thread keys `id`,
+    `messageCount`, `messages`; message keys `id`, `sender`, `subject`, `threadId`, `toRecipients` (no snippet, no date in the
+    summary view); top-level keys `resultCountEstimate`, `threads`.
+  - `search` with a date filter and `--limit 200`: the printed call asked for `pageSize` 50; accepted; exactly 50 threads
+    returned, one message each; `resultCountEstimate` far above the page size; the response carried no page token key at all.
+    Two extra diagnostic calls with `pageSize` 1 (`THREAD_VIEW_IDS_ONLY`, and the connector's default view) carried none either.
+  - `show` and `thread` with a real thread id: the printed `get_thread` call (`messageFormat` `PLAIN_TEXT`) was accepted; thread
+    keys `id`, `messageCount`, `messages`, `viewUrl`; message keys `addressDisplayNames`, `date`, `historyId`, `id`,
+    `internalDate`, `labelIds`, `plaintextBody`, `sender`, `sizeEstimate`, `snippet`, `subject`, `threadId`, `toRecipients`,
+    `viewUrl`; no `htmlBody`.
+  - `whoami`: the printed call was accepted; one thread with one message carrying `sender`; `mailbox whoami <account> --sender
+    <address>` then confirmed the account (exit 0).
+  - The missing page token was registered as gap G-29 and fixed in this iteration (group 11).
+
+## 11. Paging hint after the live check (gap G-29)
+
+- [x] 11.1 `paging.how` true with and without a page token: `mail_connector.search_document` prints one compact sentence (a
+  page token: repeat the call adding it as `pageToken`; none: narrow the search with a shorter `--since`/`--until` range or
+  another filter and run `mailbox search` again; `resultCountEstimate` estimates how many results match). Additive: every key stays,
+  `continue_with` stays `"pageToken"`, exit codes unchanged. Spec R-NOTICE, design D3, proposal, `--help` and the self-test
+  say the same; the skill is untouched (its size test still holds). Check: R-NOTICE "Cap stated" and "The hint holds with and
+  without a page token".
+- [x] 11.2 A test pins that the capped `how` mentions the page token case and the narrowing case (`pageToken`, `narrow the
+  search`, `--since`, `resultCountEstimate`), is shorter than 300 characters, and that a search within the maximum has no `how`
+  (`ConnectorSearchCall.test_the_notice_is_outside_the_arguments_and_always_present`). Check: the module tests pass.

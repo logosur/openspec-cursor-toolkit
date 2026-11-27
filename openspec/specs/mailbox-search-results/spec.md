@@ -44,7 +44,8 @@ the same message on the `imap` and on the `local` backend and unique among the i
 ### Requirement: Existing output is unchanged and costs nothing more
 No existing key of a `search` or `thread` document or item SHALL change its name, type or value, the text output of a search
 SHALL be unchanged except for the notes this change adds, and obtaining `message_id` SHALL cost no additional server command
-and no read of a message from a local folder file. Connector accounts SHALL behave as before.
+and no read of a message from a local folder file. Connector accounts SHALL keep the keys, exit codes and refusals of their
+documents; what they gain is defined by `mailbox-connector-calls`.
 
 #### Scenario: No extra work per result
 - **GIVEN** the fake IMAP server records every command, and a local folder whose messages carry no client status line and
@@ -63,8 +64,9 @@ and no read of a message from a local folder file. Connector accounts SHALL beha
 
 #### Scenario: Connector accounts do not change
 - **WHEN** `mailbox search` runs on a connector account
-- **THEN** it prints the delegated call and exits 10 as before, and `--header` on it exits 2 with one line and nothing on
-  stdout
+- **THEN** its document still has the keys `delegate`, `kind`, `tool`, `arguments` and `read_tool` with unchanged names, types
+  and values (`arguments.query` and `arguments.pageSize` for a limit within the maximum included), it exits 10, and `--header`
+  on it exits 2 with one line and nothing on stdout
 
 ### Requirement: A header filter on the local backend checks the header before the status pass and is bounded
 For a `--header` filter the `local` backend SHALL read the header of at most `header_scan_max` candidates per folder (default

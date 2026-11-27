@@ -9,10 +9,10 @@ Applied in this worktree: product code, tests and skill wording are done and che
 ## Verdict
 
 **READY TO APPLY** pending the independent review (`repasa-spec`). The spec (two capabilities: `mailbox-connector-calls`, 12
-requirements and 45 scenarios, all ADDED; `mailbox-search-results`, 1 MODIFIED requirement with its 3 scenarios), the design
+requirements and 46 scenarios, all ADDED; `mailbox-search-results`, 1 MODIFIED requirement with its 3 scenarios), the design
 (D1 to D11) and the tasks (groups 1 to 10) are complete, and `openspec validate mailbox-connector-call-shape --strict` passes.
 `GAPS.md` ends at `Gaps pending (mejora + apply): 0`; two UNKNOWNs (what the connector returns for the `MINIMAL` and
-`METADATA_ONLY` read formats; whether a live session continues with `pageToken`) are recorded, and neither blocks the code.
+`METADATA_ONLY` read formats; whether a live session continues with `pageToken`, answered after install: a live response may carry none, so the hint covers both cases, G-29) are recorded, and neither blocks the code.
 
 ## Decisions taken in this phase (design)
 

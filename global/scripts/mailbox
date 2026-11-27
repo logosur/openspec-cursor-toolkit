@@ -65,7 +65,8 @@ Connector accounts
   the account's `connector.search_view` is THREAD_VIEW_METADATA_ONLY, THREAD_VIEW_MINIMAL or THREAD_VIEW_IDS_ONLY.
   `pageSize` is --limit cut to the connector's maximum, 50 or `connector.page_size_max` (a whole number of at least 1);
   the top-level key `paging` (never inside `arguments`) says `requested`, `page_size` and `capped`, and when capped how to
-  get further results: repeat the call adding the connector's `pageToken`. `search` also names `read_tool`.
+  get further results: when the response carries a page token, repeat the call adding it as `pageToken`; when it carries
+  none, narrow the search (a shorter --since/--until range or another filter) and search again. `search` also names `read_tool`.
   `show` and `thread` arguments: `threadId` (the id as typed, an id that a search printed) and `messageFormat`, PLAIN_TEXT
   unless `connector.read_format` is MINIMAL, FULL_CONTENT or METADATA_ONLY. The HTML body (FULL_CONTENT) is read only
   through that setting or `--full-content` (a usage error on an account that is not a connector account). `folders` and

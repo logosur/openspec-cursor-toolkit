@@ -294,7 +294,8 @@ def run(main) -> int:
         capped = json.loads(out) if out.strip().startswith('{') else {}
         check('a limit above the connector maximum is cut and says so outside the arguments',
               code == 10 and capped.get('arguments', {}).get('pageSize') == 50 and 'paging' not in capped.get('arguments', {})
-              and capped.get('paging', {}).get('capped') is True and capped['paging'].get('continue_with') == 'pageToken',
+              and capped.get('paging', {}).get('capped') is True and capped['paging'].get('continue_with') == 'pageToken'
+              and 'narrow the search' in capped['paging'].get('how', '') and 'pageToken' in capped['paging']['how'],
               out)
         code, out, _ = invoke('search', 'hosted-small', '--limit', '25')
         small = json.loads(out) if out.strip().startswith('{') else {}

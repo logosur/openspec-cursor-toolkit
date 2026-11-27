@@ -6,7 +6,8 @@ The cloud runner writes this file from its brief (cloud-tests embeds it verbatim
 It runs the request's command with `bash -c` in its own process group (stopped at timeout_min, exit 124), with the log
 in /tmp/<run>.log, and hooks that record every test without touching PYTEST_ADDOPTS or the project's files:
   - pytest: a plugin found through a pytest11 entry point of a .dist-info folder put first on PYTHONPATH;
-  - jest: a NODE_OPTIONS --require preload that adds --json --outputFile to the jest CLI process only;
+  - jest and vitest: a NODE_OPTIONS --require preload that adds JSON output to their CLI process only (vitest only
+    when the command sets no reporter, since a command-line reporter replaces the configured ones);
   - otherwise, JUnit XML files written during the run.
 It writes /tmp/<run>.tests.tsv (one `outcome<TAB>id` line per test: passed, failed, error, skipped) and
 /tmp/<run>.result.json, and prints that JSON as its last line. Stdlib only.
@@ -80,7 +81,7 @@ PYTEST_ENTRY_POINTS = '[pytest11]\ncloud_tests = cloud_tests_pytest\n'
 PYTEST_METADATA = 'Metadata-Version: 2.1\nName: cloud-tests-pytest\nVersion: 1\n'
 
 NODE_PRELOAD = r''''use strict';
-// cloud-tests: in the jest CLI process only, write the results as JSON in CLOUD_TESTS_RESULTS_DIR. Never throws.
+// cloud-tests: in the jest or vitest CLI process only, write the results as JSON in CLOUD_TESTS_RESULTS_DIR. Never throws.
 try {
   const fs = require('fs');
   const path = require('path');
@@ -93,6 +94,15 @@ try {
   if (dir && jest && !taken) {
     fs.mkdirSync(dir, { recursive: true });
     process.argv.push('--json', '--outputFile=' + path.join(dir, 'jest-' + process.pid + '-' + Date.now() + '.json'));
+  }
+  // vitest: on the command line --reporter replaces the configured reporters, so only when the command sets none
+  const vitest = /[\\/]vitest[\\/]vitest\.mjs$/.test(main);
+  const vtaken = process.argv.slice(2).some(a => a.startsWith('--reporter') || a.startsWith('--outputFile')
+    || a === '--watch' || a === '-w' || a === 'watch' || a === 'dev' || a === '--ui' || a === 'list');
+  if (dir && vitest && !vtaken) {
+    fs.mkdirSync(dir, { recursive: true });
+    process.argv.push('--reporter=default', '--reporter=json',
+      '--outputFile.json=' + path.join(dir, 'vitest-' + process.pid + '-' + Date.now() + '.json'));
   }
 } catch (e) {}
 '''
@@ -212,7 +222,7 @@ def collect(results, since, cwd, junit=None, roots=None, skip=()):
             path = os.path.join(results, name)
             if name.startswith('pytest-') and name.endswith('.tsv'):
                 lines += tsv_lines(path)
-            elif name.startswith('jest-') and name.endswith('.json'):
+            elif name.startswith(('jest-', 'vitest-')) and name.endswith('.json'):  # vitest's json is jest's format
                 lines += jest_lines(path, cwd)
     if lines:
         return lines, 'hooks'

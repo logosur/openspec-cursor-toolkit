@@ -138,6 +138,14 @@ class NodePreloadTest(KitCase):
         other = self.write('node_modules/other/bin/jest-like.js', 'console.log(JSON.stringify(process.argv.slice(2)))\n')
         self.assertEqual(self.run_node(other, '-x'), ['-x'])
 
+    def test_vitest_cli_gets_a_json_reporter_only_without_its_own(self):
+        vitest = self.write('node_modules/vitest/vitest.mjs', 'console.log(JSON.stringify(process.argv.slice(2)))\n')
+        args = self.run_node(vitest, 'run')
+        self.assertEqual(args[:3], ['run', '--reporter=default', '--reporter=json'])
+        self.assertTrue(args[3].startswith('--outputFile.json=' + os.path.join(self.dir, 'results', 'vitest-')))
+        self.assertEqual(self.run_node(vitest, 'run', '--reporter=junit'), ['run', '--reporter=junit'])
+        self.assertEqual(self.run_node(vitest, 'watch'), ['watch'])
+
 
 class CollectTest(KitCase):
     def test_jest_json_to_lines(self):
@@ -150,6 +158,9 @@ class CollectTest(KitCase):
         self.assertEqual(self.kit.jest_lines(path, self.dir), [
             ('passed', 't/a.test.js > math adds'), ('failed', 't/a.test.js > math fails'),
             ('skipped', 't/a.test.js > later'), ('skipped', 't/a.test.js > some day'), ('error', 't/broken.test.js')])
+        self.write('results/vitest-1.json', json.dumps(data))   # vitest's json reporter writes jest's format
+        lines, source = self.kit.collect(os.path.join(self.dir, 'results'), time.time(), self.dir)
+        self.assertEqual((len(lines), source), (10, 'hooks'))
 
     JUNIT = ('<?xml version="1.0"?><testsuites><testsuite name="s"><testcase classname="t.a" name="ok"/>'
              '<testcase classname="t.a" name="bad"><failure/></testcase><testcase classname="t.a" name="sk"><skipped/>'

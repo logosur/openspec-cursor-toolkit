@@ -33,4 +33,5 @@ Design decisions: **D1**–**D6**.
 - [x] 5.1 The JUnit fallback reaches Gradle results (`<dir>/<module>/build/test-results/<task>/`): depth 7.
 - [x] 5.2 A pump started before an install re-executes itself when the script is replaced, so it never dispatches
       runs to a runner of the previous brief.
-- [ ] 5.3 A natural pytest run in the cloud lists its tests.
+- [x] 5.3 vitest: JSON reporter from the preload when the command sets none (D3b); real vitest 5 checked locally.
+- [ ] 5.4 A natural pytest run in the cloud lists its tests.

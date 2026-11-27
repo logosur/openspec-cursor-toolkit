@@ -24,7 +24,15 @@ cuenta como trabajo en el censo de ninguno (`open`, `closable`, `backlog`) y nin
 1. **Vigilante:** en segundo plano, `$U wait --session <id>`. Solo termina con `FINDING <id> <regla> <ámbito>` (un
    hallazgo nuevo) o `ANSWER <id>` (una pregunta suya contestada). Sin nada nuevo no imprime nada y no cuesta turnos.
    `NOT HOLDER` (5): otra sesión tiene el rol; esta se cierra. Si el anfitrión mata un comando que no termina, se rearma
-   con `--timeout` largo.
+   con `--timeout` largo. **Tope de preguntas abiertas:** `FINDING` solo sale mientras haya menos de `max_open_questions`
+   preguntas sin contestar, y entonces solo para los hallazgos con más ahorro, hasta los huecos libres. Un `ANSWER` nunca
+   se retiene. `$U list --state new` los ordena por ahorro, el mayor primero.
+   - **`minor`:** un hallazgo cuyo ahorro queda por debajo del umbral de relevancia no es trabajo: se guarda como `minor`,
+     el vigilante no lo anuncia, no se pregunta y la página lo muestra en un solo bloque plegado. Cada `detect` lo vuelve
+     a evaluar. Un hallazgo ya preguntado no cambia nunca por esto.
+   - **Hallazgos agrupados:** los de sesiones sueltas de una misma regla y proyecto (rutinas de una sola ejecución,
+     sesiones ya cerradas o sin llamadas recientes, o tres o más) llegan como un único hallazgo del proyecto, una nota
+     para su supervisora. Una propuesta de cambiar el modelo de una sesión solo existe para una sesión abierta y activa.
 2. **Confirmar un `FINDING`:** `$U show <id>` da las cifras y las posiciones de las transcripciones que lo respaldan. Se
    leen solo esas líneas, nunca transcripciones enteras. Un falso positivo no se pregunta: se anota por qué.
 3. **Preguntar:** `$U ask <id> --question "<qué pasa, qué se propone y qué cambia, en palabras llanas>"`. Va a la cola

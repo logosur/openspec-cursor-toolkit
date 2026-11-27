@@ -37,6 +37,20 @@ DEFAULT_PROPOSALS = {
              'undo': 'Nothing to undo: the scope is only looked at.'},
     'expensive-automation': {'proposal': 'Run this session, which mostly answers automatic notices, on the cheaper model.',
                              'undo': 'Set the session back to its previous model.'},
+    # Grouped findings (one per rule and project, a note for the project's supervisor): the fix lives in the project's
+    # recurring or finished sessions, never in one session's model.
+    'loop-group': {'proposal': 'Look at why the automatic sessions of this project repeat themselves and stop the loop at its source.',
+                   'undo': 'Nothing to undo: the sessions are only looked at.'},
+    'empty-wakes-group': {'proposal': 'Make the watchers of this project wake their sessions less often, or only when there is work.',
+                          'undo': 'Restore the previous wake-up rules.'},
+    'role-model-group': {'proposal': "Run this project's automatic sessions of that role on the cheaper model.",
+                         'undo': 'Set those sessions back to their previous model.'},
+    'large-context-group': {'proposal': 'Compact or restart the sessions of this project that keep a large context for many calls.',
+                            'undo': 'Nothing to undo.'},
+    'idle-rewrite-group': {'proposal': 'Keep the sessions of this project busy or let them end: each wake-up after a long pause rewrites the cache.',
+                           'undo': 'Restore the previous schedules.'},
+    'expensive-automation-group': {'proposal': "Run this project's sessions that mostly answer automatic notices on the cheaper model.",
+                                   'undo': 'Set those sessions back to their previous model.'},
 }
 
 DEFAULT_LABELS = {
@@ -46,6 +60,8 @@ DEFAULT_LABELS = {
     'by_model': 'By model',
     'by_origin': 'By origin',
     'findings': 'Findings',
+    'minor': 'Minor findings, below the materiality floor',
+    'saving': 'saving per day',
     'units': 'units',
     'none': 'Nothing to show.',
     'unpriced': 'Models with no price',
@@ -103,6 +119,15 @@ DEFAULTS = {
     'authorize_answers': ['apply'],
     'authorize_hint': 'Answer "apply" to authorise this change; any other answer leaves it as it is.',
     'ticket_ttl_s': 900,
+    # What reaches the developer: a finding worth less than the floor is stored as `minor` and never asked; session
+    # findings of the same rule and project fold into one when at least `group_min_sessions` exist (or the session is a
+    # routine or not live); at most `max_open_questions` findings wait for an answer at once.
+    'min_saving_units_per_day': 0,
+    'min_saving_share': 0.01,
+    'session_active_window_h': 48,
+    'group_min_sessions': 3,
+    'pace_dedupe_share': 0.8,
+    'max_open_questions': 4,
     'proposals': DEFAULT_PROPOSALS,
     'labels': DEFAULT_LABELS,
 }

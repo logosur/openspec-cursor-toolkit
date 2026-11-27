@@ -19,8 +19,13 @@ def cmd_collect(args, cfg, now):
     return OK
 
 
+def _merge(cfg, now):
+    plan = rules.plan(cfg, now)
+    return store.merge(cfg, plan['candidates'], now, floor=plan['floor'], retire=plan['retire'])
+
+
 def cmd_detect(args, cfg, now):
-    added, refreshed = store.merge(cfg, rules.detect(cfg, now), now)
+    added, refreshed = _merge(cfg, now)
     print(f'detect: {len(added)} new finding(s), {len(refreshed)} refreshed')
     for fid in added:
         print(f'NEW {fid}')
@@ -40,7 +45,7 @@ def cmd_page(args, cfg, now):
 
 def cmd_tick(args, cfg, now):
     collect_mod.collect(cfg, now)
-    store.merge(cfg, rules.detect(cfg, now), now)
+    _merge(cfg, now)
     report.write_page(cfg, now)
     return OK
 

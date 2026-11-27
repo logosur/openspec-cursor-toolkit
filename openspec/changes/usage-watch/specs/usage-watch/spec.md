@@ -318,3 +318,79 @@ A `prices` entry SHALL count only when its key compiles as a regular expression 
 - **WHEN** `examples/override-full/try.sh` runs
 - **THEN** its install includes `usage`, the contract probes include `usage-watch`, and a `usage-watch self-test` step passes
 
+### Requirement: A finding under the materiality floor is stored as minor and never reaches the developer
+The floor SHALL be the larger of `min_saving_units_per_day` (default 0) and `min_saving_share` (default 0.01) times the mean daily units of the baseline's active days. A finding saving less than the floor SHALL be stored as `minor`, never announced or asked. Each `detect` SHALL re-evaluate it: `minor` at or above the floor becomes `new`, `new` below it becomes `minor`. Findings in any other state SHALL never be changed by the floor.
+
+#### Scenario: Exactly at the floor and just under it
+- **GIVEN** a finding whose saving is S
+- **WHEN** the floor is S, and in another run S plus a hundredth of a thousandth
+- **THEN** the first finding is `new` and the second is `minor`
+
+#### Scenario: The floor is re-evaluated
+- **WHEN** `detect` runs with a floor above the saving, then with a floor of 0, then above the saving again
+- **THEN** the finding goes `minor`, `new`, `minor`, each step recorded in its history
+
+#### Scenario: Other states are untouched
+- **WHEN** a finding is `asked`, `authorized`, `rejected`, `applied` or `measured` and `detect` runs with a floor far above and far below its saving
+- **THEN** the stored finding is byte-identical
+
+#### Scenario: Minor stays out of sight
+- **WHEN** every finding is `minor`
+- **THEN** `wait` prints no `FINDING`, `ask` refuses each one, `list --state new` is empty, the page holds one collapsed block with the count and no row per finding, and the status line shows the `minor` count
+
+### Requirement: Session findings of one rule and project fold into one note for the project's supervisor
+Session findings of one rule and project SHALL fold into ONE project-scoped `note` for `project-supervisor`, with its own texts, when the session is a `routine`, is not live (next requirement), or `group_min_sessions` (default 3) sessions raise that rule. Its saving is the sum; its evidence is the count, the top five sessions and a few locations. The floor applies after grouping.
+
+#### Scenario: Fifty one-run routine sessions
+- **WHEN** fifty one-run sessions of a scheduled routine in one project raise `role-model`
+- **THEN** exactly one finding exists for that rule and project, project-scoped, with `evidence.sessions` 50 and five top sessions, and its applier is `project-supervisor`
+
+#### Scenario: Healthy routines
+- **WHEN** the same routines run on the cheaper model
+- **THEN** no finding is raised
+
+#### Scenario: Three live sessions fold and two do not
+- **WHEN** three open, active sessions of one project raise `large-context`, and in another run only two do
+- **THEN** the first run gives one project-scoped finding and the second gives two session-scoped findings
+
+#### Scenario: The floor after grouping
+- **WHEN** every session's saving is under the floor but the sum is over it
+- **THEN** the grouped finding is `new`
+
+### Requirement: A session-model proposal needs a live session
+A finding whose proposal changes the model or effort of one session (applier `usage-role`, with `target_app_id`) SHALL only be produced for a session that is open in the app and has had a call inside `session_active_window_h`; any other session SHALL go through grouping.
+
+#### Scenario: Closed session
+- **WHEN** a session whose app record is archived answers automatic notices on the expensive model
+- **THEN** the finding is a project-scoped note for the project's supervisor, never a `session-model` proposal
+
+#### Scenario: Open but quiet session
+- **WHEN** an open session has had no call inside the window
+- **THEN** the same fold applies
+
+#### Scenario: Live session
+- **WHEN** an open session with a recent call answers automatic notices on the expensive model
+- **THEN** its `session-model` proposal is kept, with its `target_app_id`
+
+### Requirement: One pace finding where a session is most of its project's pace
+When a session-scoped `pace` finding has a saving of at least `pace_dedupe_share` (default 0.8) of its project's `pace` finding, `detect` SHALL keep one of them: the session's when that session is live, else the project's. A stored `new` finding that is no longer raised for this reason SHALL become `minor`.
+
+#### Scenario: Session not live
+- **WHEN** one session accounts for the whole burst of its project and is not open
+- **THEN** only the project finding is raised
+
+#### Scenario: Session live
+- **WHEN** the same session is open
+- **THEN** only the session finding is raised
+
+#### Scenario: Share out of reach
+- **WHEN** `pace_dedupe_share` is far above 1
+- **THEN** both findings are raised
+
+### Requirement: A findings file from the previous version is migrated on the next detect
+A store written before the `minor` state and grouping SHALL load. On the next `detect`, its `new` session-scoped findings of a rule that is now folded, or of a session that is not live, SHALL become `minor` (with the id of the grouped finding when folded); a finding in any other state SHALL not change.
+
+#### Scenario: Old file
+- **WHEN** the store holds fifty `new` per-run findings of one rule, one of them `asked`, and `detect` runs
+- **THEN** the asked one is byte-identical, the other forty-nine are `minor` pointing at the grouped finding, and the grouped finding is `new`
+

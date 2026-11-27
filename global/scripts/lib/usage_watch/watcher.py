@@ -1,7 +1,8 @@
 """`usage-watch wait`: the usage role's watcher (design D9).
 
-It exits only on an event: a `new` finding not announced before (`FINDING <id> <rule> <scope kind>:<scope id>`) or an
-`asked` finding whose queue item became `answered` or `closed` (`ANSWER <id>`). Each event is announced once
+It exits only on an event: a `new` finding not announced before (`FINDING <id> <rule> <scope kind>:<scope id>`; only
+while fewer than `max_open_questions` findings wait for an answer, then the largest savings first, up to the free
+slots) or an `asked` finding whose queue item became `answered` or `closed` (`ANSWER <id>`). Each event is announced once
 (`<state_dir>/announced.json`). With no event it prints nothing, so the role gets no turn while nothing happens.
 `--timeout 0` never times out; a positive timeout prints `TIMEOUT <s>s`. Exit 5 with `NOT HOLDER` when another live
 session holds the usage role; exit 6 without the supervision pieces.
@@ -31,22 +32,26 @@ def _not_holder(cfg: dict, session: str) -> bool:
 
 
 def events(cfg: dict) -> tuple[list[str], dict]:
+    """FINDING lines for the `new` findings with the largest saving, as many as there are free question slots; ANSWER
+    lines for answered questions (never held back)."""
     seen = read_json(announced_path(cfg), {})
     found_seen = set(seen.get('findings') or [])
     answer_seen = set(seen.get('answers') or [])
     findings = store.read(cfg)
+    asked = {fid: (f.get('queue') or {}).get('id') for fid, f in findings.items() if f.get('state') == 'asked'}
+    status = role.statuses(sorted({qid for qid in asked.values() if qid}))
+    answered_ids = {fid for fid, qid in asked.items() if qid and status.get(qid) in ('answered', 'closed')}
+    open_questions = len(asked) - len(answered_ids)
+    free = max(0, int(cfg['max_open_questions']) - open_questions)
+    keyed = sorted(((fid, f) for fid, f in findings.items() if f.get('state') == 'new' and fid not in found_seen),
+                   key=lambda kv: (-(kv[1].get('saving_units_per_day') or 0), kv[0]))[:free]
     lines = []
-    new_ids = sorted(fid for fid, f in findings.items() if f.get('state') == 'new' and fid not in found_seen)
-    for fid in new_ids:
-        f = findings[fid]
+    for fid, f in keyed:
         scope = f.get('scope') or {}
         lines.append(f'FINDING {fid} {f.get("rule")} {scope.get("kind")}:{scope.get("id")}')
-    asked = {fid: (f.get('queue') or {}).get('id') for fid, f in findings.items()
-             if f.get('state') == 'asked' and fid not in answer_seen and (f.get('queue') or {}).get('id')}
-    status = role.statuses(sorted(set(asked.values())))
-    answered = sorted(fid for fid, qid in asked.items() if status.get(qid) in ('answered', 'closed'))
+    answered = sorted(fid for fid in answered_ids if fid not in answer_seen)
     lines += [f'ANSWER {fid}' for fid in answered]
-    return lines, {'findings': sorted(found_seen | set(new_ids)), 'answers': sorted(answer_seen | set(answered))}
+    return lines, {'findings': sorted(found_seen | {fid for fid, _ in keyed}), 'answers': sorted(answer_seen | set(answered))}
 
 
 def wait(cfg: dict, session: str | None, timeout: float, interval: float) -> int:

@@ -95,6 +95,178 @@ ROLE_APP, ROLE_CLI, DEV = 'local_role', 'cli-role', 'local_dev'
 H = 3600
 
 
+def merge_in(root: str, build, steps) -> list:
+    """Build fixtures in a sandbox, detect once, then run each (floor, mutation) step through `store.merge`; returns the
+    stored findings after every step."""
+    from . import store
+    out = []
+    with Sandbox(root) as home:
+        build(home, NOW)
+        cfg = C.load()
+        collect_mod.collect(cfg, NOW)
+        plan = rules.plan(cfg, NOW)
+        for floor, mutate in steps:
+            if mutate:
+                found = store.read(cfg)
+                mutate(found, plan)
+                store.write(cfg, found)
+            store.merge(cfg, plan['candidates'], NOW, floor=plan['floor'] if floor is None else floor,
+                        retire=plan['retire'])
+            out.append(store.read(cfg))
+        out.append(plan)
+    return out
+
+
+def selection_checks(root: str) -> tuple[list[str], int]:
+    """What reaches the developer: the materiality floor, grouping, live sessions and the pace duplicate."""
+    from . import store
+    fails = []
+
+    def check(name, ok):
+        if not ok:
+            fails.append(name)
+
+    def sub(name):
+        return os.path.join(root, name)
+
+    # grouping: fifty one-run routine sessions give one grouped note, never fifty; healthy gives none
+    found = detect_rule(sub('routines'), scenarios.routines_fire, {}, 'role-model')
+    check('grouping: fifty one-run routine sessions give exactly one finding',
+          len(found) == 1 and found[0]['scope']['kind'] == 'project' and found[0]['evidence']['sessions'] == 50
+          and len(found[0]['evidence']['top_sessions']) == 5)
+    check('grouping: the grouped finding is a note for the project supervisor',
+          bool(found) and found[0]['applier'] == 'project-supervisor' and found[0]['proposal']['kind'] == 'note'
+          and found[0]['target_app_id'] is None)
+    check('grouping: healthy routines raise nothing',
+          not detect_rule(sub('routines-ok'), scenarios.routines_healthy, {}, 'role-model'))
+
+    # a session-model proposal needs a live session
+    def kinds(name, **kw):
+        found = detect_rule(sub(name), lambda h, n: scenarios.automation_session(h, n, **kw), {}, 'expensive-automation')
+        return [(c['scope']['kind'], c['proposal']['kind']) for c in found]
+    check('live session: an open, active session keeps its session-model proposal',
+          kinds('live') == [('session', 'session-model')])
+    check('live session: a closed session never yields a session-model proposal',
+          kinds('closed', archived=True) == [('project', 'note')])
+    quiet = detect_rule(sub('quiet'), lambda h, n: scenarios.automation_session(h, n, last=n - 10 * H),
+                        {'session_active_window_h': 6}, 'expensive-automation')
+    check('live session: an open session quiet for the window goes through grouping',
+          [(c['scope']['kind'], c['proposal']['kind']) for c in quiet] == [('project', 'note')])
+
+    # at least group_min_sessions live sessions fold, fewer do not
+    three = detect_rule(sub('three'), lambda h, n: scenarios.large_sessions(h, n, 3), {}, 'large-context')
+    two = detect_rule(sub('two'), lambda h, n: scenarios.large_sessions(h, n, 2), {}, 'large-context')
+    check('grouping: three live sessions of one rule and project fold into one',
+          [c['scope']['kind'] for c in three] == ['project'])
+    check('grouping: two live sessions stay separate', [c['scope']['kind'] for c in two] == ['session', 'session'])
+
+    # the pace duplicate
+    pace_cfg = dict(scenarios.CASES[7][3])
+    pace = detect_rule(sub('pace-closed'), scenarios.pace_fire, pace_cfg, 'pace')
+    check('pace: a session that is most of its project keeps only the project finding when not live',
+          [c['scope']['kind'] for c in pace] == ['project'])
+
+    def live_pace(home, now):
+        scenarios.pace_fire(home, now)
+        home.live('s-pace')
+    pace = detect_rule(sub('pace-live'), live_pace, pace_cfg, 'pace')
+    check('pace: ... and only the session finding when it is live', [c['scope']['kind'] for c in pace] == ['session'])
+
+    # the floor: exactly at it, just under it, back above it, and never over a finding already asked
+    def saving_of(name):
+        return detect_rule(sub(name), scenarios.large_fire, {}, 'large-context')[0]['saving_units_per_day']
+    s = saving_of('floor-probe')
+    at = merge_in(sub('floor-at'), scenarios.large_fire, [(s, None)])[0]
+    under = merge_in(sub('floor-under'), scenarios.large_fire, [(s + 0.0001, None)])[0]
+    check('floor: a finding exactly at the floor is new', [f['state'] for f in at.values()] == ['new'])
+    check('floor: a finding just under the floor is minor', [f['state'] for f in under.values()] == ['minor'])
+
+    def ask(found, plan):
+        for f in found.values():
+            f['state'] = 'asked'
+    steps = merge_in(sub('floor-moves'), scenarios.large_fire,
+                     [(s + 1, None), (0, None), (s + 1, None), (0, ask), (s + 1, None)])
+    states = [[f['state'] for f in found.values()] for found in steps[:-1]]
+    check('floor: re-evaluated on each detect (minor, new, minor again)', states[:3] == [['minor'], ['new'], ['minor']])
+    check('floor: a finding already asked is never touched by it', states[3:] == [['asked'], ['asked']])
+
+    # an old file: new session findings are folded or made minor, asked ones stay
+    def old_file(home, now):
+        scenarios.routines_fire(home, now)
+        cfg = C.load()
+        collect_mod.collect(cfg, now)
+        det = rules.Detector(cfg, now)
+        det.group = lambda found: found
+        old = {c['id']: dict(c, state='new', first_seen='x', last_seen='x', history=[]) for c in det.run()
+               if c['rule'] == 'role-model'}
+        first = sorted(old)[0]
+        old[first].update(state='asked', queue={'project': 'p', 'id': 'q1'})
+        store.write(cfg, old)
+        first_id['id'] = first
+
+    first_id = {}
+    migrated = merge_in(sub('old-file'), old_file, [(None, None)])
+    after, plan = migrated[0], migrated[-1]
+    first = first_id['id']
+    group = [c['id'] for c in plan['candidates'] if c['rule'] == 'role-model']
+    others = [f for fid, f in after.items() if f['rule'] == 'role-model' and fid not in group and fid != first]
+    check('old file: the asked finding is untouched and every other new session finding is folded',
+          after[first]['state'] == 'asked' and after[first]['queue'] == {'project': 'p', 'id': 'q1'}
+          and len(others) == 49 and all(f['state'] == 'minor' and f.get('folded_into') in group for f in others))
+    print('selection checks: grouping, live sessions, pace duplicate, floor, old file (15 checks)')
+    return fails, 15
+
+
+def cap_checks(root: str, script: str) -> tuple[list[str], int]:
+    """`wait` holds FINDING back with `max_open_questions` unanswered and frees one slot per answer."""
+    here = os.path.dirname(os.path.realpath(script)) if script else ''
+    tools = {n: os.path.join(here, n) for n in ('ask-queue', 'supervisor-lock')}
+    if not all(os.path.isfile(p) for p in tools.values()):
+        return [], 0
+    from .store import read as read_store, write as write_store
+    fails = []
+
+    def check(name, ok):
+        if not ok:
+            fails.append(name)
+
+    with Sandbox(root) as home:
+        bin_dir = os.path.join(home.root, '.claude', 'scripts')
+        os.makedirs(bin_dir, exist_ok=True)
+        for name, path in tools.items():
+            os.symlink(path, os.path.join(bin_dir, name))
+        home_repo = home.git_repo('home-proj')
+        home.usage_role(ROLE_APP, ROLE_CLI, home_project=home_repo)
+
+        def call(*args, env=None, tool=None):
+            e = home.env(now=NOW)
+            e.update(env if env is not None else {'CLAUDE_CODE_SESSION_ID': ROLE_CLI,
+                                                  'CLAUDE_CODE_HOST_SESSION_ID': ROLE_APP})
+            argv = [tools[tool]] if tool else [os.path.realpath(script)]
+            return subprocess.run([sys.executable, *argv, *args], capture_output=True, text=True, env=e, timeout=120)
+
+        ids = [f'large-context-{i:010d}' for i in range(7)]
+        savings = [5, 1, 9, 2, 8, 3, 7]
+        cfg = C.load()
+        write_store(cfg, {fid: {
+            'id': fid, 'rule': 'large-context', 'scope': {'kind': 'session', 'id': f's{i}'}, 'project': 'p',
+            'project_root': None, 'role': 'worker', 'evidence': {'locations': []}, 'saving_units_per_day': savings[i],
+            'proposal': {'kind': 'note', 'text': 't'}, 'applier': 'project-supervisor', 'undo': 'u',
+            'target_app_id': None, 'state': 'new', 'first_seen': 'x', 'last_seen': 'x', 'history': []}
+            for i, fid in enumerate(ids)})
+        for fid in ids[:4]:
+            call('ask', fid, '--question', 'Look at it?')
+        r = call('wait', '--session', ROLE_APP, '--timeout', '1', '--interval', '0.1')
+        check('cap: four unanswered questions hold every FINDING back', r.stdout == 'TIMEOUT 1s\n')
+        qid = (read_store(cfg)[ids[0]].get('queue') or {}).get('id')
+        call('answer', qid, '--text', 'no', tool='ask-queue', env={'CLAUDE_CODE_HOST_SESSION_ID': 'local_dev'})
+        r = call('wait', '--session', ROLE_APP, '--timeout', '3', '--interval', '0.1')
+        check('cap: one answer frees one slot, for the largest saving, and the ANSWER is not held back',
+              r.stdout.splitlines() == [f'FINDING {ids[4]} large-context session:s4', f'ANSWER {ids[0]}'])
+    print('cap checks: hold back at the cap, one slot per answer (2 checks)')
+    return fails, 2
+
+
 def role_checks(root: str, script: str) -> tuple[list[str], int]:
     """(failures, check groups) of the sub-supervision role. Needs ask-queue and supervisor-lock next to `script`."""
     here = os.path.dirname(os.path.realpath(script)) if script else ''
@@ -220,9 +392,15 @@ def run(script: str = '') -> int:
                 fails.append(f'rule {rule}: the firing case raised no finding')
             if detect_rule(os.path.join(tmp, rule + '-healthy'), healthy, overrides, rule):
                 fails.append(f'rule {rule}: the healthy case raised a finding')
+        sel_fails, sel_groups = selection_checks(os.path.join(tmp, 'selection'))
+        fails += sel_fails
+        checks += sel_groups
         role_fails, role_groups = role_checks(os.path.join(tmp, 'role'), script)
         fails += role_fails
         checks += role_groups
+        cap_fails, cap_groups = cap_checks(os.path.join(tmp, 'cap'), script)
+        fails += cap_fails
+        checks += cap_groups
     except Exception as exc:  # a crash is a failed self-test, reported, never a traceback for the caller
         fails.append(f'self-test crashed: {type(exc).__name__}: {exc}')
     finally:

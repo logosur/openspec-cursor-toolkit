@@ -10,6 +10,8 @@ CLAUDE_TOOLKIT_OVERRIDE inside it, synthetic transcripts (usage_watch.fixtures) 
 (USAGE_WATCH_NOW). The real home is never read: the script runs as a subprocess with that environment, and in-process
 checks run inside selftest.Sandbox, which points os.environ at the temporary HOME.
 """
+import contextlib
+import io
 import json
 import os
 import re
@@ -533,6 +535,7 @@ class RuleCasesTest(Base):
         self.assertEqual((f['proposal']['kind'], f['applier']), ('note', 'project-supervisor'))
 
     def test_loop_same_tool_call(self):
+        self.home.live('s-call')
         tr = self.home.transcript('s-call')
         tr.user(NOW - 3 * H, 'x')
         for i in range(7):
@@ -628,7 +631,7 @@ class StatusTest(Base):
         self.assertEqual((s['calls']['total'], s['week_units'], s['pace']), (0, 0, 'unknown'))
         line = self.run_cli('status').stdout
         self.assertIn('pace unknown', line)
-        self.assertIn('findings new 0, asked 0, authorized 0', line)
+        self.assertIn('findings new 0, minor 0, asked 0, authorized 0', line)
 
     def test_home_project_without_questions_session_warns(self):
         repo = self.home.git_repo('home-proj')
@@ -794,6 +797,7 @@ class RoleBase(Base):
             os.symlink(str(REPO_ROOT / 'global/scripts' / name), os.path.join(self.scripts, name))
         self.home_repo = self.home.git_repo('home-proj')
         self.home.usage_role(ROLE_APP, ROLE_CLI, home_project=self.home_repo)
+        self.home.config(min_saving_share=0)   # these tests walk the question flow, not the materiality floor
 
     def tool(self, name, *args, env=None, now=NOW):
         e = self.home.env(now=now)
@@ -846,6 +850,7 @@ class RoleBase(Base):
         return self.only('role-model', 'session-model')
 
     def seed_note(self, cwd=None):
+        self.home.live('s-ctx', cwd=cwd)
         tr = self.home.transcript('s-ctx', cwd=cwd)
         tr.user(NOW - 3 * H, 'go')
         for i in range(25):
@@ -1462,6 +1467,323 @@ class BacklogTest(RoleBase):
         self.assertEqual(self.role('apply', fid, '--how', 'compacted').returncode, 0)
         r = self.backlog(repo)
         self.assertEqual((r.returncode, r.stdout), (0, 'BACKLOG work=0 parked=0\n'))
+
+# ---------------------------------------------------------------------------------------------------- 10. what reaches the developer
+def watcher_events(cfg):
+    from usage_watch import watcher
+    return watcher.events(cfg)[0]
+
+
+class Planned(Base):
+    """Detection plus the store, in process, inside the temporary HOME."""
+
+    def plan(self, **overrides):
+        with self.sandbox:
+            if overrides:
+                self.home.config(**overrides)
+            cfg = C.load()
+            collect_mod.collect(cfg, NOW)
+            return cfg, rules.plan(cfg, NOW)
+
+    def merge(self, cfg, plan, floor=None, now=NOW):
+        with self.sandbox:
+            return store.merge(cfg, plan['candidates'], now, floor=plan['floor'] if floor is None else floor,
+                               retire=plan['retire'])
+
+    def stored(self, cfg):
+        with self.sandbox:
+            return store.read(cfg)
+
+
+class MaterialityFloorTest(Planned):
+    """Point 1: a finding under the floor is `minor` and never reaches the developer."""
+
+    def test_floor_is_the_larger_of_the_absolute_and_the_relative_floor(self):
+        scenarios.large_fire(self.home, NOW)
+        cfg, plan = self.plan(min_saving_units_per_day=0, min_saving_share=1.0)
+        with self.sandbox:
+            day_units = sum(c['units'] for c in Data(cfg, NOW).calls)   # every call is inside one day: the mean daily units
+        self.assertAlmostEqual(plan['floor'], day_units)
+        self.assertEqual(self.plan(min_saving_units_per_day=day_units * 5, min_saving_share=1.0)[1]['floor'],
+                         day_units * 5)
+        self.assertEqual(self.plan(min_saving_units_per_day=0, min_saving_share=0)[1]['floor'], 0)
+
+    def test_exactly_at_the_floor_stays_new_and_just_under_is_minor(self):
+        scenarios.large_fire(self.home, NOW)
+        cfg, plan = self.plan()
+        saving = plan['candidates'][0]['saving_units_per_day']
+        self.assertGreater(saving, 0)
+        added, _ = self.merge(cfg, plan, floor=saving)
+        self.assertEqual((len(added), self.stored(cfg)[added[0]]['state']), (1, 'new'))
+        other = Sandbox(os.path.join(self.tmp, 'under'))
+        with other as home:
+            scenarios.large_fire(home, NOW)
+            cfg2 = C.load()
+            collect_mod.collect(cfg2, NOW)
+            plan2 = rules.plan(cfg2, NOW)
+            added2, _ = store.merge(cfg2, plan2['candidates'], NOW, floor=saving + 0.0001, retire=plan2['retire'])
+            found = list(store.read(cfg2).values())
+        self.assertEqual((added2, [f['state'] for f in found]), ([], ['minor']))
+        self.assertEqual(found[0]['history'][0]['state'], 'minor')
+
+    def test_the_floor_is_reevaluated_on_every_detect(self):
+        scenarios.large_fire(self.home, NOW)
+        cfg, plan = self.plan()
+        fid = plan['candidates'][0]['id']
+        saving = plan['candidates'][0]['saving_units_per_day']
+        self.merge(cfg, plan, floor=saving + 1)
+        self.assertEqual(self.stored(cfg)[fid]['state'], 'minor')
+        added, _ = self.merge(cfg, plan, floor=0)                  # rises above the floor: new
+        self.assertEqual((added, self.stored(cfg)[fid]['state']), ([fid], 'new'))
+        self.merge(cfg, plan, floor=saving + 1)                    # falls below it, never asked: minor again
+        self.assertEqual(self.stored(cfg)[fid]['state'], 'minor')
+        self.assertEqual([h['state'] for h in self.stored(cfg)[fid]['history']], ['minor', 'new', 'minor'])
+
+    def test_other_states_are_never_touched_by_the_floor(self):
+        scenarios.large_fire(self.home, NOW)
+        cfg, plan = self.plan()
+        fid = plan['candidates'][0]['id']
+        self.merge(cfg, plan, floor=0)
+        for state in ('asked', 'authorized', 'rejected', 'applied', 'measured'):
+            with self.sandbox:
+                found = store.read(cfg)
+                found[fid]['state'] = state
+                store.write(cfg, found)
+                before = json.dumps(found[fid], sort_keys=True)
+            for floor in (10 ** 9, 0):
+                self.merge(cfg, plan, floor=floor)
+                self.assertEqual(json.dumps(self.stored(cfg)[fid], sort_keys=True), before, state)
+
+    def test_a_minor_finding_is_never_announced_or_asked(self):
+        scenarios.large_fire(self.home, NOW)
+        self.home.config(min_saving_units_per_day=10 ** 9)
+        self.assertEqual(self.run_cli('tick').returncode, 0)
+        found = json.loads(self.run_cli('list', '--json').stdout)
+        self.assertEqual([f['state'] for f in found], ['minor'])
+        self.assertEqual(json.loads(self.run_cli('list', '--state', 'new', '--json').stdout), [])
+        with self.sandbox:
+            cfg = C.load()
+            self.assertEqual(watcher_events(cfg), [])
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(flow.ask(cfg, found[0]['id'], 'q', None, NOW), 3)
+
+    def test_status_and_page_show_minor_in_one_collapsed_block(self):
+        scenarios.large_fire(self.home, NOW)
+        scenarios.idle_fire(self.home, NOW)
+        self.home.config(min_saving_units_per_day=10 ** 9)
+        self.assertEqual(self.run_cli('tick').returncode, 0)
+        s = json.loads(self.run_cli('status', '--json').stdout)
+        self.assertEqual((s['findings']['new'], s['findings']['minor']), (0, 2))
+        self.assertIn('new 0, minor 2,', self.run_cli('status').stdout)
+        page = read(os.path.join(self.home.state, 'usage.html'))
+        self.assertEqual(page.count('<details class="minor">'), 1)
+        self.assertIn('Minor findings, below the materiality floor: 2 (', page)
+        for f in json.loads(self.run_cli('list', '--json').stdout):
+            self.assertNotIn(f['id'], page)
+
+    def test_list_new_is_sorted_by_saving_largest_first(self):
+        scenarios.large_fire(self.home, NOW)
+        scenarios.idle_fire(self.home, NOW)
+        scenarios.loop_fire(self.home, NOW)
+        self.home.config(min_saving_share=0)
+        self.assertEqual(self.run_cli('tick').returncode, 0)
+        found = json.loads(self.run_cli('list', '--state', 'new', '--json').stdout)
+        savings = [f['saving_units_per_day'] for f in found]
+        self.assertGreater(len(found), 2)
+        self.assertEqual(savings, sorted(savings, reverse=True))
+
+
+class GroupingTest(Planned):
+    """Points 2 and 3: session findings fold into one note for the project's supervisor; a session-model proposal
+    needs a live session."""
+
+    def found(self, rule, **overrides):
+        cfg, plan = self.plan(**overrides)
+        return [c for c in plan['candidates'] if c['rule'] == rule], cfg, plan
+
+    def per_session(self, rule):
+        """The per-session candidates the same data gives when no session may be folded."""
+        with self.sandbox:
+            det = rules.Detector(dict(C.load(), group_min_sessions=10 ** 6), NOW)
+            det.group = lambda found: found
+            return [c for c in det.run() if c['rule'] == rule]
+
+    def test_fifty_one_run_routine_sessions_give_one_grouped_finding(self):
+        scenarios.routines_fire(self.home, NOW)
+        found, cfg, plan = self.found('role-model')
+        self.assertEqual(len(found), 1)
+        g = found[0]
+        self.assertEqual((g['scope']['kind'], g['applier'], g['proposal']['kind'], g['target_app_id']),
+                         ('project', 'project-supervisor', 'note', None))
+        self.assertEqual(g['id'], store.finding_id('role-model', 'project', g['project'], 'group'))
+        self.assertEqual(g['evidence']['sessions'], 50)
+        top = g['evidence']['top_sessions']
+        self.assertEqual(len(top), 5)
+        savings = [t['saving_units_per_day'] for t in top]
+        self.assertEqual(savings, sorted(savings, reverse=True))
+        self.assertEqual(g['saving_units_per_day'],
+                         round(sum(c['saving_units_per_day'] for c in self.per_session('role-model')), 4))
+        self.assertEqual(g['proposal']['text'], C.DEFAULTS['proposals']['role-model-group']['proposal'])
+        self.assertEqual(g['undo'], C.DEFAULTS['proposals']['role-model-group']['undo'])
+        self.assertTrue(g['evidence']['locations'])
+        # through the store: one finding, never fifty, and stable across runs
+        self.merge(cfg, plan)
+        self.merge(cfg, plan, now=NOW + 60)
+        self.assertEqual([f['id'] for f in self.stored(cfg).values() if f['rule'] == 'role-model'], [g['id']])
+
+    def test_healthy_routines_raise_nothing(self):
+        scenarios.routines_healthy(self.home, NOW)
+        self.assertEqual(self.found('role-model')[0], [])
+
+    def test_a_closed_session_never_gets_a_session_model_proposal(self):
+        scenarios.automation_session(self.home, NOW, archived=True)
+        found = self.found('expensive-automation')[0]
+        self.assertEqual([(f['scope']['kind'], f['proposal']['kind'], f['applier']) for f in found],
+                         [('project', 'note', 'project-supervisor')])
+
+    def test_an_open_session_without_recent_calls_goes_through_grouping(self):
+        scenarios.automation_session(self.home, NOW, last=NOW - 10 * H)
+        found = self.found('expensive-automation', session_active_window_h=6)[0]
+        self.assertEqual([(f['scope']['kind'], f['proposal']['kind']) for f in found], [('project', 'note')])
+
+    def test_an_open_active_session_keeps_its_own_session_model_proposal(self):
+        scenarios.automation_session(self.home, NOW)
+        found = self.found('expensive-automation')[0]
+        self.assertEqual([(f['scope']['kind'], f['proposal']['kind'], f['applier'], f['target_app_id'])
+                          for f in found], [('session', 'session-model', 'usage-role', 'local_auto')])
+
+    def test_three_live_sessions_of_one_rule_and_project_fold_and_two_do_not(self):
+        scenarios.large_sessions(self.home, NOW, 3)
+        found = self.found('large-context')[0]
+        self.assertEqual([(f['scope']['kind'], f['evidence']['sessions']) for f in found], [('project', 3)])
+        other = Sandbox(os.path.join(self.tmp, 'two'))
+        with other as home:
+            scenarios.large_sessions(home, NOW, 2)
+            cfg = C.load()
+            collect_mod.collect(cfg, NOW)
+            two = [c for c in rules.detect(cfg, NOW) if c['rule'] == 'large-context']
+            home.config(group_min_sessions=2)
+            collect_mod.collect(C.load(), NOW)
+            three = [c for c in rules.detect(C.load(), NOW) if c['rule'] == 'large-context']
+        self.assertEqual([c['scope']['kind'] for c in two], ['session', 'session'])
+        self.assertEqual([c['scope']['kind'] for c in three], ['project'])
+
+    def test_the_floor_applies_to_the_grouped_finding_after_grouping(self):
+        scenarios.routines_fire(self.home, NOW)
+        found, cfg, plan = self.found('role-model')
+        group = found[0]
+        biggest = max(c['saving_units_per_day'] for c in self.per_session('role-model'))
+        self.assertGreater(group['saving_units_per_day'], biggest)
+        self.merge(cfg, plan, floor=(biggest + group['saving_units_per_day']) / 2)
+        self.assertEqual(self.stored(cfg)[group['id']]['state'], 'new')
+
+
+class PaceDedupeTest(Planned):
+    """Point 4: one pace finding where a session accounts for most of its project's."""
+
+    def pace(self, **overrides):
+        cfg, plan = self.plan(**dict(scenarios.CASES[7][3], **overrides))
+        return [c['scope']['kind'] for c in plan['candidates'] if c['rule'] == 'pace']
+
+    def test_the_project_one_is_kept_when_the_session_is_not_live(self):
+        scenarios.pace_fire(self.home, NOW)
+        self.assertEqual(self.pace(), ['project'])
+
+    def test_the_session_one_is_kept_when_the_session_is_live(self):
+        scenarios.pace_fire(self.home, NOW)
+        self.home.live('s-pace')
+        self.assertEqual(self.pace(), ['session'])
+
+    def test_both_stay_when_the_share_is_out_of_reach(self):
+        scenarios.pace_fire(self.home, NOW)
+        self.home.live('s-pace')
+        self.assertEqual(sorted(self.pace(pace_dedupe_share=10 ** 6)), ['project', 'session'])
+
+
+class OpenQuestionsCapTest(RoleBase):
+    """Point 5: `wait` holds FINDING back while `max_open_questions` findings wait for an answer."""
+
+    def setUp(self):
+        super().setUp()
+        os.remove(os.path.join(self.home.supervisor, 'usage-role.json'))
+        r = self.tool('supervisor-lock', 'usage-role', '--claim', '--session', ROLE_APP, '--dir', self.home_repo,
+                      env={'CLAUDE_CODE_SESSION_ID': ROLE_CLI})
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def seed(self, savings):
+        """One `new` note finding per saving, in the store as a previous run would have left them."""
+        ids = [f'large-context-{i:010d}' for i in range(len(savings))]
+        with self.sandbox:
+            cfg = C.load()
+            found = store.read(cfg)
+            for i, (fid, saving) in enumerate(zip(ids, savings)):
+                found[fid] = {'id': fid, 'rule': 'large-context', 'scope': {'kind': 'session', 'id': f's{i}'},
+                              'project': 'p', 'project_root': None, 'role': 'worker', 'evidence': {'locations': []},
+                              'saving_units_per_day': saving, 'proposal': {'kind': 'note', 'text': 't'},
+                              'applier': 'project-supervisor', 'undo': 'u', 'target_app_id': None, 'state': 'new',
+                              'first_seen': 'x', 'last_seen': 'x', 'history': []}
+            store.write(cfg, found)
+        return ids
+
+    def wait(self):
+        return self.role('wait', '--session', ROLE_APP, '--timeout', '2', '--interval', '0.2').stdout
+
+    def test_four_unanswered_hold_back_every_finding_and_one_answer_frees_one_slot(self):
+        ids = self.seed([5, 1, 9, 2, 8, 3, 7])
+        qids = [self.ask(fid) for fid in ids[:4]]     # four asked, none answered; 8, 3 and 7 are still new
+        self.assertEqual(self.wait(), 'TIMEOUT 2s\n')
+        self.answer(qids[0], 'no')
+        out = self.wait()
+        self.assertEqual(out.splitlines(), [f'FINDING {ids[4]} large-context session:s4', f'ANSWER {ids[0]}'])
+        self.ask(ids[4])                                  # the role asks it: the slot is taken again
+        self.assertEqual(self.wait(), 'TIMEOUT 2s\n')
+
+    def test_free_slots_go_to_the_largest_savings_first(self):
+        ids = self.seed([5, 1, 9, 2, 8, 3, 7])
+        lines = self.wait().splitlines()
+        self.assertEqual([line.split()[1] for line in lines], [ids[2], ids[4], ids[6], ids[0]])
+
+    def test_an_answer_is_never_held_back(self):
+        ids = self.seed([5, 1, 9, 2, 8])
+        qids = [self.ask(fid) for fid in ids[:4]]
+        self.wait()
+        for qid in qids:
+            self.answer(qid, 'no')
+        out = self.wait().splitlines()
+        self.assertEqual(sorted(line for line in out if line.startswith('ANSWER')),
+                         sorted(f'ANSWER {fid}' for fid in ids[:4]))
+
+
+class OldStateTest(RoleBase):
+    """Point 6: a findings file written by the previous version loads and is re-evaluated; asked ones are untouched."""
+
+    def test_an_old_file_is_migrated_without_touching_asked_findings(self):
+        scenarios.routines_fire(self.home, NOW)
+        self.tick()
+        group = [f for f in self.findings().values() if f['rule'] == 'role-model'][0]
+        os.remove(os.path.join(self.home.state, 'findings.json'))
+        repo = group['project_root']
+        old = {}
+        for i in range(3):    # per-run findings as the previous version stored them (no `minor`, no grouping)
+            fid = f'role-model-{i:010d}'
+            old[fid] = {'id': fid, 'rule': 'role-model', 'scope': {'kind': 'session', 'id': f's-run-{i:02d}'},
+                        'project': group['project'], 'project_root': repo, 'role': 'routine',
+                        'evidence': {'locations': []}, 'saving_units_per_day': 5.0,
+                        'proposal': {'kind': 'session-model', 'field': 'model', 'value': 'sonnet'},
+                        'applier': 'usage-role', 'undo': 'u', 'target_app_id': f'local_s-run-{i:02d}', 'state': 'new',
+                        'first_seen': 'x', 'last_seen': 'x',
+                        'history': [{'state': 'new', 'at': 'x', 'by': 'detect', 'ref': None}]}
+        old['role-model-0000000000'].update(state='asked', queue={'project': repo, 'id': 'q-old'})
+        with self.sandbox:
+            store.write(C.load(), old)
+        before = json.dumps(old['role-model-0000000000'], sort_keys=True)
+        self.tick(now=NOW + 60)
+        after = self.findings()
+        self.assertEqual(json.dumps(after['role-model-0000000000'], sort_keys=True), before)
+        for fid in ('role-model-0000000001', 'role-model-0000000002'):
+            self.assertEqual((after[fid]['state'], after[fid]['folded_into']), ('minor', group['id']))
+        self.assertEqual(after[group['id']]['state'], 'new')
+        self.assertEqual([h['state'] for h in after['role-model-0000000001']['history']], ['new', 'minor'])
 
 
 class RoleSelfTestTest(RoleBase):

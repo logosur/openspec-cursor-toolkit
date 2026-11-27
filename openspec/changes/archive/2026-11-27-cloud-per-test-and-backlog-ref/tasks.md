@@ -34,4 +34,4 @@ Design decisions: **D1**–**D6**.
 - [x] 5.2 A pump started before an install re-executes itself when the script is replaced, so it never dispatches
       runs to a runner of the previous brief.
 - [x] 5.3 vitest: JSON reporter from the preload when the command sets none (D3b); real vitest 5 checked locally.
-- [ ] 5.4 A natural pytest run in the cloud lists its tests.
+- [x] 5.4 A natural pytest run in the cloud lists its tests (13800 lines, in a project whose suite replaces PYTEST_ADDOPTS).

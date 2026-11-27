@@ -37,3 +37,12 @@ efectos fuera de la máquina o difíciles de deshacer, y por eso cada cosa neces
 Un límite duro no se hace y no para lo demás: se apunta con
 `~/.claude/scripts/ask-queue add --project "$PWD" --question … --default "No hacerlo" --why … --blocks …` y el resto del
 trabajo sigue. Ni un panel, ni una supervisora, ni el modo de permisos lo levantan.
+
+## Cuándo se le pregunta
+- **Al final**, todo junto, en la tanda final de la sesión de preguntas.
+- **Antes**, solo dos cosas, por la sesión de preguntas y sin parar nada: un rumbo radical votado por unanimidad del
+  panel, y la **tanda parcial** de las preguntas que bloquean trabajo (`ask-queue list --due`). Son las que bloquean algo
+  que el desarrollador ordenó (`--order "<sus palabras>"`) o llevan más de un día (`ask_due_after_h`) bloqueando trabajo
+  real, como mucho una tanda cada 12 horas (`ask_partial_batch_window_h`) salvo una orden nueva.
+- En `--blocks` se escribe el trabajo que de verdad bloquea, o «nada». Nadie dice que algo espera su respuesta si la
+  pregunta no se le ha presentado.

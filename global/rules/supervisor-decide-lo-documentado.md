@@ -22,3 +22,9 @@ mandar en lugar del desarrollador. Se aplica a `/supervisa-sesiones` y a toda se
 
 Cada decisión se anota en el registro de supervisión y en el registro de decisiones del proyecto, si lo tiene, y se le
 enseña al desarrollador al final para que la confirme o la cambie.
+
+## Cuándo llega una pregunta al desarrollador
+- En la tanda final, todo junto. Antes, por la sesión de preguntas, solo un rumbo radical votado por unanimidad del panel
+  y la tanda parcial de las preguntas que bloquean trabajo (`ask-queue list --due`, aviso `ASKDUE`).
+- La supervisora no escribe que algo espera su respuesta mientras esa pregunta no se le haya presentado: manda la tanda
+  parcial.

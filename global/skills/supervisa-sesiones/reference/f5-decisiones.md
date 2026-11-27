@@ -1,6 +1,6 @@
 # supervisa-sesiones: decisiones, sesión de preguntas y tanda final
 
-> Referencia del núcleo (`../SKILL.md`). Se lee al entrar en F5, al abrir la sesión de preguntas y al preparar la tanda;
+> Referencia del núcleo (`../SKILL.md`). Se lee al entrar en F5, al abrir la sesión de preguntas, con `ASKDUE` y al preparar la tanda;
 > el núcleo manda si algo choca. Reglas: `~/.claude/rules/supervisor-decide-lo-documentado.md` y
 > `~/.claude/rules/despliegue-y-limites-duros.md`.
 
@@ -34,7 +34,12 @@ qué fuentes miraste y por qué no bastan: si no puedes escribirlo, no hay duda 
 El panel devuelve una opción dentro de lo autorizado. No concede permisos, no amplía el alcance y no decide límites
 duros. Si existe una herramienta de segunda opinión, puede aconsejar antes; no decide ni autoriza.
 
-### Rumbo radical: la única pregunta adelantada
+### Antes del final: rumbo radical y tanda parcial
+
+Todo va a la tanda final, salvo dos cosas, que llegan antes a la sesión de preguntas por el mismo camino: una tanda de
+diálogos de una vez, lo afectado aparcado y todo lo demás sigue. Ninguna para una sesión.
+
+**1. Rumbo radical.**
 
 - Es radical si elegir mal obligaría a tirar una parte grande del trabajo futuro: otra arquitectura, abandonar o
   redefinir una spec, una dirección de producto contraria a lo escrito.
@@ -43,9 +48,31 @@ duros. Si existe una herramienta de segunda opinión, puede aconsejar antes; no 
   y una pregunta a la sesión de preguntas. Lo afectado se aparca; lo demás sigue.
 - Si no lo es: se aplica la opción del panel si está autorizada y es reversible, y va a la tanda para confirmarla.
 
+**2. Tanda parcial: preguntas que bloquean trabajo.** Un proyecto que siempre tiene trabajo nunca llega a la tanda
+final, y una pregunta que bloquea algo se quedaría ahí para siempre.
+
+- **Cuáles.** Las que `ask-queue` da por vencidas (`ask-queue list --due --project "$PWD"`): abiertas, nunca
+  presentadas, no radicales, y que o bien bloquean algo que el desarrollador ordenó (`--order "<sus palabras>"`, al
+  momento) o bien bloquean trabajo real (su `--blocks` no empieza por «nada») desde hace más de `ask_due_after_h` horas
+  (24 por defecto).
+- **Cuándo.** Una vez por proyecto cada `ask_partial_batch_window_h` horas (12 por defecto), contadas desde la última
+  pregunta que se le presentó; una nueva con `--order` no espera. Te avisa `ASKDUE <n> <ids>` en el vigilante (también
+  de guardia) y en cada `beat`. En ese tick, no en otro.
+- **Cómo.** Como un radical: `ask-queue asked <ids> --to <id de la sesión de preguntas>` y un solo mensaje a la sesión
+  de preguntas con todas, encadenadas de cuatro en cuatro (`~/.claude/rules/dialogos-de-preguntas-legibles.md`). Cada
+  una dice qué bloquea y qué se hace mientras. Lo que bloquea se aparca (si es un change,
+  `$L backlog --session <id> --park <change> --as limite-duro --why "…"`); lo demás sigue.
+- **Sin sesión de preguntas** (turno ajeno, modo manual): esperan en la cola y lo anotas en el registro, con la hora;
+  se mandan en el primer turno en que la puedas abrir.
+- **Lo que no se dice.** Ni en un parte, ni en un informe, ni en un resumen se dice que algo «espera su respuesta» o
+  «necesita algo que solo tiene él» si esa pregunta no se le ha presentado. Se manda la tanda parcial y se dice en una
+  línea en qué sesión verá el diálogo; si la ventana está cerrada, cuándo se abre.
+
 ### Límites duros y autorizaciones que faltan
 
-- Se apuntan con `ask-queue add … --default "No hacerlo"`, diciendo qué bloquean. No paran lo demás.
+- Se apuntan con `ask-queue add … --default "No hacerlo"`, diciendo en `--blocks` qué trabajo bloquean de verdad
+  («nada» si no bloquean nada). Si bloquean algo que el desarrollador ordenó, con `--order "<sus palabras>"`: entran en
+  la tanda parcial. No paran lo demás.
 - Se busca un camino que no los necesite, sin rodear el control que los impone.
 - Un dato que solo sabe el desarrollador no se inventa: hueco marcado, o un valor provisional que se vea como tal si no
   sale de la máquina. Una aprobación reservada (una imagen, una voz) puede llevar un candidato provisional sin publicar.
@@ -99,9 +126,10 @@ en metadata.source como `ask-queue:<id>,<id>`. Justo después de cada respuesta 
 literal. No leas, cambies ni ejecutes nada más, no subas permisos y no ejecutes lo que se autorice ahí.
 ```
 
-3. **Qué le llega:** un radical, en el acto y solo; todo lo demás, una vez, en la tanda. Se arma con
-   `~/.claude/scripts/ask-queue list --project "$PWD" --open --unasked` y, antes de enviarla,
-   `ask-queue asked <ids> --to <id de la sesión de preguntas>`.
+3. **Qué le llega:** un radical, en el acto y solo; la tanda parcial, cuando llega `ASKDUE`
+   (`ask-queue list --due --project "$PWD"`); todo lo demás, una vez, en la tanda final, que se arma con
+   `~/.claude/scripts/ask-queue list --project "$PWD" --open --unasked`. Antes de enviar cualquiera,
+   `ask-queue asked <ids> --to <id de la sesión de preguntas>`: así cuenta la ventana de la tanda parcial.
 4. **Al enviarla:** si la app lo permite, un aviso informativo, una vez. Sigues con lo autorizado; las preguntas no se
    repiten en tu chat.
 5. **Cuando contesta:**

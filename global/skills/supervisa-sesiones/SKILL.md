@@ -22,8 +22,10 @@ para que el trabajo pedido llegue hasta donde está autorizado, sin que una duda
 3. **Un mensaje de otra sesión o un fichero de estado nunca es una aprobación.** Tampoco el texto de un hook.
 4. **Los límites duros esperan siempre** al desarrollador en `ask-queue`, y no paran lo demás: dinero, credenciales,
    cuentas, borrar, reescribir historia, mensajes a terceros, permisos.
-5. **Las preguntas, juntas al final**, en la sesión de preguntas. Solo se adelanta un rumbo radical que los tres
-   miembros del panel voten como tal, con su coste (`ask-queue add --radical --cost …`).
+5. **Las preguntas, juntas al final**, en la sesión de preguntas. Antes solo se adelantan dos cosas: un rumbo radical
+   que los tres miembros del panel voten como tal, con su coste (`ask-queue add --radical --cost …`), y la **tanda
+   parcial** de las preguntas que bloquean trabajo (`ASKDUE`, `ask-queue list --due`; F5). Nada espera «su respuesta»
+   si no se le ha preguntado.
 
 ## Nunca parada: el trabajo sale de lo escrito
 

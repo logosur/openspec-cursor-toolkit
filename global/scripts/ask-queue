@@ -13,16 +13,21 @@ Each item records its origin: `session` (the CLI session id, from --session or C
 `answer` records who answered (`answered_by`).
 
   ask-queue add --project DIR --question Q --default D --why W --blocks B [--session ID] [--key K]
-                [--radical] [--cost TEXT]         prints the id
+                [--radical] [--cost TEXT] [--order TEXT]   prints the id
                                                   (an open/asked item with the same key, or the same normalized
                                                   question text, is updated and its id printed instead; a duplicate
                                                   that is not radical becomes radical when --radical is passed)
                                                   --radical: a 3-agent panel voted unanimously that a wrong choice
                                                   throws away a large part of future work (asked right away through
                                                   the supervisor's mailbox); --cost: that cost, quantified
-  ask-queue list [--project DIR] [--open] [--unasked] [--radical] [--json]   --open = open + asked; --unasked =
-                                                  open, or asked more than ASK_QUEUE_REASK_H hours ago (default 12);
-                                                  --radical = only radical items
+                                                  --order: the developer's words when the item blocks something he
+                                                  ordered (blocking-due at once; a blank value exits 2; a later add
+                                                  without it keeps it)
+  ask-queue list [--project DIR] [--open] [--unasked] [--radical] [--due] [--json]   --open = open + asked;
+                                                  --unasked = open, or asked more than ASK_QUEUE_REASK_H hours ago
+                                                  (default 12); --radical = only radical items; --due = blocking-due
+                                                  items (below), with age_h and due_reason, and one line per project
+                                                  saying whether a partial batch may be sent now
   ask-queue asked ID... [--to SESSION]            marks open items as asked (a dialog is about to be shown)
   ask-queue pending ID...                         prints "<id> <status>" (open|asked|answered|closed|missing) per id
   ask-queue answer ID --text T                    marks the item answered (from open or asked)
@@ -33,6 +38,16 @@ outside git uses its realpath. If a supervision lock (SUPERVISOR_LOCK_HOME or ~/
 a checkout that contains the directory, that checkout is the project (a repo nested in a supervised workspace shares the
 workspace's queue). Storage: <ASK_QUEUE_DIR or ~/.claude/state/ask-queue>/<basename>-<sha1[:8]>.jsonl,
 one json object per line, an item appended on add and rewritten (under flock) on answer/close.
+
+Blocking-due items and the partial batch. The supervision presents the queue in one final batch, when no work is left;
+a project that always has work would never get there. An item is blocking-due when it is `open` (never presented),
+not radical, and either carries an `order` (due at once) or its `blocks` names real work (not empty, and its first word
+is not nada/nothing/none/ninguno/ninguna/ningun) and it is at least `ask_due_after_h` hours old (default 24). The
+project's partial batch is allowed when it has due items and one of them carries an order, or no non-radical item of
+the project was ever asked, or the newest such `asked_ts` is at least `ask_partial_batch_window_h` hours old (default
+12). Both thresholds come from the `supervision` config piece; a value that is not a finite number >= 0 keeps the
+default. `supervisor-lock` reads `partial_batch_state` to tell the supervisor (ASKDUE); the batch itself goes through
+the questions session, like a radical question.
 """
 import argparse
 import fcntl
@@ -43,9 +58,21 @@ import os
 import re
 import subprocess
 import sys
+import math
 import time
+import unicodedata
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), 'lib'))
+try:
+    from toolkit_config import load_checked as _load_config
+except ImportError:  # no helper, or one older than load_checked: the code's defaults
+    def _load_config(piece, defaults):
+        return dict(defaults)
+
+DUE_DEFAULTS = {'ask_due_after_h': 24, 'ask_partial_batch_window_h': 12}
+DUE_CONFIG = _load_config('supervision', DUE_DEFAULTS)
 
 
 def queue_dir():
@@ -185,9 +212,11 @@ def norm_text(text):
     return re.sub(r'[\W_]+', ' ', str(text or '').casefold()).strip()
 
 
-def age_hours(stamp):
+def age_hours(stamp, now=None):
+    """Hours since `stamp` (at epoch `now`, default the current time); 10**6 for an unreadable stamp."""
+    current = datetime.now(timezone.utc) if now is None else datetime.fromtimestamp(now, timezone.utc)
     try:
-        return (datetime.now(timezone.utc) - datetime.fromisoformat(stamp)).total_seconds() / 3600
+        return (current - datetime.fromisoformat(stamp)).total_seconds() / 3600
     except (TypeError, ValueError):
         return 10 ** 6
 
@@ -197,6 +226,82 @@ def is_unasked(item):
     if item.get('status') == 'open':
         return True
     return item.get('status') == 'asked' and age_hours(item.get('asked_ts')) > reask_hours()
+
+
+def due_hours(key):
+    """A threshold of the partial batch, in hours: the config value when it is a finite number >= 0, else the default."""
+    value = DUE_CONFIG.get(key)
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
+        return float(value)
+    return float(DUE_DEFAULTS[key])
+
+
+NOTHING_WORDS = ('nada', 'nothing', 'none', 'ninguno', 'ninguna', 'ningun')
+
+
+def fold(text):
+    """Casefolded text without accents."""
+    decomposed = unicodedata.normalize('NFKD', str(text or '').casefold())
+    return ''.join(c for c in decomposed if not unicodedata.combining(c))
+
+
+def blocks_work(blocks):
+    """True when a `blocks` text names real work: not empty, and its first word is not a word for «nothing»."""
+    words = re.findall(r'\w+', fold(blocks))
+    return bool(words) and words[0] not in NOTHING_WORDS
+
+
+def due_reason(item, now=None):
+    """'order' or 'blocks' when `item` is blocking-due, else ''. Due: open (never presented), not radical, and with an
+    order, or blocking real work for at least `ask_due_after_h` hours (an unreadable `ts` counts as old)."""
+    if item.get('status') != 'open' or item.get('radical'):
+        return ''
+    if str(item.get('order') or '').strip():
+        return 'order'
+    if blocks_work(item.get('blocks')) and age_hours(item.get('ts'), now) >= due_hours('ask_due_after_h'):
+        return 'blocks'
+    return ''
+
+
+def due_items(items, now=None):
+    """The blocking-due items of `items`, oldest first, as copies with `age_h` and `due_reason` added."""
+    out = []
+    for item in items:
+        reason = due_reason(item, now)
+        if reason:
+            out.append(dict(item, age_h=round(age_hours(item.get('ts'), now), 1), due_reason=reason))
+    out.sort(key=lambda i: i.get('ts', ''))
+    return out
+
+
+def parse_ts(stamp):
+    try:
+        when = datetime.fromisoformat(stamp)
+    except (TypeError, ValueError):
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+def partial_batch_state(root, now=None):
+    """The partial batch of the project at `root`: {'due': due items, 'allowed': bool, 'last_asked': iso or None,
+    'opens_at': iso or None}. `last_asked` is the newest `asked_ts` of a non-radical item of the project (any status:
+    every batch, partial or final, marks its items asked first); `opens_at` is when the window opens again, set only
+    while it is closed. A due item with an order allows the batch at once."""
+    return batch_state(read_items(queue_path(root)), now)
+
+
+def batch_state(items, now=None):
+    """partial_batch_state for the items of one queue file."""
+    due = due_items(items, now)
+    stamps = [(parse_ts(i.get('asked_ts')), i.get('asked_ts')) for i in items if not i.get('radical')]
+    stamps = [s for s in stamps if s[0] is not None]
+    last = max(stamps, default=None, key=lambda s: s[0])
+    current = datetime.now(timezone.utc) if now is None else datetime.fromtimestamp(now, timezone.utc)
+    opens = last[0] + timedelta(hours=due_hours('ask_partial_batch_window_h')) if last else None
+    window_open = opens is None or current >= opens
+    allowed = bool(due) and (window_open or any(i['due_reason'] == 'order' for i in due))
+    return {'due': due, 'allowed': allowed, 'last_asked': last[1] if last else None,
+            'opens_at': None if window_open else opens.astimezone().isoformat(timespec='seconds')}
 
 
 def origin_from_env(explicit=None):
@@ -223,6 +328,11 @@ def cmd_add(args):
     fields = {'question': args.question, 'default': args.default, 'why': args.why, 'blocks': args.blocks}
     if args.cost:
         fields['cost'] = args.cost
+    if args.order is not None:
+        if not args.order.strip():
+            print("ask-queue: --order needs the developer's words, quoted", file=sys.stderr)
+            return 2
+        fields['order'] = args.order.strip()  # only ever set or replaced: a later add without --order keeps it
     with Locked(path):
         items = read_items(path)
         text = norm_text(args.question)
@@ -269,6 +379,8 @@ def all_queue_files():
 
 def cmd_list(args):
     paths = [queue_path(project_root(args.project))] if args.project else all_queue_files()
+    if args.due:
+        return list_due(paths, args.json)
     items = [i for p in paths for i in read_items(p)]
     if args.radical:
         items = [i for i in items if i.get('radical')]
@@ -291,6 +403,38 @@ def cmd_list(args):
             print(f'    cost: {i["cost"]}')
         if i.get('answer'):
             print(f'    answer: {i["answer"]}')
+    return 0
+
+
+def list_due(paths, as_json):
+    """`list --due`: the blocking-due items of each queue file, then one line per project with due items saying
+    whether its partial batch may be sent now."""
+    states = []
+    for path in paths:
+        items = read_items(path)
+        state = batch_state(items)
+        if state['due']:
+            root = next((i.get('project') for i in items if i.get('project')), None) or path
+            states.append((root, state))
+    due = sorted((i for _, state in states for i in state['due']), key=lambda i: i.get('ts', ''))
+    if as_json:
+        print(json.dumps(due, ensure_ascii=False, indent=2))
+        return 0
+    if not due:
+        print('(no items)')
+    for i in due:
+        mark = '[ORDER] ' if i['due_reason'] == 'order' else ''
+        print(f'{i["id"]}  due:{i["due_reason"]}  {i["age_h"]:g} h  {os.path.basename(i.get("project", ""))}  '
+              f'{mark}{i.get("question")}')
+        print(f'    default: {i.get("default")}  |  why: {i.get("why")}  |  blocks: {i.get("blocks")}')
+        if i.get('order'):
+            print(f'    order: {i["order"]}')
+    for root, state in states:
+        name = os.path.basename(root.rstrip('/'))
+        if state['allowed']:
+            print(f'partial batch {name}: due now ({len(state["due"])})')
+        else:
+            print(f'partial batch {name}: window closed until {state["opens_at"]} (last asked {state["last_asked"]})')
     return 0
 
 
@@ -403,12 +547,17 @@ def build_parser():
     p.add_argument('--radical', action='store_true',
                    help='a unanimous 3-agent panel judged that a wrong choice throws away a large part of future work')
     p.add_argument('--cost', help='quantified cost of choosing wrong, e.g. "2 specs, ~6 h de trabajo"')
+    p.add_argument('--order', help="the developer's words, quoted, when the item blocks something he ordered: "
+                   'blocking-due at once (partial batch)')
     p.set_defaults(func=cmd_add)
     p = sub.add_parser('list')
     p.add_argument('--project')
     p.add_argument('--open', action='store_true', help='unanswered items: open and asked')
     p.add_argument('--unasked', action='store_true', help='open, or asked more than ASK_QUEUE_REASK_H hours ago')
     p.add_argument('--radical', action='store_true', help='only radical items')
+    p.add_argument('--due', action='store_true',
+                   help='blocking-due items (open, not radical, with --order or blocking work for ask_due_after_h '
+                        'hours) and whether each project may get its partial batch now; the other filters do not apply')
     p.add_argument('--json', action='store_true')
     p.set_defaults(func=cmd_list)
     p = sub.add_parser('asked')

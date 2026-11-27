@@ -29,11 +29,11 @@ Requirement references: **QB** = `specs/developer-question-batches/spec.md`. Des
 - [x] 4.2 The touched unit test classes, by id: `test_ask_queue` (whole module) and `test_supervisor_lock` `ConfigTest`, `EntryPointTest`, `DegradationTest`, `ReannounceIntervalTest`, `AllIdleBackoffTest`, `QueuedJobSuppressesAllIdleTest`, `RenameHintTest` (121 tests, OK), then `AskDueTest` and `AskDueTextsTest` (7 tests, OK).
 - [x] 4.3 `python3 -m unittest scripts/test_validate_toolkit.py`, `python3 scripts/validate-toolkit.py`.
 - [x] 4.4 Privacy check on the staged files (`--staged --require-private`: 0 findings) and on the commit message.
-- [ ] 4.5 `privacy-check.py --range origin/main..HEAD` once the commit exists (run after committing; result in the hand-off report).
+- [x] 4.5 `privacy-check.py --range origin/main..HEAD` once the commit exists (run after committing; result in the hand-off report). Evidence (2026-11-27): `python3 scripts/privacy-check.py --range d650685..52998d3 --require-private` reports 0 findings, exit 0.
 
 ## 5. After this branch (not done here)
 
-- [ ] 5.1 CI green: full unit discovery, `supervisor-lock self-test` (inside `SelfTestTest`) and `examples/override-full/try.sh`.
-- [ ] 5.2 Install, then reload the skill in each live supervisor (`reference/cambios.md` entry).
-- [ ] 5.3 The developer's private override copies of the three rules get the same wording (the override is not in this repo).
-- [ ] 5.4 Archive the change once 5.1–5.3 are done.
+- [x] 5.1 CI green: full unit discovery, `supervisor-lock self-test` (inside `SelfTestTest`) and `examples/override-full/try.sh`. Evidence (2026-11-27): CI run 45939481427 (pull request, on `52998d3`) and CI run 45940492744 (main, merge `e8d02f3`) are green, including the full discovery step and `examples/override-full/try.sh`.
+- [x] 5.2 Install, then reload the skill in each live supervisor (`reference/cambios.md` entry). Evidence (2026-11-27): installed and `drift` in sync; `reference/cambios.md` of the supervision skill has the entry dated "2026-11-27 (2)"; every live supervisor reloaded the skill after the install (each lock record shows a read later than the skill's last change); paused projects reload when they resume.
+- [x] 5.3 The developer's private override copies of the three rules get the same wording (the override is not in this repo). Evidence (2026-11-27): the private override copies of the three rules are identical to the installed copies and carry the new wording (`list --due`, `ASKDUE`, `--order`).
+- [x] 5.4 Archive the change once 5.1–5.3 are done. Evidence (2026-11-27): archived with `openspec archive` in the commit that moves the change under `openspec/changes/archive/`.

@@ -86,13 +86,16 @@ mailbox except the last three tasks (the ones that need the installed side). Run
   self-test pass. Check: every `access` step passes (steps of other modules are not this change's). Evidence: exit 0, every step passed
   (install, status, contract probes of every installed piece, the supervisor-lock, test-account and process-kill-gate
   self-tests, drift, second install, uninstall).
-- [ ] 7.4 [prod-verify] Real-store timings on the installed copy, after the install (needs the supervisor's install): repeat the four runs
+- [x] 7.4 [prod-verify] Real-store timings on the installed copy, after the install (needs the supervisor's install): repeat the four runs
   of `design.md` D1 on the real local store, (A) `search --backend local --folder inbox --limit 1`, (B) the consumer's header
   filter with a date window on the inbox, (C) the same without a date window, (D) every folder with a date window, and compare
   the wall time and the result count of each with the figures recorded in the run's state file, noting the machine load. Check:
   the results are the same sets as before, and the times are recorded next to the old ones; no claim of a gain beyond the numbers.
-- [ ] 7.5 [prod-verify] With a live account and the consumer's "seen" list: the consumer's query with `search --json` returns `message_id`
+  Evidence (2026-11-27, installed copy): the four real-store runs were repeated on the installed copy after the install and returned the same result sets as before the change; the local store and the server returned the same normalised message ids for the same query. No speed gain is claimed: the machine load differed between the runs, so the times do not isolate the effect of this change.
+- [x] 7.5 [prod-verify] With a live account and the consumer's "seen" list: the consumer's query with `search --json` returns `message_id`
   for all its results in one session, and results whose `message_id` is already in its seen list need no `show`. Check: the
   consumer's query needs `show` only for the new messages.
-- [ ] 7.6 [prod-verify] Full test discovery (`python3 -m unittest discover -s scripts/toolkit/tests -t .`) is green in CI on the pushed
+  Evidence (2026-11-27, installed copy): with a live account, `search --json` returns `message_id` for every result; the one consumer (a notification reader in another project) now skips already-seen messages using it and prints identical output. Its real "seen" list was not modified: the write path was exercised on a temporary copy.
+- [x] 7.6 [prod-verify] Full test discovery (`python3 -m unittest discover -s scripts/toolkit/tests -t .`) is green in CI on the pushed
   branch, checked before the branch is integrated (as task 7.6 of `external-access`).
+  Evidence (2026-11-27, installed copy): full discovery green in CI run 45967917243 on the pushed branch (merge commit `c7e2d4f`), checked before the branch was integrated.

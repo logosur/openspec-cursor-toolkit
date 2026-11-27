@@ -1049,6 +1049,39 @@ def cmd_self_test(args):
     for sid in ('local_sup', 'local_qs', 'local_nb'):
         os.remove(os.path.join(app_dir, sid + '.json'))
 
+    # 5c. the machine-wide usage role (usage-watch): claim, HELD, takeover, never a project's work (self-contained)
+    urole, urepo = os.path.join(lock_home, 'usage-role.json'), os.path.realpath(os.path.join(tmp, 'urepo'))
+    make_repo(urepo)
+    r = run('usage-role', '--claim', '--session', 'local_ur', '--dir', urepo)
+    check('usage-role: a free role is claimed, with the home project of --dir',
+          r.returncode == 0 and r.stdout.startswith('CLAIMED') and json.load(open(urole)).get('session_id') == 'local_ur'
+          and json.load(open(urole)).get('home_project') == urepo)
+    r = run('usage-role', '--claim', '--session', 'local_ur2')
+    check('usage-role: a claim while another holder is live gets HELD (exit 3) and the record keeps the holder',
+          r.returncode == 3 and r.stdout.startswith('HELD') and json.load(open(urole)).get('session_id') == 'local_ur')
+    stale_role = dict(json.load(open(urole)), heartbeat='2000-01-01T00:00:00+00:00')
+    with open(urole, 'w') as fh:
+        json.dump(stale_role, fh)
+    r = run('usage-role', '--claim', '--session', 'local_ur2')
+    taken = run('usage-role', '--claim', '--session', 'local_ur2', '--from', 'local_ur', '--dir', urepo)
+    check('usage-role: a stale holder gives STALE (exit 4), and --from takes the role over',
+          r.returncode == 4 and r.stdout.startswith('STALE') and taken.returncode == 0
+          and json.load(open(urole)).get('session_id') == 'local_ur2')
+    run('acquire', '--dir', urepo, '--session', 'local_usup')
+    for sid in ('local_ur2', 'local_uw'):
+        fixture(sid, cwd=urepo)
+    uopen = json.loads(run('open', '--dir', urepo, '--json').stdout or '{}')
+    uclosable = run('closable', '--dir', urepo).stdout
+    check('usage-role: the holder is a helper row: `open` and `closable` of its project leave it out',
+          [x['id'] for x in uopen.get('open', [])] == ['local_uw'] and 'local_uw' in uclosable
+          and 'local_ur2' not in uclosable)
+    run('usage-role', '--release', '--session', 'local_ur2')
+    run('release', '--dir', urepo, '--session', 'local_usup', '--force-close', 'self-test cleanup')
+    for sid in ('local_ur2', 'local_uw'):
+        os.remove(os.path.join(app_dir, sid + '.json'))
+    check('usage-role: released by its holder, the role is free in `list --json`',
+          not os.path.exists(urole) and json.loads(run('list', '--json').stdout or '{}').get('usage_role', 'x') is None)
+
     # 6. watchdog
     reset()
     os.makedirs(os.path.join(lock_home, 'locks'), exist_ok=True)

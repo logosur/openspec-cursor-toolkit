@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import traceback
@@ -65,6 +66,40 @@ def backlog_items(checkout):
     return out
 
 
+USAGE_WATCH = '~/.claude/scripts/usage-watch'   # module `usage`, optional: without it there are no USAGE lines
+USAGE_TIMEOUT_S = 8
+
+
+def usage_items(checkout):
+    """Authorised usage-watch findings of the project that its supervisor applies (usage-watch, design D10), as backlog
+    work: [{id, open, first, digest, usage: True}]. Each stays work until `usage-watch apply ID --how TEXT`. Without
+    the script, or when it fails, nothing is added and the failure is logged, never raised."""
+    script = os.path.expanduser(USAGE_WATCH)
+    if not os.path.isfile(script):
+        return []
+    try:
+        r = subprocess.run([sys.executable, script, 'list', '--project', os.path.realpath(checkout or ''), '--state',
+                            'authorized', '--applier', 'project-supervisor', '--json'],
+                           capture_output=True, text=True, timeout=USAGE_TIMEOUT_S)
+        if r.returncode != 0:
+            raise RuntimeError(f'usage-watch list exit {r.returncode}: {r.stderr.strip()[:300]}')
+        found = json.loads(r.stdout or '[]')
+        out = []
+        for f in found if isinstance(found, list) else []:
+            if not isinstance(f, dict) or not isinstance(f.get('id'), str):
+                continue
+            text = ' '.join(str((f.get('proposal') or {}).get('text') or '').split())
+            out.append({'id': f['id'], 'open': 1, 'first': f'{f.get("rule")}: {text}'[:200],
+                        'digest': hashlib.sha1(f['id'].encode()).hexdigest()[:12], 'usage': True})
+        return out
+    except Exception:
+        try:
+            util.hook_log('hook-errors.log', 'backlog usage-watch\n' + traceback.format_exc().rstrip())
+        except Exception:
+            pass
+        return []
+
+
 def backlog_path(key):
     return os.path.join(util.home(), 'backlog', f'{key}.json')
 
@@ -82,11 +117,13 @@ def backlog_state(key, checkout, now=None):
             parked.append(dict(item, **{k: park.get(k) for k in ('kind', 'why', 'until')}))
         else:
             work.append(item)
+    work += usage_items(checkout)   # never parked: applying the finding is what ends it
     return work, parked
 
 
 def backlog_lines(work, parked):
-    lines = [f'WORK {w["id"]} open={w["open"]} «{w["first"]}»' for w in work]
+    lines = [f'USAGE {w["id"]} {w["first"]}' if w.get('usage') else f'WORK {w["id"]} open={w["open"]} «{w["first"]}»'
+             for w in work]
     lines += [f'PARKED {p["id"]} as={p["kind"]} open={p["open"]} '
               f'until={datetime.fromtimestamp(p["until"]).strftime("%d-%m %H:%M")} «{p["why"]}»' for p in parked]
     return lines

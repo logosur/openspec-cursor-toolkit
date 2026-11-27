@@ -2,7 +2,7 @@ Claude Code solo carga este archivo y `.claude/rules/*.md`; `.cursor/rules/*.mdc
 
 # openspec-skills-toolkit
 
-**Qué es:** toolkit **global de Claude Code** (repo público): se instala una vez por máquina en `~/.claude` con `./install.sh install` (por defecto `openspec`, `core`, `devtools`; opcionales `sessions`, `supervision`, `heavy-jobs`, `accounts`, `routines`, `access`) y se personaliza con un **override privado fuera del repo** (`~/.config/claude-toolkit/`). Incluye el catálogo OpenSpec (commands, skills, `docs/openspec/`), que además se sigue **exportando** por proyecto; Cursor (`.cursor/`) es destino secundario. Stack-agnostic: el consumidor aporta su rule de stack (`01-project-stack-quality-gate.mdc` o su `CLAUDE.md`).
+**Qué es:** toolkit **global de Claude Code** (repo público): se instala una vez por máquina en `~/.claude` con `./install.sh install` (por defecto `openspec`, `core`, `devtools`; opcionales `sessions`, `supervision`, `heavy-jobs`, `accounts`, `routines`, `access`, `usage`) y se personaliza con un **override privado fuera del repo** (`~/.config/claude-toolkit/`). Incluye el catálogo OpenSpec (commands, skills, `docs/openspec/`), que además se sigue **exportando** por proyecto; Cursor (`.cursor/`) es destino secundario. Stack-agnostic: el consumidor aporta su rule de stack (`01-project-stack-quality-gate.mdc` o su `CLAUDE.md`).
 
 **Qué NO es:** no es app; no contiene `openspec/` de producto, solo sus propios changes (`openspec/changes/<slug>/`). Se cambia la fuente y se instala o exporta; no se parchea por proyecto ni por máquina (lo personal va al override).
 

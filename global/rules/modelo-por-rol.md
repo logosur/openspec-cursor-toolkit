@@ -12,6 +12,7 @@ proyecto.
 | Panel | Hasta tres agentes de solo lectura que votan | Más capaz | Alto |
 | Mensajero | Sesión de preguntas: abre los diálogos y nada más | Más barato | Bajo |
 | Cierre | Comprueba en disco lo terminado; no escribe código | Más barato | Medio o alto |
+| Consumo | Una sesión por máquina: confirma hallazgos de consumo, pregunta y aplica solo lo autorizado | Más barato | Medio |
 
 - Quien lanza una sesión o un subagente le da el modelo y el esfuerzo de su rol, y después lo comprueba.
 - Una pieza es compleja si toca arquitectura, seguridad, concurrencia o varios módulos, si es un fallo difícil o tras

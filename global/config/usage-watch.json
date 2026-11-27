@@ -1,0 +1,116 @@
+{
+  "projects_dir": "~/.claude/projects",
+  "app_sessions_dir": "~/.config/Claude/claude-code-sessions",
+  "supervisor_home": "~/.claude/supervisor",
+  "state_dir": "~/.claude/state/usage-watch",
+  "page_path": "~/.claude/state/usage-watch/usage.html",
+  "page_refresh_s": 300,
+  "retention_days": 15,
+  "prices": {
+    ".": [
+      1,
+      1.25,
+      2,
+      0.1,
+      5
+    ]
+  },
+  "unit_label": "units",
+  "expensive_model_pattern": "opus|fable",
+  "escalation_mark_pattern": "\\[opus: [^\\]]+\\]",
+  "panel_pattern": "^Panel",
+  "cheap_roles": [
+    "questions",
+    "closer",
+    "usage",
+    "routine"
+  ],
+  "cheap_model": "sonnet",
+  "origin_text_prefixes": {
+    "<task-notification>": "task"
+  },
+  "loop_same_text_min": 5,
+  "loop_same_call_min": 6,
+  "loop_window_min": 30,
+  "empty_wakes_min_per_day": 24,
+  "empty_wake_max_calls": 1,
+  "empty_wake_max_output": 300,
+  "role_model_min_share": 0.5,
+  "expensive_subagents_min": 2,
+  "advisor_max_per_day": 4,
+  "large_context_calls": 20,
+  "large_context_tokens": 150000,
+  "idle_rewrite_gap_s": 3600,
+  "idle_rewrite_min_context": 50000,
+  "idle_rewrite_fraction": 0.5,
+  "idle_rewrite_min_count": 3,
+  "pace_factor": 3,
+  "pace_min_units": 20,
+  "pace_baseline_days": 7,
+  "pace_sustainable_window_h": 6,
+  "pace_sustainable_share": 1.5,
+  "automation_min_share": 0.6,
+  "measure_window_h": 24,
+  "weekly_budget_units": 0,
+  "week_start_weekday": 0,
+  "week_start_hour": 0,
+  "pace_amber_ratio": 0.8,
+  "timer_interval_min": 15,
+  "order_text": "",
+  "no_default": "Leave it as it is",
+  "authorize_answers": [
+    "apply"
+  ],
+  "authorize_hint": "Answer \"apply\" to authorise this change; any other answer leaves it as it is.",
+  "ticket_ttl_s": 900,
+  "proposals": {
+    "loop": {
+      "proposal": "Look at why this session repeats itself and stop the loop.",
+      "undo": "Nothing to undo: the session is only looked at."
+    },
+    "empty-wakes": {
+      "proposal": "Make the watcher of this session wake it less often, or only when there is work.",
+      "undo": "Restore the previous wake-up rule."
+    },
+    "role-model": {
+      "proposal": "Run this session on the cheaper model its role calls for.",
+      "undo": "Set the session back to its previous model."
+    },
+    "expensive-subagents": {
+      "proposal": "Turn on agent-model-gate, so subagents need an explicit cheaper model or a reason.",
+      "undo": "Set agent-model-gate enabled back to false."
+    },
+    "advisor-excess": {
+      "proposal": "Turn on agent-model-gate, which caps advisor calls per day.",
+      "undo": "Set agent-model-gate enabled back to false."
+    },
+    "large-context": {
+      "proposal": "Compact or restart this session: it keeps a large context for many calls.",
+      "undo": "Nothing to undo."
+    },
+    "idle-rewrite": {
+      "proposal": "Keep this session busy or let it end: each wake-up after a long pause rewrites its cache.",
+      "undo": "Restore the previous schedule."
+    },
+    "pace": {
+      "proposal": "Look at why usage here is far above its own normal pace.",
+      "undo": "Nothing to undo: the scope is only looked at."
+    },
+    "expensive-automation": {
+      "proposal": "Run this session, which mostly answers automatic notices, on the cheaper model.",
+      "undo": "Set the session back to its previous model."
+    }
+  },
+  "labels": {
+    "title": "Usage watch",
+    "by_session": "By session",
+    "by_project": "By project",
+    "by_model": "By model",
+    "by_origin": "By origin",
+    "findings": "Findings",
+    "units": "units",
+    "none": "Nothing to show.",
+    "unpriced": "Models with no price",
+    "change": "Change made if you authorise it"
+  }
+}

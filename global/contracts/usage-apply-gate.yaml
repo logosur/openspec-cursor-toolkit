@@ -1,0 +1,29 @@
+piece: usage-apply-gate
+dest: hooks/usage-apply-gate
+config: usage-watch
+kind: hook
+event: PreToolUse
+# Safe probes only: with no usage role record every call passes and nothing is written. What the gate denies for the
+# role holder is pinned by scripts/toolkit/tests/pieces/test_usage_watch.py (TicketGateTest).
+probes:
+  - name: an unrelated tool passes silently
+    stdin: {tool_name: Bash, session_id: probe, tool_input: {command: ls}}
+    exit: [0]
+    stdout: empty
+  - name: a session that is not the usage role passes the set-model tool
+    stdin: {tool_name: mcp__ccd_session_mgmt__set_session_model, session_id: probe, tool_input: {session_id: local_x, model: m}}
+    exit: [0]
+    stdout: empty
+  - name: a session that is not the usage role passes the set-effort tool
+    stdin: {tool_name: mcp__ccd_session_mgmt__set_session_effort, session_id: probe, tool_input: {session_id: local_x, effort: low}}
+    exit: [0]
+    stdout: empty
+  - name: unparseable stdin fails open
+    stdin_raw: "{not json"
+    exit: [0]
+    stdout: empty
+  - name: a corrupt config never breaks the hook
+    stdin: {tool_name: mcp__ccd_session_mgmt__set_session_model, session_id: probe, tool_input: {session_id: local_x, model: m}}
+    corrupt_config: true
+    exit: [0]
+    stdout: empty

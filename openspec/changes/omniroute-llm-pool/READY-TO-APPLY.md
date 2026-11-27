@@ -1,10 +1,10 @@
-# READY TO APPLY — omniroute-llm-pool (tasks 6.4 and 6.5 only)
+# READY TO APPLY — omniroute-llm-pool (task 6.5 only)
 
-> **Date:** 2026-11-27, after the apply of stage 0
+> **Date:** 2026-11-27, after the apply of stage 0 and of task 6.4
 
 ## Verdict
 
-**Stage 0 is applied and its go/no-go is open: row 1 of design D15, too little data. READY TO APPLY — tasks 6.4 and 6.5 only.** Proposal, design (D1–D18), 7 specs (102 requirements / 183 scenarios) and tasks (61: 4 done, 57 open); `openspec validate --strict` passes; 0 gaps pending. See `VERIFY.md` for the gates and the evidence map, `GAPS.md` for what the review and the apply changed, and `evidence/` for the two reports.
+**Stage 0 is applied and its go/no-go is open: row 1 of design D15, too little data. Task 6.4 is applied. READY TO APPLY — task 6.5 only, not before 2026-11-29.** Proposal, design (D1–D18), 7 specs (102 requirements / 183 scenarios) and tasks (61: 5 done, 56 open); `openspec validate --strict` passes; 0 gaps pending. See `VERIFY.md` for the gates and the evidence map, `GAPS.md` for what the review and the apply changed, and `evidence/` for the two reports.
 
 ## What stage 0 found
 
@@ -15,8 +15,8 @@
 
 ## Scope of the next apply
 
-1. Task 6.4: the watcher appends the events of each wake to a file beside the supervisor's lock, and the simulator reads it.
-2. Task 6.5, two to three days later: the simulator again, on a window after the back-off with at least 100 classified soft wakes; the row is recorded in `design.md`. **The apply stops there and reports.**
+1. Task 6.4 is done: the watcher appends the events of each wake to a file beside the supervisor's lock, and the simulator reads it.
+2. Task 6.5, from 2026-11-29 (two to three days after the journal was installed): the simulator again, on a window after the back-off with at least 100 classified soft wakes; the row is recorded in `design.md`. **The apply stops there and reports.**
 3. In parallel, once the developer has installed the gateway and connected a provider (task 1.2): the spike, tasks 1.1 and 1.3 to 1.6.
 
 ## Not in this apply
@@ -37,4 +37,4 @@ D1 optional module, every other piece through a provider · D2 gateway never wir
 
 ## Next step
 
-`/aplica-tarea omniroute-llm-pool`, in a new message, for tasks 6.4 and 6.5.
+`/aplica-tarea omniroute-llm-pool`, in a new message, for task 6.5, from 2026-11-29.

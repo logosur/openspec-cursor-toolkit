@@ -10,7 +10,7 @@
 | Artefacts present | `ls openspec/changes/omniroute-llm-pool/` | `proposal.md`, `design.md`, `tasks.md`, seven `specs/*/spec.md`, `GAPS.md`, `VERIFY.md`, `READY-TO-APPLY.md`, and `evidence/` (`simulate.py`, `test_simulate.py`, `cache_weights.py`, `what-if.md`, `cache-weights.md`) |
 | `openspec validate omniroute-llm-pool --strict` | OpenSpec CLI 2.1.1 | `Change 'omniroute-llm-pool' is valid` |
 | Spec inventory | `grep -c '^### Requirement'` / `'^#### Scenario'` | 102 requirements / 183 scenarios in 7 specs; every requirement has at least one scenario |
-| Tasks | `grep -c '^- \[ \]' tasks.md` | 61: 4 done (1.7, 6.1, 6.2, 6.3), 57 open; 3 are the developer's (1.2, 7.1, 7.3) |
+| Tasks | `grep -c '^- \[ \]' tasks.md` | 61: 5 done (1.7, 6.1, 6.2, 6.3, 6.4), 56 open; 3 are the developer's (1.2, 7.1, 7.3) |
 | Gap review | `GAPS.md` | 101 rows: 86 hydrated, 15 non-blocking, **0 pending**. Three rounds of review, the third checked mechanically only; then G-83 and G-84 hydrated after stage 0 and four rows added by the apply (section G), read by no fresh reviewer |
 | Stage 0: the simulator | `python3 -m unittest evidence/test_simulate.py` | 24 tests pass, on seeded transcripts with known answers |
 | Stage 0: the runs | `evidence/what-if.md`, `evidence/cache-weights.md` | two pinned windows replayed; weights fitted on two weeks; decision recorded in `design.md` D15: **row 1, open** |
@@ -157,10 +157,11 @@ Tasks with no requirement of their own, on purpose: the spike (1.1, 1.3–1.6, 8
 | Soft wakes were 24 % of three supervisors' flow, at 3.6 an hour | FACT, small sample (11 wakes, 3 hours), taken before the watcher's back-off | Same measurement |
 | Over seven days and nine supervisors, classified soft wakes were 7.5 % of the flow in raw tokens and 5.7 % at the central weights; since the back-off, 12.0 % and 6.8 % over 36 supervisor-hours | FACT, one machine; one wake in three of the seven days unclassified | `evidence/what-if.md` |
 | OmniRoute's features as listed in the design's Context table | FACT about its README, release line 3.8 | Read, not run: no gateway was installed for this change |
-| The watcher exits on the first batch and compares against one snapshot | FACT | `global/scripts/lib/supervisor/watch.py:284`, `:346-362`, `:398-400` |
-| Repeated notices consume their state when generated | FACT | `watch.py:132-133`; `global/scripts/lib/supervisor/cloud.py:328` |
+| The watcher exits on the first batch and compares against one snapshot | FACT | `global/scripts/lib/supervisor/watch.py:310`, `:372-388`, `:424-426` |
+| Repeated notices consume their state when generated | FACT | `watch.py:158-159`; `global/scripts/lib/supervisor/cloud.py:328` |
 | Config merge is shallow; the installer writes only under the Claude directory | FACT | `scripts/toolkit/config.py:23`; `scripts/toolkit/modules.py:26` |
 | The developer's presence can be checked by a command | FACT | `global/scripts/heavy-job:503-546` does it today |
+| The watcher keeps the events of each wake, and the simulator reads them | FACT | `global/scripts/lib/supervisor/wakes.py`; `watch.py:38-74` (`emit`, `journal_wake`, `cmd_wait`); `WakeJournalTest` in `scripts/toolkit/tests/pieces/test_supervisor_lock.py` (10 tests); `evidence/test_simulate.py` (44 tests, 20 of them for the journal and the wake that started no turn) |
 | The hydrated sleep mechanism (journal, refreshed snapshot, five bounds) can be built into the watcher as specified | INFERENCE | No code yet; task 5.3 proves it with tests |
 | A fixed rule with no model sleeps the soft wakes safely | Not on these seven days: 22 needed wakes in 202 classified, and no fewer than 7.4 per 100 whatever the unclassified hide. The decision stays open for lack of data (row 1) | `evidence/what-if.md`; task 6.5 |
 | If it does not, a pool model reading the same fields does | UNKNOWN; tested in `shadow` on live wakes | Task 6.6, after 6.5 and 1.2 |
@@ -178,7 +179,9 @@ Tasks with no requirement of their own, on purpose: the spike (1.1, 1.3–1.6, 8
 - **Stage 0 did not decide.** Its first record is row 1, "too little data": a restart erased the watcher's temporary output for one wake in three of the seven days, and the hours since the back-off hold 23 soft wakes where 100 are asked for. What it does show is in `design.md` D15.
 - **Two definitions were set after seeing the data.** A stopped watcher is a hard wake (G-99): the report gives the row with both readings, and it is the same. The central weights decide the row (G-101): that puts the fixed rule's saving above the 5 % line (5.6 %), while a cache-read weight of 0, which the data does not rule out, puts it below (3.5 %). It does not matter while row 1 applies; it will at task 6.5, and it is the developer's to confirm.
 - **The watcher keeping its events (6.4) may not be enough for 6.5.** Wakes that started no turn stay unclassified, and in the seven days they were about 13 % of the soft-or-unknown wakes on their own.
-- The simulator counts a wake that started no turn, when its events are known, as soft and not needed. That lowers the needed rate by an amount that was not measured; task 6.4 corrects it.
+- Until task 6.4 the simulator counted a wake that started no turn, when its events were known, as soft and not needed. It now leaves it unclassified ("no turn"). The figures of `evidence/what-if.md` were taken before that correction and were not run again: task 6.5 retakes them.
+- **The journal starts on the day it is installed.** Wakes before that day are read as before; a watcher that is stopped writes no line (its wake is hard already); and a wake is matched to its line only when exactly one line of that owner fits between the arming and the notice, so a supervisor that keeps two watchers armed at once stays unclassified for those wakes.
+- **Task 6.4 was checked with seeded files, in tests.** How many of the wakes of a whole window the journal makes classifiable is not known until 6.5.
 - **The saving is on the line.** At the central weights the fixed rule saves at most 5.6 % of the supervisors' flow, and under 5 % if cache reads weigh nothing. A model can only save less than the rule.
 - **The hydration of G-83, G-84 and of the four gaps the apply found was read by no fresh reviewer.**
 - The weighted figures of the report were computed from the class totals of the raw runs, not by running the simulator again with `--weights`; a weighted cost is a sum of class totals, so the two are equal.
@@ -192,10 +195,10 @@ Tasks with no requirement of their own, on purpose: the spike (1.1, 1.3–1.6, 8
 
 ## Verification status
 
-**Stage 0 applied; the go/no-go is open (row 1). READY TO APPLY — tasks 6.4 and 6.5 only.** 0 gaps pending.
+**Stage 0 applied; the go/no-go is open (row 1). Task 6.4 applied on 2026-11-27. READY TO APPLY — task 6.5 only, not before 2026-11-29.** 0 gaps pending.
 
-- **Done:** tasks 1.7, 6.1, 6.2 and 6.3, with their evidence under `evidence/`.
-- **Ready now:** task 6.4 (the watcher keeps the events of each wake) and, two to three days after it, task 6.5 (the simulator again, on a window after the back-off). They need no gateway and no module.
+- **Done:** tasks 1.7, 6.1, 6.2 and 6.3, with their evidence under `evidence/`, and task 6.4 (the watcher keeps the events of each wake; the simulator reads them and leaves a wake that started no turn unclassified).
+- **Ready from 2026-11-29:** task 6.5 (the simulator again, on a window that starts after the journal was installed on 2026-11-27, once it holds at least 100 classified soft wakes). It needs no gateway and no module.
 - **Ready as soon as the developer has done 1.2** (install the gateway, connect a provider, place the key): the rest of the spike, 1.1 and 1.3 to 1.6.
 - **BLOCKED BY UNKNOWN until 6.5 records a row:** tasks 5.2 to 5.6, 6.6 and group 7 (the shadow test, the watcher's triage and its rollout). If 6.5 records "a model must be tested", task 6.6 also waits for the developer's install (1.2).
 - **BLOCKED BY UNKNOWN until 1.3 and 1.6 are recorded:** the parts of groups 2 to 4 that talk to the gateway beyond its OpenAI-compatible endpoint (quota, usage, combos, outward features). The rest of groups 2 to 4 can be built against the stub, but it is only worth building if the decision is "go" or the developer wants the pool for digests alone.

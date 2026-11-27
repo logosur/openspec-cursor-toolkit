@@ -8,11 +8,13 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 
 from scripts.toolkit.paths import REPO_ROOT
 
@@ -954,6 +956,141 @@ print('ASKDUE' in lock._module('watch').GUARD_EVENTS)
         self.assertEqual(out.strip(), 'True')
         source = (REPO_ROOT / 'global/scripts/lib/supervisor/closable.py').read_text(encoding='utf-8')
         self.assertIn('--blocks "nada: solo su archivado"', source)
+
+
+class WakeJournalTest(Base):
+    """wakes.py and `wait --owner`: every run of the watcher leaves one record of its wake beside the lock."""
+    DAY = 86400
+
+    def setUp(self):
+        super().setUp()
+        self.env.update(SUPERVISOR_NUDGE='', SUPERVISOR_NOTIFY='',
+                        SUPERVISOR_APP_SESSIONS_GLOB=os.path.join(self.mkdir('app'), '*', '*', 'local_*.json'))
+        self.sup_home = os.path.join(self.home, '.claude', 'supervisor')
+
+    def wakes_py(self, body):
+        """Run `body` with `wakes` loaded; its stdout."""
+        return self.python(LOADER + "wakes = load('supervisor_lock')._module('wakes')\n" + body)
+
+    def journal(self, key):
+        return os.path.join(self.sup_home, 'wakes', key + '.jsonl')
+
+    def locked_repo(self):
+        repo = self.repo('proj')
+        r = self.run_cli('acquire', '--dir', repo, '--session', 'local_sup')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        key = json.loads(self.run_cli('project', '--dir', repo, '--json').stdout)['key']
+        return repo, key
+
+    def wait(self, repo, *extra):
+        return self.run_cli('wait', '--dir', repo, *extra, '--interval', '0.2', '--timeout', '1',
+                            '--all-idle-after', '0')
+
+    def raw(self, key):
+        with open(self.journal(key), 'rb') as fh:
+            return fh.read()
+
+    def lines(self, key):
+        with open(self.journal(key), encoding='utf-8') as fh:
+            return fh.read().splitlines()
+
+    def test_a_record_reads_back_with_owner_utc_times_and_the_lines_in_order(self):
+        got = json.loads(self.wakes_py('''
+import json
+wakes.record('proj', 'local_a', 1795766400.123, 1795766460.5, ['NEW local_b', 'TURN local_b 1->2'])
+print(json.dumps(wakes.read('proj')))
+'''))
+        self.assertEqual(got, [{'owner': 'local_a', 'started': '2026-11-27T08:00:00.123Z',
+                                'ended': '2026-11-27T08:01:00.500Z', 'events': ['NEW local_b', 'TURN local_b 1->2']}])
+        self.assertEqual(self.wakes_py("print(wakes.read('other'))").strip(), '[]')
+
+    def test_records_older_than_thirty_days_are_dropped_on_the_next_record(self):
+        now = 1795766400.0
+        old, young = now - 31 * self.DAY, now - 29 * self.DAY
+        out = self.wakes_py(f'''
+import json
+wakes.record('proj', 'local_a', {old} - 5, {old}, ['OLD'], now={old})
+wakes.record('proj', 'local_a', {young} - 5, {young}, ['YOUNG'], now={young})
+wakes.record('proj', 'local_a', {now} - 5, {now}, ['NEW'], now={now})
+print(json.dumps([r['events'] for r in wakes.read('proj')]))
+''')
+        self.assertEqual(json.loads(out), [['YOUNG'], ['NEW']])
+
+    def test_an_append_with_nothing_old_keeps_the_earlier_lines_byte_for_byte(self):
+        now = 1795766400.0
+        self.wakes_py(f"wakes.record('proj', 'local_a', {now} - 9, {now} - 8, ['ONE'], now={now})")
+        before = self.lines('proj')
+        # an unparseable line that is not first survives an append: only a rewrite would drop it
+        with open(self.journal('proj'), 'a', encoding='utf-8') as fh:
+            fh.write('not json\n')
+        raw = self.raw('proj')
+        self.wakes_py(f"wakes.record('proj', 'local_a', {now} - 2, {now} - 1, ['TWO'], now={now})")
+        after = self.raw('proj')
+        self.assertTrue(after.startswith(raw))
+        self.assertEqual(self.lines('proj')[0], before[0])
+        self.assertEqual(len(self.lines('proj')), 3)
+
+    def test_a_rewrite_drops_unparseable_lines_and_keeps_the_mode(self):
+        now = 1795766400.0
+        os.makedirs(os.path.dirname(self.journal('proj')), exist_ok=True)
+        with open(self.journal('proj'), 'w', encoding='utf-8') as fh:
+            fh.write('garbage\n')
+        self.wakes_py(f"wakes.record('proj', 'local_a', {now} - 2, {now} - 1, ['TWO'], now={now})")
+        self.assertEqual(len(self.lines('proj')), 1)
+        self.assertEqual(os.stat(self.journal('proj')).st_mode & 0o777, 0o600)
+
+    def test_the_journal_file_is_private(self):
+        self.wakes_py("wakes.record('proj', 'local_a', 1.0, 2.0, ['X'], now=2.0)")
+        self.assertEqual(os.stat(self.journal('proj')).st_mode & 0o777, 0o600)
+        os.chmod(self.journal('proj'), 0o644)
+        self.wakes_py("wakes.record('proj', 'local_a', 3.0, 4.0, ['Y'], now=4.0)")
+        self.assertEqual(os.stat(self.journal('proj')).st_mode & 0o777, 0o600)
+
+    def test_wait_journals_what_it_printed_and_prints_the_same_as_before(self):
+        repo, key = self.locked_repo()
+        r = self.wait(repo, '--owner', 'local_sup')
+        self.assertEqual((r.returncode, r.stdout), (0, 'TIMEOUT 1s\n'), r.stderr)
+        recs = [json.loads(l) for l in self.lines(key)]
+        self.assertEqual(len(recs), 1)
+        rec = recs[0]
+        self.assertEqual((rec['owner'], rec['events']), ('local_sup', ['TIMEOUT 1s']))
+        stamps = [datetime.strptime(rec[k], '%Y-%m-%dT%H:%M:%S.%fZ') for k in ('started', 'ended')]
+        self.assertLessEqual(*stamps)
+
+    def test_a_second_wait_appends_a_second_record(self):
+        repo, key = self.locked_repo()
+        for _ in range(2):
+            self.assertEqual(self.wait(repo, '--owner', 'local_sup').returncode, 0)
+        self.assertEqual(len(self.lines(key)), 2)
+
+    def test_wait_without_an_owner_writes_no_journal(self):
+        repo, key = self.locked_repo()
+        r = self.wait(repo)
+        self.assertEqual((r.returncode, r.stdout), (0, 'TIMEOUT 1s\n'), r.stderr)
+        self.assertFalse(os.path.exists(self.journal(key)))
+
+    def test_the_journal_changes_neither_list_nor_status_and_survives_release(self):
+        repo, key = self.locked_repo()
+        def shown():   # the heartbeat age ticks with the clock: masked
+            return [re.sub(r'heartbeat_age_s=\d+', 'heartbeat_age_s=N', self.run_cli(*cmd).stdout)
+                    for cmd in (('list',), ('status', '--dir', repo))]
+        before = shown()
+        self.assertEqual(self.wait(repo, '--owner', 'local_sup').returncode, 0)
+        self.assertTrue(os.path.exists(self.journal(key)))
+        after = shown()
+        self.assertEqual(after, before)
+        content = self.raw(key)
+        r = self.run_cli('release', '--dir', repo, '--session', 'local_sup')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.raw(key), content)
+
+    def test_a_journal_failure_does_not_change_how_wait_ends(self):
+        repo, key = self.locked_repo()
+        os.makedirs(self.journal(key))   # the journal path cannot be opened as a file
+        r = self.wait(repo, '--owner', 'local_sup')
+        self.assertEqual((r.returncode, r.stdout), (0, 'TIMEOUT 1s\n'), r.stderr)
+        with open(os.path.join(self.sup_home, 'wait-errors.log'), encoding='utf-8') as fh:
+            self.assertIn('wakes.py', fh.read())
 
 
 class DegradationTest(Base):

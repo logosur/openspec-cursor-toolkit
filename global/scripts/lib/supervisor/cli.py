@@ -4,7 +4,7 @@ import sys
 
 from . import (
     backlog, census, closable, closing, cloud, hook as hook_mod,
-    lint, lock as lock_mod, projects, revival, settings, watch,
+    lint, lock as lock_mod, projects, revival, settings, titles, watch,
     watchdog, workmode,
 )
 
@@ -30,7 +30,7 @@ def build_parser():
     add('registry-dir', projects.cmd_registry_dir)
     for name, func in (('acquire', lock_mod.cmd_acquire), ('reclaim', lock_mod.cmd_reclaim)):
         p = add(name, func, session=True)
-        p.add_argument('--title')
+        p.add_argument('--title', help='defaults to the supervisor title of the project (config `supervisor_session_title`)')
         p.add_argument('--registry')
         if name == 'reclaim':
             p.add_argument('--from', dest='from_id', required=True)
@@ -45,6 +45,7 @@ def build_parser():
     p.add_argument('--skill-seen', action='store_true', help='record that the current skill file has been read; refused (exit 8) unless the session\'s own '
                    'transcript shows a load of the skill (Skill tool or slash command) after the newest update')
     p.add_argument('--closer', metavar='LOCAL_ID', help='local id of the closing session (verifies, closes and archives)')
+    p.add_argument('--title', help="change the lock's title (the owner's); refused when it looks like supervisor-lock output")
     p.add_argument('--no-work', metavar='WHY', help="on guard: a message of the developer's neither asks for nor implies work, and why")
     p = add('release', lock_mod.cmd_release, session=True)
     p.add_argument('--verdict')
@@ -118,6 +119,10 @@ def build_parser():
                    help='wake a live, idle supervisor (running, not on guard) silent this long, when the account has usage')
     p.add_argument('--stale-after', type=float, default=2700)
     p.add_argument('--realert-after', type=float, default=0)
+    p = add('titles', titles.cmd_titles, directory=False)
+    p.add_argument('--fix', action='store_true', help="rewrite the locks' titles and rename the Remote Control copies "
+                   '(the local sessions are renamed by the sessions themselves, with the app tool)')
+    p.add_argument('--session', metavar='LOCAL_ID', help='only the project of this supervisor, questions or closing session')
     p = add('revive', revival.cmd_revive, json_out=True, directory=False)
     p.add_argument('--plan', action='store_true', help='(default) list the dead supervisors to wake now')
     p.add_argument('--sent', metavar='LOCAL_ID', help='record the delivery of a revive message')

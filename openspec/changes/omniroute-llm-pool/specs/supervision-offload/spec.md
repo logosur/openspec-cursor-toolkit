@@ -2,99 +2,249 @@
 
 ## Purpose
 
-Defines what a supervisor and its child sessions hand to the pool, and the rules that keep a wrong pool answer from stalling or damaging work.
+Defines what a supervisor and its child sessions hand to the pool, the evidence needed before the watcher's triage is built at all, and the rules that keep a wrong pool answer from stalling or damaging work.
 
 ## ADDED Requirements
 
 ### Requirement: The pool is optional for supervision
-Supervision SHALL work unchanged when the `llm-pool` module is not installed, the dial is 0, the project is not enabled or the gateway is unreachable. Every offload point SHALL have the behaviour it had before as its fallback.
+Supervision SHALL work unchanged when the `llm-pool` module is not installed, the pool is stopped or at level 0, the project is not enabled or is paused, or the gateway is unreachable. Every offload point SHALL have the behaviour it had before as its fallback. The supervision manifest SHALL declare the pool's command as a piece another module provides.
 
 #### Scenario: Module not installed
 - **WHEN** the supervision module runs on a machine without `llm-pool`
-- **THEN** the watcher wakes the supervisor for every event exactly as before and prints nothing about the pool
+- **THEN** the watcher wakes the supervisor for every event exactly as before, prints nothing about the pool, and the supervision self-test passes unchanged
 
-### Requirement: Hard events are never triaged
-The watcher SHALL send to triage only soft events: a timeout with no event, a session going from idle to busy, and the repeated notices of the wake-economy rules. Every other event SHALL wake the supervisor at once and SHALL NOT be sent to the pool. The list of soft events SHALL be configuration that can only be narrowed in an override.
+### Requirement: A simulator replays recorded wakes before any triage is built
+Before any triage code is written, a simulator SHALL read recorded supervisor wakes from the transcripts and classify each soft wake. The supervisor was needed when, between the wake and its next arming of the watcher, it messaged, started, stopped or archived a session, ran a git command that writes, deployed, called a panel or queued a question. A wake whose end cannot be found SHALL be unclassified and left out of every rate.
+
+#### Scenario: A known transcript
+- **WHEN** the simulator runs on a seeded transcript whose soft, hard, needed, routine and unclassified wakes are known
+- **THEN** it reports the known counts of each
+
+#### Scenario: A tick that only checks
+- **WHEN** after a soft wake the supervisor takes its census, reads two files and re-arms the watcher
+- **THEN** that wake counts as not needed
+
+### Requirement: The simulator compares today with a fixed rule
+A recorded wake SHALL count as soft when the watcher's output was only idle-to-busy lines or only `TIMEOUT`. The simulator SHALL report, for today's behaviour and for a fixed rule with no model that sleeps every soft wake: the wakes, the main-model tokens raw and weighted, and the needed wakes the rule would have slept. The rule's figures SHALL be labelled upper bounds, because the deadline, the report time and what waited for the supervisor are not in the history.
+
+#### Scenario: The fixed rule on a known transcript
+- **WHEN** the simulator runs on the seeded transcript
+- **THEN** it reports the known saving of the fixed rule and the known list of needed wakes it would have slept, both labelled as upper bounds
+
+#### Scenario: No weights measured
+- **WHEN** the cache weights of the usage limit could not be measured
+- **THEN** the report gives raw tokens only and says so in its first lines
+
+### Requirement: Nothing is built for a small saving, and a safe fixed rule wins
+The decision SHALL be the first of these that applies to the simulator's report. With fewer than 100 classified soft wakes, or more than one soft wake in ten unclassified, it SHALL stay open. With the fixed rule's saving under 5 % of the supervisors' flow, nothing SHALL be built for triage. With at most one classified soft wake in 100 needed, the fixed rule SHALL be proposed as a change of its own and `wake-triage` SHALL NOT be built.
+
+#### Scenario: Too few wakes
+- **WHEN** the report holds 40 classified soft wakes
+- **THEN** the decision stays open, more days are recorded and nothing is built
+
+#### Scenario: The saving is too small either way
+- **WHEN** the fixed rule would save 2 % of the supervisors' weighted flow
+- **THEN** the decision is "no-go" and nothing is built for triage
+
+#### Scenario: Safe and too small
+- **WHEN** the fixed rule would save 2 % and none of 300 classified soft wakes was needed
+- **THEN** the decision is "no-go", nothing is built for triage and the rule is not proposed
+
+#### Scenario: The fixed rule is safe
+- **WHEN** the fixed rule would save 12 % and 1 of 300 classified soft wakes was needed
+- **THEN** the decision is "no-go for wake-triage", the triage tasks are closed as not built, and the fixed rule is proposed separately
+
+### Requirement: Triage is built only if a model is safer than the fixed rule
+When the saving is worth it and the fixed rule is unsafe, the decision SHALL stay open and nothing SHALL be built for triage until a candidate member is shown to sleep at most one needed wake per 100 classified soft wakes while keeping at least half of the fixed rule's saving and no less than 3 % of the supervisors' flow. Shown otherwise, neither SHALL be built. The developer MAY set other thresholds in writing after reading the report.
+
+#### Scenario: The fixed rule is unsafe and a model is not better
+- **WHEN** 9 of 100 classified soft wakes were needed and the tested member sleeps 6 of them
+- **THEN** the decision is "no-go": neither is built
+
+#### Scenario: A model is safe and keeps the saving
+- **WHEN** 9 of 100 classified soft wakes were needed, and the tested member sleeps 1 of them and keeps 60 % of the saving, which is 4 % of the flow
+- **THEN** the decision is "go" and the triage tasks are opened
+
+#### Scenario: No member has been tested
+- **WHEN** the fixed rule is unsafe and no member has been tested
+- **THEN** the decision stays open, nothing is built, and the report says what is missing
+
+### Requirement: Only two shapes of event are soft
+The watcher SHALL send to triage only: (a) a batch of events made only of lines that say a session went from idle to busy; (b) a timeout with no event, and only when the watcher was armed with a wake-by time. A batch that contains any other line SHALL wake the supervisor at once and nothing SHALL be sent to the pool. An event kind the code does not list as soft SHALL be hard.
 
 #### Scenario: A session crashes while the pool is in auto
 - **WHEN** the watcher sees a crash event
 - **THEN** the supervisor is woken at once and no pool request is made
 
 #### Scenario: A turn ends
-- **WHEN** a session of the project goes from busy to idle
+- **WHEN** a session of the project goes from busy to idle, or its count of finished turns changes
 - **THEN** the supervisor is woken at once, because a finished turn has to be verified on disk
 
-#### Scenario: A message from the developer
-- **WHEN** the developer writes in the supervisor's session
-- **THEN** no triage runs for that wake
+#### Scenario: A mixed batch
+- **WHEN** one poll shows one session going from idle to busy and another one waiting for a person
+- **THEN** the supervisor is woken at once and no pool request is made
 
-### Requirement: The triage brief carries no private content
-The brief sent for `wake-triage` and `wake-digest` SHALL contain only: the event lines, counts and ages, session titles, the supervisor's list of work in flight with its deadlines, and the last lines of the supervisor's own register. It SHALL NOT contain transcript text, code, command output or file contents.
+#### Scenario: A timeout without a wake-by time
+- **WHEN** the watcher was armed without a wake-by time and its timeout passes
+- **THEN** the supervisor is woken and no pool request is made
+
+### Requirement: Guard mode and repeated notices are never triaged
+Triage SHALL NOT run in guard mode. The repeated notices of the wake-economy rules SHALL NOT be triaged. The soft list SHALL be a constant of the code that configuration can only shorten.
+
+#### Scenario: An idle notice
+- **WHEN** the watcher produces the notice that nobody in the project is working
+- **THEN** the supervisor is woken as today and no pool request is made
+
+#### Scenario: A supervisor on guard
+- **WHEN** the watcher runs in guard mode and its timeout passes
+- **THEN** the supervisor is woken and no pool request is made
+
+#### Scenario: An override adds an event to the soft list
+- **WHEN** an override lists a crash as a soft event
+- **THEN** the key is ignored, a crash still wakes at once, and the pool's doctor reports the ignored key
+
+### Requirement: The triage brief is built from structured fields only
+The brief sent for `wake-triage` SHALL contain only: the kinds of the events; per session its id, status, idle age and count of turns; the seconds left to each bound of a sleep; and the number of sleeps already honoured in the stretch. It SHALL NOT contain a session title, a raw watcher line, a job label, register text, transcript text, code, command output or file contents. Its size SHALL stay below the configured limit (default 2 000 tokens).
 
 #### Scenario: Building the brief
-- **WHEN** a brief is built for a timeout
-- **THEN** its size is below the configured limit (default 4 000 tokens) and a test shows that no transcript text can enter it
+- **WHEN** a brief is built for a project whose sessions have titles, queued jobs with labels and a register
+- **THEN** none of those texts appears in the brief, and a test proves it with marker strings planted in each
+
+### Requirement: The answer is a verdict in a fixed format
+The triage answer SHALL be accepted only as one JSON object with a `verdict` of `sleep` or `wake` and a `reason` from this list: `started-work`, `nothing-changed`, `deadline-near`, `many-sessions`, `long-busy`, `unsure`. A timeout, an error, a refusal, text outside the object, another verdict, an unknown reason, any exit code other than success or a response from a model other than the member's SHALL wake the supervisor.
+
+#### Scenario: The model answers with prose
+- **WHEN** the triage answer has text around the object
+- **THEN** the supervisor is woken and the ledger row is "malformed answer"
+
+#### Scenario: The model writes its own reason
+- **WHEN** the answer's reason is a sentence instead of a listed code
+- **THEN** the supervisor is woken, and that sentence is never printed to it
+
+### Requirement: The triage has a short time limit
+The triage's own time limit SHALL be short (default 20 seconds, never above 30). It is the longest a hard event that arrives during a triage can be delayed.
+
+#### Scenario: A slow model and a crash
+- **WHEN** a triage is still waiting for its answer after the time limit and a session crashed meanwhile
+- **THEN** the supervisor is woken at the limit, the wake names the crash, and the ledger row is "timeout"
+
+### Requirement: A sleep is recorded on disk and refreshes the watcher's baseline
+In `auto`, the watcher SHALL honour a `sleep` by appending the slept events, with their time, reason code and ledger id, to a journal on disk kept per project under the supervisor's home; by replacing the snapshot it compares against with the current one; and by going on waiting instead of exiting. The journal SHALL hold when the stretch of sleeps started and how many were honoured, so that the stretch survives the watcher's exit and re-arm.
+
+#### Scenario: The same session, twice
+- **WHEN** a session's start of work was slept and the watcher polls again with nothing new
+- **THEN** no event is produced for that session, and the sleep count is still one
+
+#### Scenario: The slept session then finishes its turn
+- **WHEN** a session whose start of work was slept goes back to idle
+- **THEN** the supervisor is woken at once
+
+#### Scenario: The watcher dies after a sleep
+- **WHEN** the watcher is killed after honouring a sleep and a new one is armed
+- **THEN** the journal still lists the slept event and the new watcher continues the same stretch
 
 ### Requirement: A sleep is bounded
-In `auto`, the watcher SHALL honour a `sleep` verdict by continuing to wait instead of exiting, only if all of these hold: the next forced wake is not later than the nearest deadline of the work in flight; the time since the supervisor's last wake stays below the maximum silent time (default 2 hours); and fewer than the configured number of consecutive sleeps (default 4) have been honoured. Otherwise it SHALL wake the supervisor.
+The watcher SHALL honour a `sleep` only while all of these hold, and SHALL wake the supervisor at the first of them to pass: the wake-by time it was armed with, when given, and otherwise the timeout the supervisor chose; the start of the stretch plus the maximum silent time (default and upper limit 2 hours); the time the supervisor's periodic report falls due; and fewer consecutive sleeps than the limit (default and upper limit 4).
 
 #### Scenario: Fifth soft event in a row
 - **WHEN** four consecutive sleeps were honoured and a fifth soft event arrives
-- **THEN** the supervisor is woken, with the digest of the five events
+- **THEN** the supervisor is woken without a pool request, and the wake lists the five events
 
 #### Scenario: Deadline inside the wait
-- **WHEN** a `sleep` would keep the supervisor asleep past the deadline of a job in flight
-- **THEN** the supervisor is woken at that deadline at the latest
+- **WHEN** a `sleep` would keep the supervisor asleep past the wake-by time
+- **THEN** the supervisor is woken at that time at the latest
 
-### Requirement: Anything but a clean sleep is a wake
-A triage that ends in a timeout, an error, a refusal, a malformed answer, any exit code other than success, or a verdict other than `sleep` SHALL wake the supervisor. The triage's own time limit SHALL be short (default 20 seconds).
+#### Scenario: The report falls due
+- **WHEN** a sleep is honoured and the supervisor's periodic report falls due 10 minutes later with no event
+- **THEN** the supervisor is woken at that moment
 
-#### Scenario: The model answers with prose
-- **WHEN** the triage answer is not one of the two verdicts in the required format
-- **THEN** the supervisor is woken and the ledger row is "malformed answer"
+### Requirement: The deadline is an argument, and nothing is triaged while something waits
+The supervisor SHALL pass the nearest deadline of its work in flight as the wake-by time when it arms the watcher; the watcher SHALL NOT read the register. While the project has an item that the supervision counts as waiting for the supervisor by time alone, no event SHALL be triaged.
+
+#### Scenario: Something already waits for the supervisor
+- **WHEN** the project has a session that the supervision would count as unattended
+- **THEN** every event wakes and no pool request is made
+
+#### Scenario: Arming the watcher
+- **WHEN** the supervisor arms its watcher with work in flight due in 40 minutes
+- **THEN** the watcher's command line carries that time as its wake-by, and the watcher opens no register file
 
 ### Requirement: A wake after sleeps says what was slept
-When the supervisor is woken after one or more honoured sleeps, the watcher's output SHALL list each slept event with its time and the reason the pool gave, before the event that woke it.
+When the supervisor is woken after one or more honoured sleeps, the watcher's output SHALL list each slept event with its time, reason code and ledger id before the event that woke it. A supervision command SHALL print the same list from the journal, so that it can be read when the wake came from somewhere else.
 
 #### Scenario: Reading the wake
 - **WHEN** a supervisor wakes after two honoured sleeps
 - **THEN** the first lines of the watcher's output name both slept events and their ledger ids
 
-### Requirement: The supervisor judges the sleeps at each wake
-The supervision skill SHALL tell the supervisor to judge, at each wake that follows sleeps, whether any slept event needed action earlier, and to record it with one command per miss. Sleeps not marked as missed by the end of that tick SHALL count as agreed.
+#### Scenario: Woken by the developer during a stretch
+- **WHEN** the developer writes to the supervisor while its watcher holds two slept events
+- **THEN** the judging step of that turn lists both from the journal
+
+### Requirement: The supervisor judges the sleeps with an explicit command
+The supervision skill's tick SHALL have a step, right after reading the watcher's output, that lists the journal with one supervision command and records for each entry whether the supervisor was `needed` or `not-needed` for that event before now. One supervision command SHALL record the answers and pass them to the pool's ledger. The stretch SHALL close when no entry is left unjudged; an entry that is not judged SHALL stay `unknown` and SHALL be listed again at the next wake.
 
 #### Scenario: Nothing was missed
-- **WHEN** the supervisor's tick ends without recording a miss
-- **THEN** the slept rows are marked `agreed`
+- **WHEN** the supervisor judges every slept event as `not-needed`
+- **THEN** the rows are `agreed`, the journal is empty and a new stretch starts at the next sleep
 
-### Requirement: Shadow triage changes nothing
-In `shadow`, the watcher SHALL run the triage, record the verdict and wake the supervisor exactly as without the pool. The row SHALL later be judged by what the supervisor did on that wake: a wake after which the supervisor only re-armed the watcher agrees with `sleep`; any other action agrees with `wake`.
+#### Scenario: The tick ends without the step
+- **WHEN** the supervisor skips the judging step
+- **THEN** the rows stay `unknown`, they add nothing to the saving, and the next wake lists them again
 
-#### Scenario: Shadow sleep, supervisor acted
-- **WHEN** the pool said `sleep` in shadow and the supervisor sent a message to a child session on that wake
-- **THEN** the row is judged `missed`
+### Requirement: Shadow triage changes nothing and is judged by the same question
+In `shadow`, the watcher SHALL run the triage, wake the supervisor exactly as without the pool, and append the verdict to the same journal, marked as shadow, so that the judging step lists it. The entry SHALL be judged by the same question as a sleep: whether the supervisor was needed for that event.
 
-### Requirement: Digests are read by the main model, never acted on alone
-`turn-report-check`, `log-digest`, `closing-evidence-summary` and `dialog-draft` SHALL be used by a session only as input it reads: the session SHALL be able to open the original, and SHALL do so before any action that cannot be undone. A digest SHALL say what it left out (size of the original, number of lines dropped).
+#### Scenario: Shadow sleep, supervisor was needed
+- **WHEN** the pool said `sleep` in shadow and the supervisor judges that it was `needed`
+- **THEN** the row is `missed` and counts as a false sleep in the pair's scorecard
 
-#### Scenario: A test log of two megabytes
-- **WHEN** a child session asks for a `log-digest` of a long test output and a member that accepts private data is active
-- **THEN** it receives the failing tests with their locations and the count of lines dropped, and reads the original only for the failures it will fix
+#### Scenario: Shadow sleep, routine tick
+- **WHEN** the pool said `sleep` in shadow and the supervisor only took its census and re-armed the watcher
+- **THEN** the supervisor judges `not-needed` and the row is `agreed`
+
+#### Scenario: Shadow wake, routine tick
+- **WHEN** the pool said `wake` in shadow and the supervisor judges `not-needed`
+- **THEN** the row is `overwake`: it lowers the agreement and is not a miss
+
+### Requirement: Digests are data the main model reads, never instructions
+`turn-report-check`, `log-digest`, `closing-evidence-summary` and `dialog-draft` SHALL be used by a session only as input it reads, and each answer SHALL arrive inside the envelope that marks it as data from another model. A session SHALL NOT follow an instruction found in a digest and SHALL NOT forward a digest to another session as a message. The supervision skill and the briefs it gives its child sessions SHALL say so.
+
+#### Scenario: A log that carries an instruction
+- **WHEN** the digested output contains a line telling the reader to run a command
+- **THEN** the digest arrives marked as data, and the skill's rule tells the session not to act on it
 
 #### Scenario: No member accepts private data
 - **WHEN** no active member accepts `private`
 - **THEN** the session reads the output itself, as before
 
+### Requirement: A digest says what it left out, and the original stays the authority
+A digest SHALL say what it left out (the size of the original and the number of lines dropped). A session SHALL open the original before any action that cannot be undone, and SHALL report when it read the whole original anyway.
+
+#### Scenario: A test log of two megabytes
+- **WHEN** a child session asks for a `log-digest` of a long test output and a member that accepts private data is active
+- **THEN** it receives the failing tests with their locations and the count of lines dropped, and reads the original only for the failures it will fix
+
 ### Requirement: Scope is the supervisor and its child sessions
-Only the live supervisor of an enabled project and the sessions its census lists SHALL use these offload points. The supervision skill and the briefs it gives its child sessions SHALL name the task kinds each role may use.
+Only the live supervisor of an enabled project and the sessions its census lists in that project SHALL use these offload points. `wake-triage` SHALL be used by the watcher of the supervisor only. The supervision skill and the briefs it gives its child sessions SHALL name the task kinds each role may use.
 
 #### Scenario: A session opened by the developer in a supervised project
 - **WHEN** the census lists it as a session of the project
 - **THEN** it may use the digest task kinds, and not `wake-triage`
 
 ### Requirement: The report carries the saving
-The supervisor's periodic report SHALL include one line with the pool tokens spent, the main-model tokens avoided, the leverage and the misses since the previous report, taken from the ledger. With the dial at 0 the line SHALL be absent.
+The supervisor's periodic report SHALL include one line with the pool tokens spent, the main-model tokens avoided (as an estimate, raw and weighted when weights are set), the leverage and the misses since the previous report, taken from the ledger with one command. With the pool stopped or at level 0 the line SHALL be absent.
 
 #### Scenario: A day with misses
 - **WHEN** two misses were recorded since the last report
 - **THEN** the line names them and says which pair was demoted
+
+### Requirement: The triage is switched off when it does not pay
+After 7 days of `wake-triage` in `auto`, a written result SHALL compare the supervisors' wakes and tokens per hour with the simulator's baseline. The triage SHALL be switched off, and the result SHALL say so plainly, when the weighted leverage is under 10, when there was more than one miss per 100 honoured sleeps, or when the measured saving is under 3 % of the supervisors' flow. Without cache weights the comparison SHALL use raw tokens, say so, and leave the leverage test out.
+
+#### Scenario: A week with too many misses
+- **WHEN** the week shows 3 misses in 120 honoured sleeps
+- **THEN** the result recommends switching the triage off and the pair is set to `off`
+
+#### Scenario: No weights were ever measured
+- **WHEN** the week ends and the cache weights are not set
+- **THEN** the result compares raw tokens, says so in its first lines, and applies the other two tests

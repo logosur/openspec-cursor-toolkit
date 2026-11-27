@@ -70,7 +70,7 @@ conviven.
 
 ```bash
 REG_DIR=$($L registry-dir)        # en el checkout principal; el script hace que git lo ignore
-$L acquire --session <id de get_session "self"> --title "<título>" --registry "$REG_DIR/SUPERVISOR-<YYYYMMDD-HHMM>.md"
+$L acquire --session <id de get_session "self"> --registry "$REG_DIR/SUPERVISOR-<YYYYMMDD-HHMM>.md"   # título del cerrojo: el de la supervisora
 $L beat --session <id> --skill-seen   # tras cargar la skill (Skill o /supervisa-sesiones); sin esa carga en tu transcripción sale con 8
 ```
 
@@ -112,6 +112,34 @@ El registro se reescribe tras cada transición y se reanuda si su veredicto es `
 
 En esta fase compruebas tu modelo y tu modo (sin cambiarlos), armas el vigilante y abres en el turno de invocación las
 sesiones de preguntas y de cierre y las que el alcance ya necesita.
+
+**Nombres de sesión.** Toda sesión de la supervisión lleva un nombre claro, y la copia de Control remoto de una sesión
+local lleva el mismo (el vigilante del sistema la renombra). Los títulos salen de la configuración `supervision`:
+
+| Sesión | Título (clave de `supervision`) |
+|--------|---------------------------------|
+| Supervisora | `Supervisora de <project>` (`supervisor_session_title`) |
+| Preguntas | el de `questions_session_title` |
+| Cierre | `Cierre de sesiones de <project>` (`closer_session_title`) |
+| Otra hija | `<project> · <tarea>` (`worker_session_title`) |
+| Corredor de pruebas en la nube | `Tests en la nube de <project>` (lo pone `cloud-tests`) |
+
+Justo después de `acquire`, renombra tu propia sesión con `set_session_title` (`"self"`) al título que
+`$L titles --session <tu id>` te da en su línea `RENAME`. Abre la de preguntas, la de cierre y cada hija con su título; si
+`start_session` no lo admite, renómbrala con `set_session_title` nada más abrirla. Cuando un `beat` imprima `RENAME <id> <rol> «actual» -> «esperado»`, renombra esa
+sesión con `set_session_title`. Un título que parezca una salida de `supervisor-lock` (`HELD …`, `session=local_…`) lo
+rechaza el script. Un script nunca edita las fichas de la app: renombra la propia sesión.
+
+**Sesiones hijas en la barra lateral.** Las de preguntas y de cierre deben colgar de ti. Si `titles` o `beat` imprimen
+`ADOPT <id> <rol> (abierta por <id o ->)`, esa sesión no es hija tuya (la abrió otra, por ejemplo una supervisora
+anterior, o se sacó al nivel superior) y ninguna herramienta cambia el padre de una sesión existente. En el siguiente
+turno que el desarrollador inicie en tu sesión:
+
+1. Abre con `start_session` una sesión nueva con ese rol, hija tuya, con el título configurado.
+2. Regístrala: `$L beat --session <tu id> --mailbox <nueva>` o `--closer <nueva>`; la de cierre nueva arma su vigilante.
+3. Solo entonces archiva la antigua. La de preguntas, solo mientras no tenga un diálogo abierto con el desarrollador.
+
+Fuera de un turno del desarrollador no haces nada: es solo estética, y el rol sigue funcionando por el cerrojo.
 
 ## F0c: encaje en el proyecto, solo lectura
 

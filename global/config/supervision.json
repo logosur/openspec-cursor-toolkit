@@ -14,6 +14,8 @@
   "queued_reannounce_min": 120,
   "slotheld_reannounce_min": 120,
   "all_idle_backoff_max_min": 120,
+  "ask_due_after_h": 24,
+  "ask_partial_batch_window_h": 12,
   "questions_session_titles": [
     "sesión de preguntas",
     "preguntas de la supervisión",
@@ -23,6 +25,11 @@
   "closer_session_titles": [
     "cierre de sesiones de"
   ],
+  "supervisor_session_title": "Supervisora de {project}",
+  "closer_session_title": "Cierre de sesiones de {project}",
+  "worker_session_title": "{project} · {task}",
+  "remote_previous_suffix": " (conexión anterior)",
+  "titles_sync": true,
   "skill_file": "~/.claude/skills/supervisa-sesiones/SKILL.md",
   "guard_section": "## Motivo de la guardia",
   "skill_anchors": [

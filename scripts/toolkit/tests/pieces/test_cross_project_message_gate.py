@@ -114,6 +114,21 @@ class CrossProjectGateTest(unittest.TestCase):
         self.event()
         self.assertAllowed(self.send())
 
+    def test_a_watcher_session_listed_by_the_event_may_receive_the_resume_with_its_extra_sentence(self):
+        # a supervision session that lost its background watcher is listed with the kind "watcher" and gets the
+        # resume text plus one sentence: the marker is what the gate looks at
+        self.event(listed=(TARGET,))
+        with open(os.path.join(self.switch, 'event.json')) as fh:
+            data = json.load(fh)
+        data['sessions'][0]['kind'] = 'watcher'
+        with open(os.path.join(self.switch, 'event.json'), 'w') as fh:
+            json.dump(data, fh)
+        text = RESUME + ' Rearma tu vigilante (`supervisor-lock wait`) y sigue donde estabas.'
+        self.assertAllowed(self.send(text=text))
+        out = self.send(to=SIBLING, text=text)   # not listed: still refused
+        self.assertEqual(out['permissionDecision'], 'deny')
+        self.assertIn('ya no está en la lista', out['permissionDecisionReason'])
+
     def test_scheduled_task_claim_counts_as_the_claimant(self):
         self.event(claimed_by='scheduled-task:' + SENDER)
         self.assertAllowed(self.send())

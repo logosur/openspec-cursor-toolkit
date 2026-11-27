@@ -99,3 +99,16 @@ def fold_text(text):
 def clip(text, limit=300):
     text = re.sub(r'\s+', ' ', str(text or '')).strip()
     return text if len(text) <= limit else text[:limit - 1] + '…'
+
+
+# What a title must never be: the literal output of a `supervisor-lock` status line pasted in by mistake
+_STATUS_TITLE = re.compile(r'^\s*(HELD|STALE|MINE|FREE|ACQUIRED|RESUMED)\b')
+
+
+def title_refusal(title):
+    """Why `title` cannot name a session or a lock (it looks like `supervisor-lock` output), or None when it can."""
+    text = str(title or '')
+    if _STATUS_TITLE.match(text) or 'session=local_' in text or 'heartbeat_age' in text:
+        return ('el título parece la salida de `supervisor-lock` (una línea de estado), no un nombre de sesión: '
+                f'«{clip(text, 80)}»')
+    return None

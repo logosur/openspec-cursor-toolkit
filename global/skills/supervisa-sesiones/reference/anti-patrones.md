@@ -100,3 +100,8 @@
     partes sin novedades.
 53. Que el texto final de una hija nombre a la supervisora con «tú»: lo lee el desarrollador y lo toma por suyo.
 54. Usar ids, ramas o rutas en vez de lenguaje llano en un resumen o una pregunta.
+55. Decir en un parte, un informe o un resumen que algo «espera su respuesta» o «necesita algo que solo tiene él»
+    sin que esa pregunta se le haya presentado: se manda la tanda parcial (F5, «Antes del final») y se dice dónde y
+    cuándo verá el diálogo.
+56. Dejar en la cola, sin presentarla, una pregunta que bloquea una orden del desarrollador o lleva días bloqueando
+    trabajo, esperando a una tanda final que no llega; o ignorar un `ASKDUE`.

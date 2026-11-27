@@ -17,3 +17,7 @@ probes:
     args: [pending, q-none]
     exit: [0]
     contains: missing
+  - name: an empty queue has no blocking-due item
+    args: [list, --due]
+    exit: [0]
+    contains: (no items)

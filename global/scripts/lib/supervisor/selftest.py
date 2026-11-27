@@ -173,6 +173,16 @@ def active_cloud_sessions():
 
 
 def api_call(method, path, body=None):
+    renamed = re.fullmatch(r'/v1/code/sessions/([^/]+)', path)
+    if method == 'PUT' and renamed:
+        data = _api()
+        data.setdefault('renamed', []).append([renamed.group(1), (body or {}).get('title')])
+        for row in data.get('sessions', []):
+            if row.get('id') == renamed.group(1):
+                row['title'] = (body or {}).get('title')
+        with open(os.environ['CLOUD_TESTS_API_FAKE'], 'w') as fh:
+            json.dump(data, fh)
+        return 200, {}
     m = re.fullmatch(r'/v1/code/sessions/([^/]+)/archive', path)
     if method != 'POST' or not m:
         return 404, {}
@@ -234,6 +244,10 @@ def cmd_self_test(args):
                GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
     for name in ('ASK_GATE', 'ASK_GATE_PRESENCE_MIN', 'ASK_QUEUE_BIN', 'ASK_QUEUE_REASK_H'):
         env.pop(name, None)  # a developer's own kill switch must not leak into the suite
+    # The watchdog and `beat` keep session titles in line by default (`titles_sync`); the checks below that read lock
+    # titles and "nothing written" run with it off, and the titles section at the end calls `titles` directly.
+    with open(os.path.join(env['CLAUDE_TOOLKIT_CONFIG_DIR'], 'supervision.json'), 'w') as fh:
+        json.dump({'titles_sync': False}, fh)
     failures = []
 
     def check(name, ok):
@@ -1280,7 +1294,8 @@ def cmd_self_test(args):
         os.remove(os.path.join(lock_home, 'locks', name))
 
     # 6b-2. revive: a live, idle supervisor whose turn was cut by the usage limit (its process alive, so never DEAD)
-    # is woken once the account has usage again; on guard, busy, paused, young or waiting on the developer it is not
+    # is woken once the account has usage again, on guard too; busy, paused, young, waiting on the developer, or quiet
+    # on guard without a cut, it is not
     fake_pause = os.path.join(tmp, 'fake-project-pause')
     with open(fake_pause, 'w') as fh:
         fh.write("def paused_marker(path):\n    return {'by': 'test'} if str(path).endswith('paused-proj') else None\n")
@@ -1292,6 +1307,9 @@ def cmd_self_test(args):
     wd_session('local_sg', 'k-guard', cut_recs, ago=3600)
     put(os.path.join(lock_home, 'locks'), 'k-guard.json',
         dict(json.load(open(os.path.join(lock_home, 'locks', 'k-guard.json'))), phase='guardia'))
+    wd_session('local_sq', 'k-gquiet', [text_rec(4100)], ago=3600)           # on guard, quiet 1 h, not cut: normal
+    put(os.path.join(lock_home, 'locks'), 'k-gquiet.json',
+        dict(json.load(open(os.path.join(lock_home, 'locks', 'k-gquiet.json'))), phase='guardia'))
     wd_session('local_sb', 'k-sbusy', [text_rec(4100), tool_rec(4000, 'Bash', 'sb')], ago=3600)  # busy, not cut
     cli('local_sb', sessionId='cli-local_sb', status='busy')                 # the CLI says it is working now
     wd_session('local_sp', 'k-spaused', cut_recs, ago=3600)
@@ -1317,8 +1335,8 @@ def cmd_self_test(args):
     plan = json.loads(srevive('yes', '--json').stdout or '{}')
     named = sorted(t['session_id'] for t in plan.get('targets') or [])
     msg = next((t['message'] for t in plan.get('targets') or [] if t['session_id'] == 'local_sc'), '')
-    check('revive: cut by the limit and usage back -> woken, also one cut 20 min ago and one whose subagents still work',
-          named == ['local_sc', 'local_sl', 'local_sw'] and all(t['reason'] == 'stalled' and t['cause'] == 'limit' and t['attempt'] == 1
+    check('revive: cut by the limit and usage back -> woken, also one cut 20 min ago, one on guard and one whose subagents still work',
+          named == ['local_sc', 'local_sg', 'local_sl', 'local_sw'] and all(t['reason'] == 'stalled' and t['cause'] == 'limit' and t['attempt'] == 1
                                                     for t in plan['targets']))
     check('revive: its text says the truth (turn cut by the limit, process alive), with the marker and the F1 census',
           msg.startswith('[reanimar supervisora] ') and 'sigue vivo' in msg and 'límite de uso' in msg
@@ -1328,11 +1346,12 @@ def cmd_self_test(args):
     check('revive: its plan entry lets the cross-project gate pass the marker (session, fresh planned_at)',
           rv['k-cut']['session'] == 'local_sc' and rv['k-cut']['kind'] == 'stalled' and time.time() - rv['k-cut']['planned_at'] < 60)
     notes = '\n'.join(plan.get('notes') or [])
-    check('revive: on guard, paused, quiet less than 45 min without a cut, cut less than 5 min ago -> not woken; busy and '
-          'waiting on the developer -> said, not woken',
-          not any(k in rv for k in ('k-guard', 'k-sbusy', 'k-spaused', 'k-syoung', 'k-shuman', 'k-snew'))
+    check('revive: on guard without a cut, paused, quiet less than 45 min without a cut, cut less than 5 min ago -> not '
+          'woken; busy and waiting on the developer -> said, not woken; on guard and cut by the limit -> woken',
+          not any(k in rv for k in ('k-gquiet', 'k-sbusy', 'k-spaused', 'k-syoung', 'k-shuman', 'k-snew'))
+          and 'k-guard' in rv
           and 'BUSY local_sb k-sbusy' in notes and 'HUMAN local_sh k-shuman' in notes
-          and not any(x in notes for x in ('k-guard', 'k-spaused', 'k-syoung', 'k-snew')))
+          and not any(x in notes for x in ('k-gquiet', 'k-spaused', 'k-syoung', 'k-snew')))
     r = srevive('yes')
     check('revive: within REVIVE_RETRY_S the same cut waits', 'WAIT-STALLED local_sc k-cut' in r.stdout
           and not re.search(r'^STALLED ', r.stdout, re.M))
@@ -3096,6 +3115,54 @@ def cmd_self_test(args):
           and 'ábrela' in reasons['question missing'] and 'La sesión de preguntas local_gone guardada' in reasons['question archived'])
     check('deny texts: absent and supervised ones say the final batch is asked in the questions session',
           all('sesión de preguntas' in reasons[k] and 'sesión hija está archivada o aparcada con su decisión en ask-queue' in reasons[k] for k in ('absent', 'supervised')))
+    check('deny texts: the owner variants name the partial batch of blocking questions next to the radical path',
+          all('tanda parcial' in reasons[k] and 'ask-queue list --due' in reasons[k] and 'ASKDUE' in reasons[k]
+              and '\n' not in reasons[k] for k in ('question alive', 'question missing', 'question archived')))
+    check('deny texts: absent and supervised ones teach a real --blocks and --order for an order of the developer',
+          all('--order "<sus palabras>"' in reasons[k] and 'tanda parcial' in reasons[k] and '--blocks' in reasons[k]
+              for k in ('absent', 'supervised')))
+
+    # 11c. partial batch of blocking questions: ask-queue decides what is due, beat and the watcher tell the owner
+    ad_repo = os.path.realpath(os.path.join(tmp, 'askdue-proj'))
+    make_repo(ad_repo)
+    ad_locks = set(os.listdir(os.path.join(lock_home, 'locks')))
+    try:
+        r = run('acquire', '--dir', ad_repo, '--session', 'local_ad')
+        check('ASKDUE: a fresh project takes its own lock', r.returncode == 0 and 'ACQUIRED' in r.stdout)
+        r = run('beat', '--dir', ad_repo, '--session', 'local_ad')
+        check('ASKDUE: an empty queue -> beat says nothing about it', r.returncode == 0 and 'ASKDUE' not in r.stderr)
+        aq('add', '--project', ad_repo, '--question', '¿Qué valor pongo?', '--default', 'Esperar', '--why', 'w',
+           '--blocks', 'nada: solo su archivado')
+        aq('add', '--project', ad_repo, '--question', '¿Qué dato falta?', '--default', 'Esperar', '--why', 'w',
+           '--blocks', 'la tarea ordenada')
+        r = run('beat', '--dir', ad_repo, '--session', 'local_ad')
+        check('ASKDUE: young items, or items that block nothing, are not due', r.returncode == 0 and 'ASKDUE' not in r.stderr)
+        q_order = aq('add', '--project', ad_repo, '--question', '¿Qué cuenta uso?', '--default', 'Esperar', '--why', 'w',
+                     '--blocks', 'la tarea ordenada', '--order', 'hazlo primero')
+        r = run('beat', '--dir', ad_repo, '--session', 'local_ad')
+        check('ASKDUE: an --order item -> beat tells the owner on stderr, stdout unchanged',
+              r.returncode == 0 and r.stdout.strip().startswith('BEAT ') and f'ASKDUE 1 {q_order} ' in r.stderr
+              and 'ask-queue list --due' in r.stderr)
+        ad_saved = {k: os.environ.get(k) for k in ('ASK_QUEUE_BIN', 'ASK_QUEUE_DIR', 'SUPERVISOR_LOCK_HOME')}
+        os.environ.update({k: env[k] for k in ad_saved})
+        try:
+            from . import askdue
+            ad_project = projects.resolve(ad_repo)
+            first, again = askdue.askdue_events(ad_project), askdue.askdue_events(ad_project)
+        finally:
+            for k, v in ad_saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        check('ASKDUE: the watcher announces a set of due ids once, and it is a guard event',
+              len(first) == 1 and first[0].startswith(f'ASKDUE 1 {q_order} ') and again == [] and 'ASKDUE' in watch.GUARD_EVENTS)
+        aq('asked', q_order, '--to', 'local_box')
+        r = run('beat', '--dir', ad_repo, '--session', 'local_ad')
+        check('ASKDUE: once presented (asked) the item is not due any more', r.returncode == 0 and 'ASKDUE' not in r.stderr)
+    finally:
+        for name in set(os.listdir(os.path.join(lock_home, 'locks'))) - ad_locks:
+            os.remove(os.path.join(lock_home, 'locks', name))
 
     def a_text(mins, text):
         return {'type': 'assistant', 'timestamp': stamp(mins),
@@ -3796,6 +3863,51 @@ def cmd_self_test(args):
     finally:
         os.environ['SUPERVISOR_SELFTEST_NO_REPORT'] = '1'
         os.environ.pop('SUPERVISOR_LOCK_HOME', None) if real_home is None else os.environ.__setitem__('SUPERVISOR_LOCK_HOME', real_home)
+
+    # 31. session titles: a lock title that looks like status output is refused, the default is the supervisor title,
+    # `titles` lists what each session must be renamed to and `--fix` repairs the lock and the Remote Control copy.
+    trepo = os.path.realpath(os.path.join(tmp, 'tproj'))
+    make_repo(trepo)
+    tapi = os.path.join(tmp, 'titles-api.json')
+    with open(tapi, 'w') as fh:
+        json.dump({'sessions': [cs('tbridge', kind='bridge')]}, fh)
+    shutil.rmtree(os.path.join(lock_home, 'cloud'), ignore_errors=True)   # the shared listing cache of the sections above
+    trun = lambda *a: subprocess.run([sys.executable, runtime.ENTRY, *a], capture_output=True, text=True,
+                                     env=dict(cenv, CLOUD_TESTS_API_FAKE=tapi))
+    r = trun('acquire', '--dir', trepo, '--session', 'local_tsup', '--title', 'HELD tproj session=local_x state=running')
+    check('titles: acquire refuses a title that looks like supervisor-lock output', r.returncode == 2 and 'TITLE REFUSED' in r.stderr)
+    r = trun('acquire', '--dir', trepo, '--session', 'local_tsup')
+    tkey = json.loads(trun('project', '--dir', trepo, '--json').stdout)['key']
+    tlock = os.path.join(lock_home, 'locks', tkey + '.json')
+    check('titles: acquire without a title takes the supervisor title of the project',
+          r.returncode == 0 and json.load(open(tlock))['title'] == 'Supervisora de tproj')
+    fixture('local_tsup', cwd=trepo, title='old name')
+    fixture('local_tbridge', cwd=trepo, title='tproj · tarea', bridgeSessionIds=['session_tbridge'])
+    r = trun('titles', '--session', 'local_tsup')
+    check('titles: lists the local session to rename and the Remote Control copy that must follow its local title',
+          r.returncode == 0 and 'RENAME local_tsup supervisor «old name» -> «Supervisora de tproj»' in r.stdout
+          and 'REMOTE cse_tbridge «T tbridge» -> «tproj · tarea»' in r.stdout)
+    with open(tlock) as fh:
+        tdata = json.load(fh)
+    tdata['title'] = 'STALE tproj session=local_tsup'
+    with open(tlock, 'w') as fh:
+        json.dump(tdata, fh)
+    r = trun('titles', '--fix', '--session', 'local_tsup')
+    with open(tapi) as fh:
+        tst = json.load(fh)
+    check('titles --fix: repairs the lock title, renames the bridge through the API and edits no app record',
+          r.returncode == 0 and json.load(open(tlock))['title'] == 'Supervisora de tproj'
+          and tst.get('renamed') == [['cse_tbridge', 'tproj · tarea']]
+          and json.load(open(os.path.join(app_dir, 'local_tsup.json')))['title'] == 'old name')
+    r = trun('titles', '--fix', '--session', 'local_tsup')
+    check('titles --fix: a second run has nothing to rename in the cloud', 'REMOTE' not in r.stdout
+          and len(json.load(open(tapi)).get('renamed', [])) == 1)
+    others = (settings.supervisor_title('p'), settings.worker_title('p', 'x'))
+    is_questions = lambda t: any(util.fold_text(m) in util.fold_text(t) for m in session_roles.ASK_GATE_MAILBOX_TITLES)
+    is_closer = lambda t: any(c in util.fold_text(t) for c in settings.CLOSER_TITLES)
+    check('titles: the questions and closing titles keep matching their recognisers; the others match neither',
+          is_questions(settings.questions_title('p')) and is_closer(settings.closer_title('p'))
+          and not any(is_questions(t) or is_closer(t) for t in others))
 
     lint_dir = os.path.join(tmp, 'lint-skill')
     os.makedirs(os.path.join(lint_dir, 'reference'))

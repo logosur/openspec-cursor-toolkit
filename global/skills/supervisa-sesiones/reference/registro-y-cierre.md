@@ -95,7 +95,7 @@ Estados de sesión: `WORKING` · `READY_TO_CLOSE` · `RELEASED` (terminada y ver
 | Una sesión no ha declarado lo suyo | Sigue: no es un final válido |
 | Queda una decisión delegable | La toma, o el panel (F5) |
 | Una sesión se liberó y no se informó | Informe de F4b |
-| Hay preguntas para el desarrollador | A `ask-queue` y a la tanda (F5, F9); solo un rumbo radical va en el acto. No se espera la respuesta |
+| Hay preguntas para el desarrollador | A `ask-queue` y a la tanda (F5, F9). Antes solo van un rumbo radical, en el acto, y la tanda parcial de las que bloquean trabajo (`ASKDUE`). No se espera la respuesta |
 | No queda nada autorizado que hacer | F9: tanda, veredicto y trabajo siguiente o guardia |
 | Rondas sin progreso agotadas, con la escalera recorrida | `NO PROGRESS` con la lista exacta |
 | Una tarea vence su plazo | Escalera de §W; el resto sigue |
@@ -159,6 +159,7 @@ Nunca se simula un censo que no se pudo hacer.
 ## Tanda final (la presenta la sesión de preguntas; aquí queda constancia)
 1. Dónde quedó: <lo verificado, dónde y cómo> · espera a terceros: <qué y de quién>
 2. Rumbos radicales: <pregunta → coste → qué se hizo entretanto → respuesta>
+2b. Tandas parciales: <hora → preguntas → qué bloqueaban → respuesta>
 3. Autorizaciones y límites duros: <pregunta → «No hacerlo» → respuesta y fuente>
 4. Archivado pendiente: <sesiones → qué permiso falta>
 5. Decisiones a confirmar: <qué → por qué → cómo se deshace → respuesta>

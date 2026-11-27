@@ -33,7 +33,10 @@ def deny_question(owner, local):
             f'panel, eligiendo {settings.DECISION_CRITERION}. Un límite duro, o una duda que el '
             f'panel no vote radical por unanimidad, va a ask-queue para la tanda final, y sigues. Antes del final solo '
             f'va a la sesión de preguntas una decisión que el panel votó radical por unanimidad (ask-queue add '
-            f'--radical --cost). La tanda final se manda una sola vez (F9), cuando todo está integrado (y, donde las '
+            f'--radical --cost), y la tanda parcial: las preguntas de la cola que bloquean trabajo y nunca se le '
+            f'presentaron (`ask-queue list --due`: las que bloquean una orden suya, con --order, y las que llevan '
+            f'tiempo bloqueando trabajo real), todas juntas, como un radical, cuando te llegue ASKDUE. Mientras no se '
+            f'le presenten, ningún informe dice que algo espera su respuesta. La tanda final se manda una sola vez (F9), cuando todo está integrado (y, donde las '
             f'reglas lo autorizan, desplegado en pre-producción) y cada sesión hija está archivada o, sin autorización para archivarla, aparcada con su '
             f'decisión en ask-queue: la sesión de preguntas la presenta entera como diálogos de preguntas, sin informe '
             f'aparte, y tú conservas el cerrojo de guardia (F9). ')
@@ -92,11 +95,15 @@ def deny_absent(minutes, last_s=None, fresh=None):
         f'envíos reales a terceros, cambios de infraestructura compartida (servidores, DNS){excluded}, reescribir '
         f'historia. Regístralo para la tanda final con '
         f'`~/.claude/scripts/ask-queue add --project "$PWD" --question … --default "No hacerlo" --why … --blocks …` '
-        f'y sigue con todo lo demás. '
+        f'y sigue con todo lo demás. En --blocks escribe el trabajo que de verdad bloquea («nada» si no bloquea nada) '
+        f'y, si bloquea algo que el desarrollador ordenó, añade --order "<sus palabras>": así entra en la tanda '
+        f'parcial y no espera al final. '
         f'4) Si una supervisora lleva este proyecto, la duda que no puedas decidir va a decisiones_abiertas de tu '
         f'informe para ella, y sigues con lo demás. Al desarrollador se le pregunta todo a la vez al final, en la '
         f'sesión de preguntas, cuando no queda ninguna spec por implementar, todo está integrado (y, donde las reglas '
         f'lo autorizan, desplegado en pre-producción) y cada sesión hija está archivada o aparcada con su decisión en ask-queue. '
+        f'Antes del final solo se adelantan un rumbo radical votado por unanimidad y la tanda parcial de las preguntas '
+        f'que bloquean trabajo (`ask-queue list --due`). '
         f'En wrap_up, quita `ask` y `actions` y deja solo el recap.')
     return json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
                                               'permissionDecisionReason': reason}})
@@ -117,6 +124,8 @@ def deny_supervised(lock, minutes):
         f'decisiones_abiertas de tu informe a la supervisora, con las opciones y la que recomiendas, y sigue con todo '
         f'lo que no dependa de ella: la supervisora la contesta. Un límite duro (dinero, credenciales, un dato que '
         f'solo sabe el desarrollador, envíos a terceros, borrar trabajo ajeno) no se hace: va a la supervisora o a `ask-queue add` '
-        f'para la tanda final. En wrap_up, quita `ask` y `actions` y deja solo el recap.')
+        f'para la tanda final, con lo que de verdad bloquea en --blocks; si bloquea algo que el desarrollador ordenó, con '
+        f'--order "<sus palabras>", y la supervisora se la presenta antes, en la tanda parcial (`ask-queue list --due`). '
+        f'Mientras no se le haya presentado, no digas que algo espera su respuesta. En wrap_up, quita `ask` y `actions` y deja solo el recap.')
     return json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
                                               'permissionDecisionReason': reason}})

@@ -63,7 +63,8 @@ def new_owner(project, args, **extra):
     stamp = util.now_iso()
     owner = {
         'key': project['key'], 'project': project['name'], 'checkout': project['checkout'],
-        'common_dir': project['common_dir'], 'session_id': args.session, 'title': args.title or '',
+        'common_dir': project['common_dir'], 'session_id': args.session,
+        'title': args.title or settings.supervisor_title(project['name']),
         'host': socket.gethostname(), 'registry': args.registry or project['registry_dir'],
         'state': 'running', 'phase': '', 'round': 0, 'started': stamp, 'heartbeat': stamp,
     }
@@ -112,7 +113,19 @@ def report_held(owner, always_held=False):
     return 3 if word == 'HELD' else 4
 
 
+def refuse_title(title):
+    """Exit code 2 (and a message) when `title` looks like `supervisor-lock` output; None when it is fine or absent."""
+    why = util.title_refusal(title) if title else None
+    if why:
+        print(f'TITLE REFUSED: {why}', file=sys.stderr)
+        return 2
+    return None
+
+
 def cmd_acquire(args):
+    refused = refuse_title(args.title)
+    if refused:
+        return refused
     project = projects.resolve(args.dir)
     with Store() as store:
         owner = store.read(project['key'])
@@ -134,6 +147,9 @@ def cmd_acquire(args):
 
 
 def cmd_reclaim(args):
+    refused = refuse_title(args.title)
+    if refused:
+        return refused
     project = projects.resolve(args.dir)
     with Store() as store:
         owner = store.read(project['key'])
@@ -211,6 +227,9 @@ def skill_seen_refusal(key, session, floor):
 
 
 def cmd_beat(args):
+    refused = refuse_title(getattr(args, 'title', None))
+    if refused:
+        return refused
     project = projects.resolve(args.dir)
     third_party = ' '.join((getattr(args, 'third_party', None) or '').split())
     if getattr(args, 'third_party', None) is not None and (args.state != 'paused' or len(third_party) < backlog.BACKLOG_WHY_MIN):
@@ -261,6 +280,8 @@ def cmd_beat(args):
             owner['mailbox'] = args.mailbox
         if getattr(args, 'closer', None):
             owner['closer'] = args.closer
+        if getattr(args, 'title', None):
+            owner['title'] = args.title
         if args.skill_seen and proof is not None:
             verdict, when = proof
             if verdict == 'not-loaded':
@@ -292,7 +313,34 @@ def cmd_beat(args):
     hint = no_mailbox_hint(project, owner)
     if hint:
         print(hint, file=sys.stderr)  # supervisors call `beat … >/dev/null`: stdout never reaches them
+    askdue_hint(project)
+    rename_hint(owner)
     return 0
+
+
+def askdue_hint(project):
+    """The ASKDUE line on stderr when the project's partial batch of blocking questions may be sent now (ask-queue
+    decides). Every beat, like the NOMAILBOX hint: it costs no wake. Only reads; a failure prints nothing."""
+    try:
+        from . import askdue  # lazily: askdue imports cloud, which imports this module
+        line = askdue.askdue_line(project)
+        if line:
+            print(line, file=sys.stderr)
+    except Exception:
+        pass
+
+
+def rename_hint(owner):
+    """The RENAME and ADOPT lines of the project's supervisor, questions and closing sessions, so a supervisor sees on
+    its next heartbeat which of them carry another title or are not its children. Only reads; a failure never changes what `beat` returns."""
+    if not settings.TITLES_SYNC:
+        return
+    try:
+        from . import titles  # lazily: titles imports this module
+        for line in titles.hint_lines(owner):
+            print(line, file=sys.stderr)
+    except Exception:
+        pass
 
 
 def no_mailbox_hint(project, owner):

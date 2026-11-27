@@ -31,6 +31,11 @@ DEFAULTS = {
     'questions_session_titles': ['sesión de preguntas', 'preguntas de la supervisión', 'buzón de preguntas'],
     'questions_session_title': 'Sesión de preguntas de {project}',
     'closer_session_titles': ['cierre de sesiones de'],
+    'supervisor_session_title': 'Supervisora de {project}',
+    'closer_session_title': 'Cierre de sesiones de {project}',
+    'worker_session_title': '{project} · {task}',
+    'remote_previous_suffix': ' (conexión anterior)',
+    'titles_sync': True,
     'skill_file': '~/.claude/skills/supervisa-sesiones/SKILL.md',
     'guard_section': '## Motivo de la guardia',
     'skill_anchors': ['## Prohibido', '## §0', '## Nunca parada', '$L backlog', '$L wait-closer',
@@ -79,6 +84,27 @@ CLOSER_TITLES = tuple(t.lower() for t in CONFIG['closer_session_titles'])
 def questions_title(project):
     """The title a supervisor gives to the questions session of `project`."""
     return CONFIG['questions_session_title'].replace('{project}', str(project))
+
+
+def supervisor_title(project):
+    """The title of a supervisor session (and of its lock) for `project`."""
+    return CONFIG['supervisor_session_title'].replace('{project}', str(project))
+
+
+def closer_title(project):
+    """The title a supervisor gives to its closing session for `project`."""
+    return CONFIG['closer_session_title'].replace('{project}', str(project))
+
+
+def worker_title(project, task):
+    """The title of any other child session: the project and what the session does."""
+    return CONFIG['worker_session_title'].replace('{project}', str(project)).replace('{task}', str(task))
+
+
+# Remote Control copies: an older copy of the same local session keeps the local title plus this suffix
+REMOTE_PREVIOUS_SUFFIX = CONFIG['remote_previous_suffix']
+# the watchdog and `beat` keep the titles in line on their own when this is on (`supervisor-lock titles` always works)
+TITLES_SYNC = CONFIG['titles_sync']
 
 
 # the skill a supervisor runs on, the anchors its core must keep and what else its lint reads

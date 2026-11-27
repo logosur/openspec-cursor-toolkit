@@ -1663,10 +1663,11 @@ class Connector(CliBase):
 
     def test_the_document_names_the_tools_and_the_page_size(self):
         document = self.delegated('--from', 'a@example.org')
-        self.assertEqual(set(document), {'delegate', 'kind', 'tool', 'arguments', 'read_tool'})
+        self.assertEqual(set(document), {'delegate', 'kind', 'tool', 'arguments', 'read_tool', 'paging'})
         self.assertEqual((document['delegate'], document['kind'], document['tool'], document['read_tool']),
                          ('connector', 'gmail', 'search_threads', 'get_thread'))
-        self.assertEqual(document['arguments']['pageSize'], 20)
+        self.assertEqual(document['arguments'], {'query': 'from:a@example.org', 'pageSize': 20, 'view': 'THREAD_VIEW_SUMMARY'})
+        self.assertEqual(document['paging'], {'requested': 20, 'page_size': 20, 'capped': False})
         self.assertEqual(self.delegated('--limit', '5')['arguments']['pageSize'], 5)
 
     def test_each_filter_is_translated_to_the_connector_query_language(self):
@@ -1737,7 +1738,8 @@ class Connector(CliBase):
         code, out, _ = self.run_cli('whoami', 'hosted')
         self.assertEqual(code, 0)
         first, rest = out.split('\n', 1)
-        self.assertEqual(json.loads(first), {'tool': 'search_threads', 'arguments': {'query': 'in:sent', 'pageSize': 1}})
+        self.assertEqual(json.loads(first), {'tool': 'search_threads', 'arguments': {
+            'query': 'in:sent', 'pageSize': 1, 'view': 'THREAD_VIEW_METADATA_ONLY'}})
         self.assertIn('mailbox whoami hosted --sender ADDRESS', rest)
 
     def test_whoami_sender_matches_the_address_or_an_alias_case_insensitively(self):
@@ -1770,6 +1772,371 @@ class Connector(CliBase):
         out = self.run_cli('accounts')[1]
         self.assertIn('hosted', out)
         self.assertIn('connector (gmail)', out)
+
+
+# ---------------------------------------------------------------- connector call shape (mailbox-connector-call-shape)
+
+SEARCH_VIEWS = ('THREAD_VIEW_METADATA_ONLY', 'THREAD_VIEW_MINIMAL', 'THREAD_VIEW_IDS_ONLY', 'THREAD_VIEW_SUMMARY')
+READ_FORMATS = ('MINIMAL', 'FULL_CONTENT', 'METADATA_ONLY', 'PLAIN_TEXT')
+
+
+def contains_old(new, old):
+    """Every key of OLD is in NEW with the same value (recursively for objects): the meaning of 'additive'."""
+    if isinstance(old, dict):
+        return isinstance(new, dict) and all(k in new and contains_old(new[k], v) for k, v in old.items())
+    return new == old
+
+
+class ConnectorCallBase(CliBase):
+    def hosted(self, connector=None, **extra):
+        account = {'address': fx.ADDRESS, 'backends': ['connector'], 'connector': dict(connector or {})}
+        account.update(extra)
+        self.write_config({'accounts': {'hosted': account, 'work': fx.account_config(self.root)['accounts']['work']}})
+
+    def call(self, *args, expect=10):
+        code, out, err = self.run_cli(*args)
+        self.assertEqual(code, expect, (args, err))
+        if expect == 10:
+            self.assertEqual((out.count('\n'), err), (1, ''), args)
+            return json.loads(out)
+        return out, err
+
+    def refused(self, *args):
+        code, out, err = self.run_cli(*args)
+        self.assertEqual((code, out), (2, ''), (args, err))
+        self.assertEqual(len(err.strip().splitlines()), 1, err)
+        return err
+
+
+class ConnectorCompatibility(ConnectorCallBase):
+    """Task 1: what the connector commands printed BEFORE this change keeps its name and value (design D8)."""
+
+    OLD_SEARCH = {'delegate': 'connector', 'kind': 'gmail', 'tool': 'search_threads', 'read_tool': 'get_thread',
+                  'arguments': {'query': '', 'pageSize': 20}}
+    OLD_LEGACY = {'delegate': 'connector', 'kind': 'gmail', 'tool': 'get_thread',
+                  'note': 'call this tool with the id returned by the search call'}
+
+    def setUp(self):
+        super().setUp()
+        self.hosted()
+
+    def test_every_old_key_of_a_search_document_is_still_there(self):
+        self.assertTrue(contains_old(self.call('search', 'hosted'), self.OLD_SEARCH))
+        old = {**self.OLD_SEARCH, 'arguments': {'query': 'from:a@example.org', 'pageSize': 20}}
+        self.assertTrue(contains_old(self.call('search', 'hosted', '--from', 'a@example.org'), old))
+        old = {**self.OLD_SEARCH, 'arguments': {'query': '', 'pageSize': 5}}
+        self.assertTrue(contains_old(self.call('search', 'hosted', '--limit', '5'), old))
+
+    def test_show_and_thread_keep_their_keys_and_gain_arguments(self):
+        for command in ('show', 'thread'):
+            document = self.call(command, 'hosted', 'abc')
+            self.assertTrue(contains_old({k: v for k, v in document.items() if k != 'note'},
+                                         {k: v for k, v in self.OLD_LEGACY.items() if k != 'note'}))
+            self.assertIn('note', document)
+
+    def test_folders_and_save_print_exactly_the_legacy_document(self):
+        self.assertEqual(self.call('folders', 'hosted'), self.OLD_LEGACY)
+        self.assertEqual(self.call('save', 'hosted', 'abc', '--out', str(Path(self.tmp, 'o'))), self.OLD_LEGACY)
+
+    def test_whoami_keeps_its_old_keys_and_its_second_line(self):
+        code, out, _ = self.run_cli('whoami', 'hosted')
+        first, rest = out.split('\n', 1)
+        self.assertEqual(code, 0)
+        self.assertTrue(contains_old(json.loads(first), {'tool': 'search_threads',
+                                                         'arguments': {'query': 'in:sent', 'pageSize': 1}}))
+        self.assertEqual(rest, 'Make that call with the connector, read the From address of the message it returns, then run: '
+                               'mailbox whoami hosted --sender ADDRESS\n')
+
+    def test_exit_codes_agree_for_search_show_and_thread(self):
+        for args in (('search', 'hosted'), ('show', 'hosted', 'abc'), ('thread', 'hosted', 'abc'), ('folders', 'hosted'),
+                     ('save', 'hosted', 'abc', '--out', str(Path(self.tmp, 'o')))):
+            code, out, err = self.run_cli(*args)
+            self.assertEqual((code, err), (10, ''), args)
+            self.assertTrue(out.startswith('{') and out.count('\n') == 1, args)
+
+
+class ConnectorSearchCall(ConnectorCallBase):
+    """R-VIEW, R-PAGE, R-NOTICE."""
+
+    def setUp(self):
+        super().setUp()
+        self.hosted()
+
+    def test_default_view_and_exact_arguments_keys(self):
+        document = self.call('search', 'hosted', '--from', 'user@example.org')
+        self.assertEqual(document['arguments']['view'], 'THREAD_VIEW_SUMMARY')
+        self.assertEqual(set(document['arguments']), {'query', 'pageSize', 'view'})
+
+    def test_per_account_view_and_every_known_view(self):
+        for view in SEARCH_VIEWS:
+            self.hosted({'search_view': view})
+            self.assertEqual(self.call('search', 'hosted')['arguments']['view'], view)
+        self.write_config({'accounts': {
+            'one': {'address': fx.ADDRESS, 'connector': {'search_view': 'THREAD_VIEW_METADATA_ONLY'}},
+            'two': {'address': fx.ADDRESS, 'connector': {}}}})
+        self.assertEqual(self.call('search', 'one')['arguments']['view'], 'THREAD_VIEW_METADATA_ONLY')
+        self.assertEqual(self.call('search', 'two')['arguments']['view'], 'THREAD_VIEW_SUMMARY')
+
+    def test_existing_keys_are_untouched_on_a_combined_query(self):
+        document = self.call('search', 'hosted', '--subject', 'plan', '--since', '2026-11-01')
+        self.assertEqual((document['delegate'], document['kind'], document['tool'], document['read_tool']),
+                         ('connector', 'gmail', 'search_threads', 'get_thread'))
+        self.assertEqual(document['arguments']['query'], 'subject:plan after:2026/11/01')
+        self.assertEqual(document['arguments']['pageSize'], 20)
+
+    def test_the_page_size_is_cut_at_the_maximum(self):
+        for given, wanted in (((), 20), (('--limit', '20'), 20), (('--limit', '50'), 50), (('--limit', '200'), 50),
+                              (('--limit', '0'), 1), (('--limit', '-3'), 1)):
+            self.assertEqual(self.call('search', 'hosted', *given)['arguments']['pageSize'], wanted, given)
+
+    def test_a_configured_maximum_is_used_and_stated(self):
+        self.hosted({'page_size_max': 10})
+        document = self.call('search', 'hosted', '--limit', '25')
+        self.assertEqual(document['arguments']['pageSize'], 10)
+        self.assertEqual((document['paging']['requested'], document['paging']['page_size'], document['paging']['capped']),
+                         (25, 10, True))
+        self.hosted({'page_size_max': 100})
+        self.assertEqual(self.call('search', 'hosted', '--limit', '80')['arguments']['pageSize'], 80)
+
+    def test_the_notice_is_outside_the_arguments_and_always_present(self):
+        self.assertEqual(self.call('search', 'hosted', '--limit', '20')['paging'],
+                         {'requested': 20, 'page_size': 20, 'capped': False})
+        self.assertEqual(self.call('search', 'hosted', '--limit', '50')['paging'],
+                         {'requested': 50, 'page_size': 50, 'capped': False})
+        capped = self.call('search', 'hosted', '--limit', '200')
+        self.assertEqual({k: v for k, v in capped['paging'].items() if k != 'how'},
+                         {'requested': 200, 'page_size': 50, 'capped': True, 'continue_with': 'pageToken'})
+        self.assertTrue(capped['paging']['how'].strip())
+        self.assertEqual(set(capped['arguments']), {'query', 'pageSize', 'view'})
+        self.assertEqual(self.call('search', 'hosted', '--limit', '0')['paging']['requested'], 1)
+
+    def test_the_header_filter_is_still_refused(self):
+        self.assertIn('--header', self.refused('search', 'hosted', '--header', 'X-Thing: 1'))
+
+
+class ConnectorReadCall(ConnectorCallBase):
+    """R-READ, R-HTML, R-LEGACY."""
+
+    def setUp(self):
+        super().setUp()
+        self.hosted()
+
+    def test_default_read_call_for_show_and_thread(self):
+        for command in ('show', 'thread'):
+            document = self.call(command, 'hosted', 'abc123')
+            self.assertEqual(set(document), {'delegate', 'kind', 'tool', 'arguments', 'note'})
+            self.assertEqual((document['delegate'], document['kind'], document['tool']), ('connector', 'gmail', 'get_thread'))
+            self.assertEqual(document['arguments'], {'threadId': 'abc123', 'messageFormat': 'PLAIN_TEXT'})
+
+    def test_the_read_tool_comes_from_the_configuration(self):
+        self.hosted({'read_tool': 'open_mail'})
+        self.assertEqual(self.call('show', 'hosted', 'abc')['tool'], 'open_mail')
+
+    def test_the_id_is_carried_unchanged(self):
+        for given in ('18f3A_c-9', ' padded ', 'a"quote', 'ünï', '{"x": 1}'):
+            self.assertEqual(self.call('show', 'hosted', given)['arguments']['threadId'], given)
+
+    def test_an_empty_id_is_refused(self):
+        self.refused('show', 'hosted', '')
+        self.refused('thread', 'hosted', '   ')
+
+    def test_every_read_format_is_accepted_per_account(self):
+        for value in READ_FORMATS:
+            self.hosted({'read_format': value})
+            self.assertEqual(self.call('show', 'hosted', 'abc123')['arguments']['messageFormat'], value)
+
+    def test_full_content_only_on_request(self):
+        self.hosted({'read_format': 'FULL_CONTENT'})
+        self.assertEqual(self.call('show', 'hosted', 'abc')['arguments']['messageFormat'], 'FULL_CONTENT')
+        self.hosted()
+        self.assertEqual(self.call('show', 'hosted', 'abc')['arguments']['messageFormat'], 'PLAIN_TEXT')
+        self.assertEqual(self.call('thread', 'hosted', 'abc')['arguments']['messageFormat'], 'PLAIN_TEXT')
+        self.assertEqual(self.call('show', 'hosted', 'abc', '--full-content')['arguments']['messageFormat'], 'FULL_CONTENT')
+
+    def test_the_flag_wins_over_the_setting(self):
+        self.hosted({'read_format': 'METADATA_ONLY'})
+        self.assertEqual(self.call('thread', 'hosted', 'abc', '--full-content')['arguments']['messageFormat'], 'FULL_CONTENT')
+
+    def test_the_flag_on_another_backend_is_a_usage_error(self):
+        self.write_config({'accounts': {'both': {'address': fx.ADDRESS, 'backends': ['imap', 'local'],
+                                                 'local': {'profile_roots': [str(self.root)]}},
+                                        'work': fx.account_config(self.root)['accounts']['work']}})
+        for command in ('show', 'thread'):
+            self.assertIn('--full-content', self.refused(command, 'work', 'l:INBOX-1:000000000000', '--full-content'))
+        self.assertFalse(self.cache.exists(), 'nothing was read')
+
+    def test_no_option_selects_the_cheap_reads(self):
+        code, out, _ = self.run_cli('show', 'hosted', 'abc123', '--format', 'MINIMAL')
+        self.assertEqual((code, out), (2, ''))
+
+    def test_other_options_of_show_change_nothing(self):
+        plain = self.run_cli('show', 'hosted', 'abc123')
+        options = self.run_cli('show', 'hosted', 'abc123', '--body-chars', '200', '--no-quote', '--headers', '--json')
+        self.assertEqual(plain, options)
+
+    def test_folders_and_save_have_no_arguments(self):
+        for args in (('folders', 'hosted'), ('save', 'hosted', 'abc', '--out', str(Path(self.tmp, 'o')))):
+            document = self.call(*args)
+            self.assertEqual(set(document), {'delegate', 'kind', 'tool', 'note'})
+
+    def test_a_connector_kind_other_than_gmail_keeps_its_documents(self):
+        self.hosted({'kind': 'other', 'search_view': 'nonsense', 'page_size_max': 0})
+        self.assertIn('no query translation', self.refused('search', 'hosted'))
+        self.assertNotIn('UNUSABLE', self.run_cli('accounts')[1])
+        legacy = self.call('show', 'hosted', 'abc')
+        self.assertEqual(set(legacy), {'delegate', 'kind', 'tool', 'note'})
+        self.assertEqual(self.run_cli('show', 'hosted', 'abc', '--full-content')[1], self.run_cli('show', 'hosted', 'abc')[1])
+        out = self.run_cli('whoami', 'hosted')[1]
+        self.assertEqual(json.loads(out.split('\n', 1)[0]), {'tool': 'search_threads',
+                                                             'arguments': {'query': 'in:sent', 'pageSize': 1}})
+
+
+class ConnectorWhoami(ConnectorCallBase):
+    """R-WHOAMI."""
+
+    def test_the_view_is_fixed_and_the_page_size_is_one(self):
+        self.hosted({'search_view': 'THREAD_VIEW_IDS_ONLY', 'page_size_max': 10})
+        code, out, _ = self.run_cli('whoami', 'hosted')
+        self.assertEqual(code, 0)
+        first, rest = out.split('\n', 1)
+        self.assertEqual(json.loads(first), {'tool': 'search_threads', 'arguments': {
+            'query': 'in:sent', 'pageSize': 1, 'view': 'THREAD_VIEW_METADATA_ONLY'}})
+        self.assertIn('mailbox whoami hosted --sender ADDRESS', rest)
+
+    def test_the_sender_check_is_unchanged(self):
+        self.hosted(aliases=['Alias@Example.com'])
+        for sender in (fx.ADDRESS.upper(), 'alias@example.com'):
+            self.assertEqual(self.run_cli('whoami', 'hosted', '--sender', sender)[0], 0)
+        code, out, err = self.run_cli('whoami', 'hosted', '--sender', fx.OTHER)
+        self.assertEqual((code, out), (3, ''))
+        self.assertIn('another mailbox', err)
+
+
+class ConnectorSettings(ConnectorCallBase):
+    """R-CFG, R-UNUSABLE, R-ID and the shared defaults (design D6)."""
+
+    def test_the_defaults_are_the_literals_of_the_spec(self):
+        cli = load_cli()
+        settings = cli.mail_connector.connector_settings({'connector': {}})
+        self.assertEqual((settings['search_view'], settings['read_format'], settings['page_size_max']),
+                         ('THREAD_VIEW_SUMMARY', 'PLAIN_TEXT', 50))
+        self.assertEqual(cli.mail_connector.WHOAMI_VIEW, 'THREAD_VIEW_METADATA_ONLY')
+        self.assertEqual(cli.mail_connector.SEARCH_VIEWS, SEARCH_VIEWS)
+        self.assertEqual(cli.mail_connector.READ_FORMATS, READ_FORMATS)
+        given = {'connector': {'search_view': 'THREAD_VIEW_MINIMAL', 'read_format': 'MINIMAL', 'page_size_max': 7}}
+        settings = cli.mail_connector.connector_settings(given)
+        self.assertEqual((settings['search_view'], settings['read_format'], settings['page_size_max']),
+                         ('THREAD_VIEW_MINIMAL', 'MINIMAL', 7))
+        self.assertEqual(cli.ACCOUNT_DEFAULTS['connector'], {'kind': 'gmail', 'search_tool': 'search_threads',
+                                                             'read_tool': 'get_thread'})
+
+    def test_absent_and_null_are_the_default(self):
+        for connector in ({}, {'search_view': None, 'read_format': None, 'page_size_max': None}):
+            self.hosted(connector)
+            self.assertEqual(self.call('search', 'hosted')['arguments']['view'], 'THREAD_VIEW_SUMMARY')
+            self.assertEqual(self.call('show', 'hosted', 'abc')['arguments']['messageFormat'], 'PLAIN_TEXT')
+            self.assertEqual(self.call('search', 'hosted', '--limit', '90')['arguments']['pageSize'], 50)
+
+    def test_an_unknown_view_names_the_setting_and_the_known_values(self):
+        self.hosted({'search_view': 'THREAD_VIEW_FULL'})
+        err = self.refused('search', 'hosted')
+        self.assertIn('connector.search_view', err)
+        for view in SEARCH_VIEWS:
+            self.assertIn(view, err)
+
+    def test_a_wrong_case_is_not_repaired(self):
+        self.hosted({'read_format': 'plain_text'})
+        err = self.refused('show', 'hosted', 'abc123')
+        self.assertIn('connector.read_format', err)
+        for value in READ_FORMATS:
+            self.assertIn(value, err)
+        self.hosted({'search_view': 'thread_view_summary'})
+        self.refused('search', 'hosted')
+
+    def test_a_value_that_is_not_a_string_is_refused(self):
+        for key, command in (('search_view', ('thread', 'hosted', 'abc123')), ('read_format', ('show', 'hosted', 'abc123'))):
+            for value in (3, ['THREAD_VIEW_SUMMARY'], '', False, {}):
+                self.hosted({key: value})
+                self.assertIn(f'connector.{key}', self.refused(*command), (key, value))
+
+    def test_the_page_size_maximum_is_a_whole_number_of_at_least_one(self):
+        for value in (0, -5, 2.5, 50.0, True, False, '50', [50], {}):
+            self.hosted({'page_size_max': value})
+            self.assertIn('connector.page_size_max', self.refused('search', 'hosted'), value)
+        for value in (1, 50, 100):
+            self.hosted({'page_size_max': value})
+            self.assertEqual(self.call('search', 'hosted', '--limit', '200')['arguments']['pageSize'], value)
+
+    def test_an_invalid_setting_makes_every_command_that_picks_the_account_exit_2(self):
+        self.hosted({'search_view': 'nope'})
+        for args in (('search', 'hosted'), ('show', 'hosted', 'abc'), ('thread', 'hosted', 'abc'), ('folders', 'hosted'),
+                     ('save', 'hosted', 'abc', '--out', str(Path(self.tmp, 'o'))), ('whoami', 'hosted'),
+                     ('whoami', 'hosted', '--sender', fx.ADDRESS)):
+            self.refused(*args)
+        code, out, _ = self.run_cli('accounts')
+        self.assertEqual(code, 0)
+        self.assertRegex(out, r'hosted .*UNUSABLE: connector\.search_view')
+        code, out, _ = self.run_cli('doctor', 'hosted')
+        self.assertEqual(code, 2, 'doctor ACCOUNT picks the account first')
+        code, out, _ = self.run_cli('doctor')
+        self.assertEqual(code, 3)
+        self.assertIn('unusable: connector.search_view', out)
+
+    def test_the_settings_of_another_backend_are_not_checked(self):
+        self.write_config({'accounts': {'hosted': {'address': fx.ADDRESS, 'backends': ['imap'],
+                                                   'imap': {'host': fx.HOST, 'credentials_file': str(Path(self.tmp, 'x.env'))},
+                                                   'connector': {'search_view': 'nope', 'page_size_max': 0}}}})
+        code, out, err = self.run_cli('accounts')
+        self.assertEqual(code, 0)
+        self.assertNotIn('UNUSABLE', out)
+
+    def test_no_server_identifier_in_any_output(self):
+        overrides = {'search_view': 'THREAD_VIEW_MINIMAL', 'read_format': 'FULL_CONTENT', 'page_size_max': 5,
+                     'search_tool': 'find_mail', 'read_tool': 'open_mail'}
+        for connector in ({}, overrides):
+            self.hosted(connector)
+            for args in (('search', 'hosted', '--limit', '90'), ('show', 'hosted', 'abc'), ('thread', 'hosted', 'abc'),
+                         ('folders', 'hosted'), ('save', 'hosted', 'abc', '--out', str(Path(self.tmp, 'o'))),
+                         ('whoami', 'hosted'), ('accounts',), ('doctor', 'hosted'), ('--help',)):
+                code, out, err = self.run_cli(*args)
+                for text in (out, err):
+                    self.assertNotIn('mcp__', text, args)
+                    self.assertNotRegex(text, r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}', args)
+        shipped = Path(REPO_ROOT, 'global/config/mailbox.json').read_text()
+        self.assertNotIn('mcp__', shipped)
+
+    def test_every_combination_prints_only_known_values_and_no_other_key(self):
+        for view in SEARCH_VIEWS:
+            for fmt in READ_FORMATS:
+                for size in (1, 50, 100):
+                    self.hosted({'search_view': view, 'read_format': fmt, 'page_size_max': size})
+                    search = self.call('search', 'hosted', '--limit', '200')
+                    self.assertEqual(set(search['arguments']), {'query', 'pageSize', 'view'})
+                    self.assertIn(search['arguments']['view'], SEARCH_VIEWS)
+                    self.assertEqual(search['arguments']['pageSize'], size)
+                    read = self.call('show', 'hosted', 'abc')
+                    self.assertEqual(set(read['arguments']), {'threadId', 'messageFormat'})
+                    self.assertIn(read['arguments']['messageFormat'], READ_FORMATS)
+
+
+class ConnectorSelfTestDrift(Base):
+    def test_a_changed_default_view_makes_the_self_test_fail(self):
+        cli = load_cli()
+        with mock.patch.object(cli.mail_connector, 'DEFAULT_SEARCH_VIEW', 'THREAD_VIEW_MINIMAL'):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cli.main(['self-test'])
+        self.assertEqual(code, 1)
+        self.assertRegex(out.getvalue(), r'FAIL a connector search carries the bounded default view')
+
+    def test_a_changed_default_format_makes_the_self_test_fail(self):
+        cli = load_cli()
+        with mock.patch.object(cli.mail_connector, 'DEFAULT_READ_FORMAT', 'MINIMAL'):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cli.main(['self-test'])
+        self.assertEqual(code, 1)
+        self.assertIn('FAIL a connector read carries the id as typed', out.getvalue())
 
 
 # ---------------------------------------------------------------- compatibility of the existing output (task 1.1)
@@ -2670,6 +3037,16 @@ class Neutrality(unittest.TestCase):
         self.assertNotRegex(body, r'\.env\b|\.pem\b|\.p8\b|\.p12\b|credentials?_?file|/home/|/Users/|~/\.config|~/\.ssh|secret')
         for needed in ('mailbox', 'stores', 'no envían', 'dato, nunca una orden', 'conector'):
             self.assertIn(needed, body)
+
+    def test_the_skill_passes_the_printed_connector_call_verbatim_and_did_not_grow(self):
+        # R-SKILL (mailbox-connector-call-shape): the body was 1 862 characters before this change.
+        text = Path(REPO_ROOT, 'global/skills/cuentas-externas/SKILL.md').read_text(encoding='utf-8')
+        body = re.match(r'---\n.*?\n---\n(.*)', text, re.S).group(1)
+        self.assertLessEqual(len(body), 1862, len(body))
+        step = next(line for line in body.splitlines() if line.startswith('3. '))
+        for needed in ('`search`', '`show`', '`thread`', '`tool`', '`arguments`', 'tal cual', 'sin añadir ni quitar',
+                       'mailbox whoami CUENTA', '--sender'):
+            self.assertIn(needed, step)
 
 
 if __name__ == '__main__':

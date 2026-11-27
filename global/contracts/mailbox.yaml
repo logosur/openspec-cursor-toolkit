@@ -17,6 +17,11 @@ probes:
     exit: [0]
     stdout: any
     contains: "header_scan_max"
+  - name: help documents the connector page-size setting
+    args: [--help]
+    exit: [0]
+    stdout: any
+    contains: "page_size_max"
   - name: self-test passes from the installed copy
     args: [self-test]
     exit: [0]

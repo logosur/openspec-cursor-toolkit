@@ -16,8 +16,8 @@ Usage
   mailbox search ACCOUNT [--folder inbox|sent|drafts|all|NAME] [--from TEXT] [--to TEXT] [--subject TEXT]
                  [--header 'Name: text'] [--text TEXT] [--since YYYY-MM-DD|Nd] [--until YYYY-MM-DD]
                  [--has-attachment] [--limit N] [--backend imap|local] [--json]
-  mailbox show ACCOUNT ID [--body-chars N] [--no-quote] [--headers] [--json]
-  mailbox thread ACCOUNT ID [--json]
+  mailbox show ACCOUNT ID [--body-chars N] [--no-quote] [--headers] [--json] [--full-content]
+  mailbox thread ACCOUNT ID [--json] [--full-content]
   mailbox save ACCOUNT ID --out DIR
   mailbox where ACCOUNT [FOLDER]
   mailbox whoami ACCOUNT [--sender ADDRESS]
@@ -59,10 +59,23 @@ Where
   them themselves (open them read-only).
 
 Connector accounts
-  `search` prints one JSON document (the connector's search tool, its arguments in the connector's query language, the
-  tool that reads a result) and exits 10: the session then calls that tool. `whoami ACCOUNT` prints the cheap call that
-  reveals which mailbox the connector is signed in to; `whoami ACCOUNT --sender ADDRESS` exits 0 when that address is the
-  account's (or one of its aliases), 3 when the connector belongs to another mailbox.
+  For a gmail connector, `search`, `show` and `thread` print one JSON document (the connector's tool and its complete
+  `arguments`) and exit 10: the session passes `tool` and `arguments` to the connector as printed, adding and removing nothing.
+  `search` arguments: `query` (the connector's query language), `pageSize` and `view`. `view` is THREAD_VIEW_SUMMARY unless
+  the account's `connector.search_view` is THREAD_VIEW_METADATA_ONLY, THREAD_VIEW_MINIMAL or THREAD_VIEW_IDS_ONLY.
+  `pageSize` is --limit cut to the connector's maximum, 50 or `connector.page_size_max` (a whole number of at least 1);
+  the top-level key `paging` (never inside `arguments`) says `requested`, `page_size` and `capped`, and when capped how to
+  get further results: repeat the call adding the connector's `pageToken`. `search` also names `read_tool`.
+  `show` and `thread` arguments: `threadId` (the id as typed, an id that a search printed) and `messageFormat`, PLAIN_TEXT
+  unless `connector.read_format` is MINIMAL, FULL_CONTENT or METADATA_ONLY. The HTML body (FULL_CONTENT) is read only
+  through that setting or `--full-content` (a usage error on an account that is not a connector account). `folders` and
+  `save` print a note without arguments; the other options of `show` are accepted and change nothing there.
+  Values must match exactly (case included): for a gmail connector, an invalid `connector.search_view`,
+  `connector.read_format` or `connector.page_size_max` makes the account unusable (exit 2, the line names the setting).
+  A setting left out, or null, is the default.
+  `whoami ACCOUNT` prints the cheap call that reveals which mailbox the connector is signed in to (`in:sent`, one result,
+  `view` THREAD_VIEW_METADATA_ONLY, fixed, whatever `search_view` says); `whoami ACCOUNT --sender ADDRESS` exits 0 when that
+  address is the account's (or one of its aliases), 3 when the connector belongs to another mailbox.
 
 Credentials
   The `imap` password is read at run time from the env-style file named in the account's configuration, which must be
@@ -141,6 +154,8 @@ def _setting_problem(account: dict) -> str:
     local = account.get('local') if isinstance(account.get('local'), dict) else {}
     if local.get('folders') is not None and not isinstance(local['folders'], dict):
         return 'local.folders is not an object'
+    if account.get('backends') == ['connector']:
+        return mail_connector.setting_problem(account)
     return ''
 
 
@@ -345,8 +360,14 @@ def cmd_search(cfg: Config, args) -> int:
 
 def _id_command(cfg: Config, args, action, rescue=None):
     name, account = args.account, pick_account(cfg, args.account)
+    full_content = getattr(args, 'full_content', False)
+    if full_content and not is_connector(account):
+        fail(PIECE, USAGE, '--full-content applies to a connector account only')
     if is_connector(account):
-        output.print_json(mail_connector.read_document(account))
+        if args.command in ('show', 'thread') and mail_connector.connector_settings(account)['kind'] == 'gmail':
+            output.print_json(mail_connector.read_call(account, args.id, full_content))
+        else:
+            output.print_json(mail_connector.read_document(account))
         raise SystemExit(DELEGATED)
     wanted = id_backend(args.id)
     if getattr(args, 'backend', None) and args.backend != wanted:
@@ -541,10 +562,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument('--no-quote', action='store_true')
     p.add_argument('--headers', action='store_true', help='print every header')
     p.add_argument('--json', action='store_true')
+    p.add_argument('--full-content', action='store_true', help='connector account: read the whole message with its HTML body')
     p = add('thread', 'list the messages related to one message', cmd_thread)
     p.add_argument('account')
     p.add_argument('id')
     p.add_argument('--json', action='store_true')
+    p.add_argument('--full-content', action='store_true', help='connector account: read the whole message with its HTML body')
     p = add('save', "write a message's attachments into a directory", cmd_save)
     p.add_argument('account')
     p.add_argument('id')

@@ -12,6 +12,8 @@ Se cargan en todas las sesiones, así que son breves. Las políticas de cada pro
 - Lo que lo documentado no zanja lo decide un panel de agentes (skill `panel-de-decision`), se anota y se sigue.
 - Antes de borrar, publicar o tocar estado difícil de recuperar: fijar el objetivo exacto y preferir lo reversible.
 - Matar solo procesos propios (`~/.claude/rules/matar-procesos-solo-propios.md`).
+- Subagentes y sesiones nuevas con modelo explícito y barato; Opus o Fable solo con motivo escrito
+  (`~/.claude/rules/subagentes-con-modelo-explicito.md`).
 
 ## Git
 - Consultas de solo lectura (`status`, `diff`, `log`) siempre permitidas.

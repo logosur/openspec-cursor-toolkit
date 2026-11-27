@@ -3,6 +3,7 @@
 Run from the repository root:
     python3 -m unittest openspec/changes/omniroute-llm-pool/evidence/test_simulate.py
 """
+import calendar
 import contextlib
 import io
 import json
@@ -11,6 +12,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import simulate  # noqa: E402
@@ -30,6 +32,7 @@ class Builder:
     def __init__(self, path, tasks_dir, start):
         self.path, self.tasks_dir, self.t = path, tasks_dir, start
         self.records, self.n = [], 0
+        self.owner = 'owner-demo'   # the --owner of every arming
 
     # -- low level
     def _emit(self, rec, sidechain=False):
@@ -52,7 +55,8 @@ class Builder:
         return {'type': 'tool_use', 'id': f'toolu_{self.n}', 'name': name, 'input': tool_input}
 
     def arm(self, guard=False):
-        cmd = '~/scripts/supervisor-lock wait --dir ~/work --owner owner-demo --timeout 600' + (' --guard' if guard else '')
+        cmd = (f'~/scripts/supervisor-lock wait --dir ~/work --owner {self.owner} --timeout 600'
+               + (' --guard' if guard else ''))
         return self.tool('Bash', command=cmd, run_in_background=True)
 
     def assistant(self, blocks, units, mid=None, sidechain=False):
@@ -105,6 +109,18 @@ class Builder:
             if block is not new_arm:
                 self.result(block, 'ok')
         return new_arm
+
+    def bare_wake(self, arm, task, write_output_file=None, status='completed', then_human=True):
+        """A wake that starts no turn of its own: the notification, then straight away the next user record.
+
+        With `then_human` that record is a real user message; without it the caller emits the next notification.
+        """
+        if write_output_file is not None:
+            with open(os.path.join(self.tasks_dir, task + '.output'), 'w') as fh:
+                fh.write(write_output_file)
+        self.notification(arm, task, status=status)
+        if then_human:
+            self.human('next real message')
 
     def write(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
@@ -422,7 +438,8 @@ class SeededCase(unittest.TestCase):
         out = os.path.join(self.tmp, 'figures.json')
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            code = simulate.main(['--projects-dir', self.projects, '--weights', '1,0.1,1.25,5', '--json', out])
+            code = simulate.main(['--projects-dir', self.projects, '--journal-dir', os.path.join(self.tmp, 'no-journal'),
+                                  '--weights', '1,0.1,1.25,5', '--json', out])
         self.assertEqual(code, 0)
         report = buf.getvalue()
         with open(out) as fh:
@@ -506,7 +523,8 @@ class DetectionCase(unittest.TestCase):
 
     def test_classify(self):
         def turn(events, **kw):
-            base = {'guard': False, 'events': events, 'compacted': False, 'ended': True, 'criteria': set()}
+            base = {'guard': False, 'events': events, 'compacted': False, 'ended': True, 'criteria': set(),
+                    'assistant_messages': 1}
             base.update(kw)
             return base
         c = simulate.classify_wake
@@ -536,6 +554,35 @@ class DetectionCase(unittest.TestCase):
         self.assertEqual(c(turn(['CRASH a 0->1'], ended=False))['kind'], 'hard')
         done = c(turn(['TIMEOUT 5s'], criteria={'deploy'}))
         self.assertEqual((done['needed'], done['criteria']), (True, ['deploy']))
+
+    def test_classify_no_turn_applies_to_soft_wakes_only(self):
+        def turn(events, **kw):
+            base = {'guard': False, 'events': events, 'compacted': False, 'ended': True, 'criteria': set(),
+                    'assistant_messages': 0}
+            base.update(kw)
+            return base
+        c = simulate.classify_wake
+
+        def pair(result):
+            return result['kind'], result['reason']
+        # soft wakes with no message of their own
+        self.assertEqual(pair(c(turn(['STATUS a idle->busy']))), ('unclassified', 'no turn'))
+        self.assertEqual(pair(c(turn(['TIMEOUT 600s', 'REGISTRY_BIG f 1 (x)']))), ('unclassified', 'no turn'))
+        self.assertIsNone(c(turn(['STATUS a idle->busy']))['needed'])
+        # the rule comes before the compaction check; an unfinished turn comes first (it may still be answered)
+        self.assertEqual(c(turn(['STATUS a idle->busy'], compacted=True))['reason'], 'no turn')
+        self.assertEqual(c(turn(['STATUS a idle->busy'], ended=False))['reason'], 'turn not ended')
+        # with a message of its own the same wake is classified
+        self.assertEqual(c(turn(['STATUS a idle->busy'], assistant_messages=1))['kind'], 'soft_idle')
+        # hard wakes keep their reasons whether or not they started a turn
+        self.assertEqual(pair(c(turn(['NEW b']))), ('hard', 'event'))
+        self.assertEqual(pair(c(turn(['TIMEOUT 600s', 'NEW b']))), ('hard', 'event'))
+        self.assertEqual(pair(c(turn(['TIMEOUT 600s'], guard=True))), ('hard', 'guard'))
+        self.assertEqual(pair(c(turn([], guard=True))), ('hard', 'guard'))
+        # no event at all: no output (or watcher stopped) as before, never no turn
+        self.assertEqual(pair(c(turn([]))), ('unclassified', 'no output'))
+        self.assertEqual(pair(c(turn([], status='stopped'))), ('hard', 'watcher stopped'))
+        self.assertEqual(pair(c(turn(['REGISTRY_BIG f 1 (x)']))), ('unclassified', 'no output'))
 
     def test_stopped_watcher_is_hard_and_not_slept(self):
         tmp = tempfile.mkdtemp(prefix='simulate-test-')
@@ -587,6 +634,379 @@ class DetectionCase(unittest.TestCase):
             self.assertEqual(parsed['armings'], 1)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+SLACK = simulate.JOURNAL_SLACK_S
+
+
+def record(events, started, ended, owner='local_sup'):
+    return {'events': events, 'started': started, 'ended': ended, 'owner': owner}
+
+
+def write_journal(folder, records, name='project-key.jsonl'):
+    """Append journal records (epoch times in `started`/`ended`) to one journal file; returns the folder."""
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, name), 'a', encoding='utf-8') as fh:
+        for r in records:
+            fh.write(json.dumps({'ended': iso(r['ended']), 'events': r['events'], 'owner': r['owner'],
+                                 'started': iso(r['started'])}, sort_keys=True) + '\n')
+    return folder
+
+
+class JournalCase(unittest.TestCase):
+    """The durable watcher journal as a third source of a wake's events, and the "no turn" rule."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='simulate-test-')
+        self.tasks = os.path.join(self.tmp, 'tasks')
+        os.makedirs(self.tasks)
+        self.counter = 0
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    # -- helpers
+    def builder(self, guard=False, name='sess'):
+        b = Builder(os.path.join(self.tmp, 'projects', 'slug', name + '.jsonl'), self.tasks, BASE)
+        b.owner = 'local_sup'
+        b.human('go')
+        arm = b.arm(guard)
+        b.assistant([arm], 1)
+        return b, arm
+
+    def send(self):
+        self.counter += 1
+        return {'type': 'tool_use', 'id': f'toolu_send{self.counter}', 'name': 'SendMessage', 'input': {'to': 'y'}}
+
+    def task(self):
+        self.counter += 1
+        return f'tsk-{self.counter}'
+
+    def one_wake(self, output=None, guard=False, after=(), bare=False, **kw):
+        """One supervisor with one wake. Returns (arming time, notification time, transcript path)."""
+        b, arm = self.builder(guard)
+        arm_ts = b.t
+        b.at(BASE + 600)
+        notified = b.t + 1
+        if bare:
+            b.bare_wake(arm, self.task(), **kw)
+        else:
+            b.wake(arm, self.task(), output, after=after, **kw)
+            b.human('next real message')
+        b.write()
+        return arm_ts, notified, b.path
+
+    def journal(self, records=()):
+        folder = tempfile.mkdtemp(dir=self.tmp, prefix='journal-')
+        if records:
+            write_journal(folder, records)
+        return simulate.load_journal(folder)
+
+    def wakes(self, path, records=()):
+        """[(turn, classification)] of the wakes of a transcript parsed with a journal made of `records`."""
+        parsed = simulate.parse_transcript(path, journal=self.journal(records))
+        return [(t, simulate.classify_wake(t)) for t in parsed['turns'] if t['kind'] == 'wake']
+
+    def classify(self, path, records=()):
+        found = self.wakes(path, records)
+        self.assertEqual(len(found), 1)
+        return found[0]
+
+    @staticmethod
+    def shape(info):
+        return info['kind'], info['reason'], info['needed']
+
+    # -- (a) the journal is read
+    def test_journal_gives_the_events_when_nothing_else_does(self):
+        arm_ts, notified, path = self.one_wake(None)
+        turn, info = self.classify(path, [record(['TIMEOUT 600s'], arm_ts + 2, notified - 2)])
+        self.assertEqual(self.shape(info), ('soft_timeout', None, False))
+        self.assertEqual(turn['events_source'], 'journal')
+        self.assertEqual(turn['events'], ['TIMEOUT 600s'])
+        # the turn decides whether it was needed
+        arm_ts, notified, path = self.one_wake(None, after=[self.send()])
+        turn, info = self.classify(path, [record(['TIMEOUT 600s'], arm_ts + 2, notified - 2)])
+        self.assertEqual(self.shape(info), ('soft_timeout', None, True))
+        self.assertEqual(info['criteria'], ['message'])
+
+    def test_a_record_far_before_the_notification_still_matches(self):
+        # the notification can arrive long after the watcher exited: never match on "ended close to the notification"
+        arm_ts, notified, path = self.one_wake(None)
+        turn, info = self.classify(path, [record(['TIMEOUT 600s'], arm_ts + 2, notified - 500)])
+        self.assertEqual((info['kind'], turn['events_source']), ('soft_timeout', 'journal'))
+
+    def test_the_slack_is_inclusive(self):
+        arm_ts, notified, path = self.one_wake(None)
+        self.assertEqual(SLACK, 5.0)
+        turn, info = self.classify(path, [record(['TIMEOUT 600s'], arm_ts - SLACK, notified + SLACK)])
+        self.assertEqual((info['kind'], turn['events_source']), ('soft_timeout', 'journal'))
+
+    # -- (b) the class does not depend on the source
+    def test_same_class_from_the_transcript_and_from_the_journal(self):
+        cases = [
+            (['STATUS local_a idle->busy', 'REGISTRY_BIG /x 30000 (advice)'], 'soft_idle'),
+            (['STATUS local_a idle->busy', 'STATUS local_c idle->busy'], 'soft_idle'),
+            (['TIMEOUT 600s'], 'soft_timeout'),
+            (['NEW local_b'], 'hard'),
+            (['TIMEOUT 600s', 'NEW local_b'], 'hard'),
+        ]
+        for events, kind in cases:
+            for needed_after in (False, True):
+                with self.subTest(events=events, needed=needed_after):
+                    after = [self.send()] if needed_after else ()
+                    _a, _n, from_transcript = self.one_wake('\n'.join(events) + '\n[exited with code 0]', after=after)
+                    t_turn, t_info = self.classify(from_transcript)
+                    arm_ts, notified, from_nothing = self.one_wake(None, after=after)
+                    j_turn, j_info = self.classify(from_nothing, [record(events, arm_ts + 2, notified - 2)])
+                    self.assertEqual((t_turn['events_source'], j_turn['events_source']), ('transcript', 'journal'))
+                    self.assertEqual(self.shape(t_info), self.shape(j_info))
+                    self.assertEqual(t_info['kind'], kind)
+                    self.assertEqual(t_info['criteria'], j_info['criteria'])
+        # a record that only carries the advisory line leaves the wake without events
+        arm_ts, notified, path = self.one_wake(None)
+        _turn, info = self.classify(path, [record(['REGISTRY_BIG /x 30000 (advice)'], arm_ts + 2, notified - 2)])
+        self.assertEqual(self.shape(info), ('unclassified', 'no output', None))
+
+    # -- (c) the transcript wins
+    def test_transcript_and_output_file_win_over_the_journal(self):
+        arm_ts, notified, path = self.one_wake('STATUS local_a idle->busy')
+        other = [record(['NEW local_b'], arm_ts + 2, notified - 2)]
+        turn, info = self.classify(path, other)
+        self.assertEqual((info['kind'], turn['events_source']), ('soft_idle', 'transcript'))
+        self.assertEqual(turn['events'], ['STATUS local_a idle->busy'])
+        arm_ts, notified, path = self.one_wake(None, write_output_file='TIMEOUT 600s\n')
+        turn, info = self.classify(path, [record(['NEW local_b'], arm_ts + 2, notified - 2)])
+        self.assertEqual((info['kind'], turn['events_source']), ('soft_timeout', 'output file'))
+
+    # -- (d) no match: unchanged
+    def test_no_match_leaves_the_wake_without_output(self):
+        arm_ts, notified, path = self.one_wake(None)
+        ev = ['TIMEOUT 600s']
+        cases = {
+            'no record': [],
+            'record of another owner': [record(ev, arm_ts + 2, notified - 2, owner='local_other')],
+            'started before the arming': [record(ev, arm_ts - SLACK - 1, notified - 2)],
+            'ended after the notification': [record(ev, arm_ts + 2, notified + SLACK + 1)],
+            'two records of the owner': [record(ev, arm_ts + 2, arm_ts + 100), record(ev, arm_ts + 100, notified - 2)],
+            'two identical records': [record(ev, arm_ts + 2, notified - 2)] * 2,
+        }
+        for name, records in cases.items():
+            with self.subTest(name):
+                turn, info = self.classify(path, records)
+                self.assertEqual(self.shape(info), ('unclassified', 'no output', None))
+                self.assertIsNone(turn['events_source'])
+                self.assertEqual(turn['events'], [])
+
+    def test_each_wake_gets_its_own_record(self):
+        b, arm = self.builder()
+        t0 = b.t
+        b.at(t0 + 600)
+        n1 = b.t + 1
+        arm = b.wake(arm, self.task(), None)
+        rearmed = n1 + 1            # the re-arm record of the first wake
+        b.at(t0 + 1200)
+        n2 = b.t + 1
+        b.wake(arm, self.task(), None)
+        b.human('next real message')
+        b.write()
+        records = [record(['TIMEOUT 600s'], t0 + 2, n1 - 100),
+                   record(['STATUS local_a idle->busy'], rearmed + 2, n2 - 100)]
+        found = self.wakes(b.path, records)
+        self.assertEqual([i['kind'] for _t, i in found], ['soft_timeout', 'soft_idle'])
+        self.assertEqual([t['events_source'] for t, _i in found], ['journal', 'journal'])
+
+    def test_unknown_owner_or_arming_time_gives_no_events(self):
+        j = {'local_sup': [{'started': 10.0, 'ended': 20.0, 'events': ['TIMEOUT 600s']}]}
+        self.assertEqual(simulate._journal_events(j, 'local_sup', 10.0, 21.0), ['TIMEOUT 600s'])
+        self.assertEqual(simulate._journal_events(j, None, 10.0, 21.0), [])
+        self.assertEqual(simulate._journal_events(j, 'local_sup', None, 21.0), [])
+        self.assertEqual(simulate._journal_events(j, 'local_sup', 10.0, None), [])
+        self.assertEqual(simulate._journal_events(None, 'local_sup', 10.0, 21.0), [])
+        self.assertEqual(simulate._journal_events({}, 'local_sup', 10.0, 21.0), [])
+
+    def test_owner_of_an_arming_command(self):
+        def owner(command):
+            return simulate._arm_owner({'command': command})
+        self.assertEqual(owner('supervisor-lock wait --dir d --owner local_x --timeout 9'), 'local_x')
+        self.assertEqual(owner('supervisor-lock wait --owner=local_x --timeout 9'), 'local_x')
+        self.assertEqual(owner('supervisor-lock wait --owner "local_x" --guard'), 'local_x')
+        self.assertEqual(owner("supervisor-lock wait --owner 'local_x'"), 'local_x')
+        self.assertIsNone(owner('supervisor-lock wait --owner "$OWNER"'))
+        self.assertIsNone(owner('supervisor-lock wait --timeout 9'))
+
+    # -- (e) a wake older than the file
+    def test_a_wake_older_than_the_journal_stays_unclassified(self):
+        arm_ts, notified, path = self.one_wake(None)
+        later = [record(['TIMEOUT 600s'], notified + 1000, notified + 1100)]
+        for records in ([], later):
+            turn, info = self.classify(path, records)
+            self.assertEqual(self.shape(info), ('unclassified', 'no output', None))
+        folder = self.journal_dir_with_empty_file()
+        parsed = simulate.parse_transcript(path, journal=simulate.load_journal(folder))
+        self.assertEqual([simulate.classify_wake(t)['reason'] for t in parsed['turns'] if t['kind'] == 'wake'],
+                         ['no output'])
+
+    def journal_dir_with_empty_file(self):
+        folder = tempfile.mkdtemp(dir=self.tmp, prefix='journal-')
+        open(os.path.join(folder, 'old-project.jsonl'), 'w').close()
+        return folder
+
+    # -- (f) a soft wake that started no turn
+    def test_a_soft_wake_without_a_turn_of_its_own_is_unclassified(self):
+        # from the temporary output file (a transcript read needs a message of its own, so it cannot be bare)
+        _a, _n, path = self.one_wake(bare=True, write_output_file='STATUS local_a idle->busy\n')
+        turn, info = self.classify(path)
+        self.assertEqual((turn['events_source'], turn['assistant_messages']), ('output file', 0))
+        self.assertEqual(self.shape(info), ('unclassified', 'no turn', None))
+        # from the journal
+        arm_ts, notified, path = self.one_wake(bare=True)
+        for events in (['TIMEOUT 600s'], ['STATUS local_a idle->busy', 'REGISTRY_BIG /x 30000 (advice)']):
+            turn, info = self.classify(path, [record(events, arm_ts + 2, notified - 2)])
+            self.assertEqual((turn['events_source'], turn['assistant_messages']), ('journal', 0))
+            self.assertEqual(self.shape(info), ('unclassified', 'no turn', None))
+            self.assertEqual(info['criteria'], [])
+
+    def test_a_wake_with_a_read_of_its_own_is_not_no_turn(self):
+        _a, _n, path = self.one_wake('STATUS local_a idle->busy')
+        turn, info = self.classify(path)
+        self.assertGreaterEqual(turn['assistant_messages'], 1)
+        self.assertEqual(info['kind'], 'soft_idle')
+
+    def test_hard_wakes_keep_their_reasons_without_a_turn(self):
+        arm_ts, notified, path = self.one_wake(bare=True)
+        turn, info = self.classify(path, [record(['NEW local_b'], arm_ts + 2, notified - 2)])
+        self.assertEqual((turn['assistant_messages'], info['kind'], info['reason']), (0, 'hard', 'event'))
+        _a, _n, path = self.one_wake(bare=True, write_output_file='TIMEOUT 600s\nNEW local_b\n')
+        turn, info = self.classify(path)
+        self.assertEqual((info['kind'], info['reason']), ('hard', 'event'))
+        # a guard wake stays hard whatever it holds
+        for output in ('TIMEOUT 600s\n', None):
+            _a, _n, path = self.one_wake(guard=True, bare=True, write_output_file=output)
+            turn, info = self.classify(path)
+            self.assertEqual((turn['assistant_messages'], info['kind'], info['reason']), (0, 'hard', 'guard'))
+
+    def test_no_events_and_no_turn_keeps_its_own_reason(self):
+        _a, _n, path = self.one_wake(bare=True)
+        self.assertEqual(self.shape(self.classify(path)[1]), ('unclassified', 'no output', None))
+        _a, _n, path = self.one_wake(bare=True, status='stopped')
+        info = self.classify(path)[1]
+        self.assertEqual((info['kind'], info['reason']), ('hard', 'watcher stopped'))
+
+    # -- (g) rule B and the counts
+    def test_no_turn_wake_is_unclassified_in_the_counts_and_ends_a_stretch(self):
+        b, arm = self.builder()
+        send = b.tool('SendMessage', to='local_a')
+        t = BASE + 600
+        for i in (1, 2, 3):                                  # three soft wakes, the second one needed
+            b.at(t + 600 * i)
+            arm = b.wake(arm, self.task(), ONE_IDLE, after=[send] if i == 2 else ())
+        b.at(t + 600 * 4)
+        b.bare_wake(arm, self.task(), write_output_file=ONE_IDLE, then_human=False)   # soft, no turn of its own
+        for i in (5, 6, 7):                                  # three more
+            b.at(t + 600 * i)
+            arm = b.wake(arm, self.task(), ONE_IDLE)
+        b.human('thanks')
+        b.write()
+        parsed = simulate.parse_transcript(b.path)
+        res = simulate.summarize([parsed], None)
+        self.assertEqual(res['wakes']['total'], 7)
+        self.assertEqual((res['wakes']['soft_idle'], res['wakes']['unclassified']), (6, 1))
+        self.assertEqual(res['wakes']['unclassified_reasons'], {'no turn': 1})
+        self.assertEqual((res['soft']['classified'], res['soft']['needed'], res['soft']['not_needed']), (6, 1, 5))
+        self.assertAlmostEqual(res['rates']['unclassified_share_pct'], round(100 / 7, 2))
+        # all six classified soft wakes are slept: the unclassified wake ended the first stretch (a run of six would
+        # have been cut at four); the one in the middle is never slept
+        self.assertEqual(res['rule_b']['slept'], 6)
+        self.assertEqual(res['rule_b']['needed_slept'], 1)
+        self.assertEqual(res['supervisors'][0]['unclassified'], 1)
+        self.assertEqual(res['decision']['row'], 1)
+        text = simulate.render_markdown(res)
+        self.assertIn('Unclassified, by reason: no turn 1.', text)
+
+    # -- (h) nothing from the journal is printed
+    def test_report_and_json_hold_only_the_count_of_journal_wakes(self):
+        arm_ts, notified, _path = self.one_wake(None)       # written under <tmp>/projects/slug
+        marker = 'ASKDUE 1 q-secret-marker «text»'
+        folder = write_journal(os.path.join(self.tmp, 'journal-seeded'), [record([marker], arm_ts + 2, notified - 2)])
+        out = os.path.join(self.tmp, 'figures.json')
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = simulate.main(['--projects-dir', os.path.join(self.tmp, 'projects'), '--journal-dir', folder,
+                                  '--json', out])
+        self.assertEqual(code, 0)
+        report = buf.getvalue()
+        with open(out, encoding='utf-8') as fh:
+            raw_json = fh.read()
+        for text in (report, raw_json):
+            for secret in ('q-secret-marker', 'ASKDUE', 'text»', 'local_sup', 'project-key', folder):
+                self.assertNotIn(secret, text)
+        self.assertIn('Wakes whose events were read from the journal: 1.', report)
+        figures = json.loads(raw_json)
+        self.assertEqual((figures['wakes_from_journal'], figures['wakes']['hard']), (1, 1))
+
+    def test_analyze_takes_a_directory_a_loaded_journal_or_none(self):
+        arm_ts, notified, _path = self.one_wake(None)
+        folder = write_journal(os.path.join(self.tmp, 'journal-seeded'),
+                               [record(['TIMEOUT 600s'], arm_ts + 2, notified - 2)])
+        projects = os.path.join(self.tmp, 'projects')
+        by_dir = simulate.analyze(projects, journal=folder)
+        by_dict = simulate.analyze(projects, journal=simulate.load_journal(folder))
+        without = simulate.analyze(projects)
+        self.assertEqual((by_dir['wakes_from_journal'], by_dir['wakes']['soft_timeout']), (1, 1))
+        self.assertEqual(by_dir, by_dict)
+        self.assertEqual((without['wakes_from_journal'], without['wakes']['unclassified']), (0, 1))
+        self.assertEqual(without['wakes']['unclassified_reasons'], {'no output': 1})
+        self.assertIn('Wakes whose events were read from the journal: 0.', simulate.render_markdown(without))
+
+    def test_default_journal_folder_follows_the_supervisor_home(self):
+        with mock.patch.dict(os.environ, {'SUPERVISOR_LOCK_HOME': '/some/home'}):
+            self.assertEqual(simulate.default_journal_dir(), os.path.join('/some/home', 'wakes'))
+        with mock.patch.dict(os.environ):
+            os.environ.pop('SUPERVISOR_LOCK_HOME', None)
+            self.assertEqual(simulate.default_journal_dir(),
+                             os.path.join(os.path.expanduser('~/.claude/supervisor'), 'wakes'))
+
+    # -- (i) reading the journal files
+    def test_load_journal_skips_bad_lines_and_a_missing_folder_is_empty(self):
+        self.assertEqual(simulate.load_journal(os.path.join(self.tmp, 'absent')), {})
+        self.assertEqual(simulate.load_journal(None), {})
+        folder = os.path.join(self.tmp, 'journal')
+        os.makedirs(folder)
+        good = {'ended': '2026-11-27T08:10:00.456Z', 'events': ['STATUS local_a idle->busy', 'REGISTRY_BIG /x 3 (y)'],
+                'owner': 'local_sup', 'started': '2026-11-27T08:00:00.123Z'}
+        lines = [
+            json.dumps(good),
+            'not json at all',
+            '',
+            '[1, 2]',
+            '"text"',
+            json.dumps({k: v for k, v in good.items() if k != 'owner'}),
+            json.dumps({**good, 'owner': ''}),
+            json.dumps({**good, 'owner': 5}),
+            json.dumps({k: v for k, v in good.items() if k != 'ended'}),
+            json.dumps({k: v for k, v in good.items() if k != 'started'}),
+            json.dumps({**good, 'started': 'yesterday'}),
+            json.dumps({**good, 'ended': 1795000000}),
+            json.dumps({**good, 'events': 'STATUS local_a idle->busy'}),
+            json.dumps({**good, 'events': ['TIMEOUT 600s', 7]}),
+            json.dumps({k: v for k, v in good.items() if k != 'events'}),
+            json.dumps({**good, 'events': []}),
+        ]
+        with open(os.path.join(folder, 'one.jsonl'), 'w', encoding='utf-8') as fh:
+            fh.write('\n'.join(lines) + '\n')
+        with open(os.path.join(folder, 'two.jsonl'), 'w', encoding='utf-8') as fh:
+            fh.write(json.dumps({**good, 'owner': 'local_other', 'events': ['NEW local_b']}) + '\n')
+        with open(os.path.join(folder, 'ignored.json'), 'w', encoding='utf-8') as fh:   # not a journal file
+            fh.write(json.dumps({**good, 'owner': 'local_ignored'}) + '\n')
+        loaded = simulate.load_journal(folder)
+        self.assertEqual(sorted(loaded), ['local_other', 'local_sup'])
+        self.assertEqual(len(loaded['local_sup']), 2)       # the good record and the one with an empty event list
+        first = loaded['local_sup'][0]
+        self.assertEqual(first['events'], good['events'])
+        self.assertAlmostEqual(first['started'], calendar.timegm((2026, 11, 27, 8, 0, 0)) + 0.123, places=3)
+        self.assertAlmostEqual(first['ended'], calendar.timegm((2026, 11, 27, 8, 10, 0)) + 0.456, places=3)
+        self.assertEqual(loaded['local_sup'][1]['events'], [])
+        self.assertEqual(loaded['local_other'][0]['events'], ['NEW local_b'])
 
 
 if __name__ == '__main__':

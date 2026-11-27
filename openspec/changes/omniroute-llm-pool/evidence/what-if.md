@@ -79,7 +79,7 @@ Window B is the baseline, because it is the watcher as it runs today. It is **th
 - Commands hidden inside quotes, scripts or wrappers are not seen by the detection of git writes and deploys.
 - The rule's two figures are upper bounds, as said.
 - The usage of a turn is the sum of its main-model messages; subagents and advisor sub-calls are not in it.
-- A wake that started no turn and whose events are known is counted as soft and not needed, with no tokens. It adds to the classified wakes and lowers the needed rate; how many of the 202 are of that kind was not counted.
+- A wake that started no turn and whose events are known is counted as soft and not needed, with no tokens. It adds to the classified wakes and lowers the needed rate; how many of the 202 are of that kind was not counted. *Since task 6.4 the simulator leaves such a wake unclassified ("no turn") and also reads the watcher's journal; the figures of this report were taken before that and were not run again.*
 - Two definitions were set after seeing the data: a stopped watcher is a hard wake, and the central weights decide the row. The first does not change the row. The second matters only once row 1 no longer applies: at the central weights the saving is above the 5 % line, and with cache reads counted as free it is below.
 - One machine, one week, and the back-off changed the mix of wakes on the last evening of it.
 

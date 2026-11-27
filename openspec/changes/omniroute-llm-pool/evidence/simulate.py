@@ -14,12 +14,23 @@ Definitions used here (all from D15 unless noted):
   "until the supervisor's next arming of the watcher". Real supervisors re-arm and then keep acting, so the end of
   the turn is used instead (the spec is to be corrected). User records flagged `isMeta` are text the harness injects
   inside a turn (for example a loaded skill), so they do not end it.
+* Events of a wake: the watcher's output lines, read from the first source that holds any: (1) the tool result of a
+  read of the task's output file in the transcript, (2) the temporary output file itself, (3) the watcher's durable
+  journal, `<supervisor home>/wakes/<key>.jsonl` (one JSON record per watcher run: started, ended, owner, events;
+  the supervisor home is `$SUPERVISOR_LOCK_HOME` or `~/.claude/supervisor`). The temporary files vanish, the journal
+  does not. A journal record is used only when it is the single record of the arming's owner that started no earlier
+  than 5 seconds before the arming and ended no later than 5 seconds after the notification (the notification can
+  arrive long after the watcher exited); with none or several the wake has no events, as without a journal. Every
+  source goes through the same event-line filter, so the class does not depend on where the lines came from.
 * Hard / soft: a wake of a watcher armed with `--guard` is hard. Otherwise it is soft when every event line is
   `STATUS <id> idle->busy`, or when the only event line is `TIMEOUT ...`; anything else is hard. The advisory
   `REGISTRY_BIG` line the watcher may append after its events never causes a wake, so it is ignored here. A wake
   with no event line whose notification status is not `completed` is also hard (reason "watcher stopped"): the
   watcher was stopped or died and never finished, so no triage could have slept it; with status `completed` or
   unknown it stays unclassified.
+* No turn: a soft wake whose turn holds no main-model (assistant) message of its own is unclassified, reason "no
+  turn": it started nothing a rule could have saved, and it says nothing about whether the wake was needed. Hard wakes
+  keep their reasons whether or not they started a turn.
 * Needed: any tool_use of the closed list (message, session start/stop/archive, git write, deploy, panel, question)
   anywhere in the turn of a soft wake, main transcript only.
 * Rule B: per supervisor, in time order, sleep every classified soft wake while fewer than 4 sleeps in a row were made
@@ -27,7 +38,8 @@ Definitions used here (all from D15 unless noted):
   are UPPER BOUNDS: the deadline, the time the periodic report falls due and "something waits for the supervisor"
   are not in the history.
 
-The report never prints a path, a project slug, a session id, a command or any text from a transcript.
+The report never prints a path, a project slug, a session id, a command, an owner id, a journal line or any text
+from a transcript; of the journal it gives only the count of wakes whose events came from it.
 """
 import argparse
 import calendar
@@ -56,6 +68,7 @@ ADVISORY_KEYWORDS = ('REGISTRY_BIG',)
 _EVENT_RE = re.compile(r'^(?:\s*\d+[\u2192\t])?\s*(' + '|'.join(EVENT_KEYWORDS) + r')(?=\s|$)')
 _SOFT_STATUS_RE = re.compile(r'^STATUS \S+ idle->busy$')
 
+JOURNAL_SLACK_S = 5.0         # clock slack, in seconds, when matching a journal record to an arming and its notification
 MAX_RUN = 4                   # consecutive sleeps (D8 bound 5)
 MAX_SPAN_S = 2 * 3600         # maximum silent time (D8 bound 2)
 SOFT_KINDS = ('soft_idle', 'soft_timeout')
@@ -238,6 +251,15 @@ def _is_arming(tool_input):
     return 'supervisor-lock wait' in cmd and '--owner' in cmd
 
 
+_OWNER_RE = re.compile(r'--owner(?:=|\s+)(["\']?)([^\s"\']+)\1')
+
+
+def _arm_owner(tool_input):
+    """The `--owner <id>` (or `--owner=<id>`) of an arming command, or None (also for a shell variable)."""
+    m = _OWNER_RE.search(str(tool_input.get('command') or ''))
+    return m.group(2) if m and not m.group(2).startswith('$') else None
+
+
 def _is_guard(tool_input):
     return re.search(r'(?<![\w-])--guard(?![\w-])', str(tool_input.get('command') or '')) is not None
 
@@ -258,7 +280,8 @@ def file_has_marker(path, marker=b'supervisor-lock wait'):
 
 def _new_turn(turns, kind, ts):
     turn = {'index': len(turns), 'kind': kind, 'ts': ts, 'ended': False, 'compacted': False, 'guard': False,
-            'task_id': None, 'output_file': None, 'status': None, 'events': [], 'tools': Counter(),
+            'task_id': None, 'output_file': None, 'status': None, 'events': [], 'events_source': None,
+            'arm_ts': None, 'owner': None, 'assistant_messages': 0, 'tools': Counter(),
             'criteria': set(), 'usage': dict.fromkeys(CLASSES, 0)}
     turns.append(turn)
     return turn
@@ -275,15 +298,71 @@ def _read_output_file(path):
         return []
 
 
-def parse_transcript(path, since=None, until=None):
+def _journal_record(line):
+    """One journal line as {'owner', 'started', 'ended', 'events'}, or None when it is not a usable record."""
+    try:
+        rec = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(rec, dict):
+        return None
+    owner, events = rec.get('owner'), rec.get('events')
+    started = to_epoch(rec['started']) if isinstance(rec.get('started'), str) else None
+    ended = to_epoch(rec['ended']) if isinstance(rec.get('ended'), str) else None
+    if not isinstance(owner, str) or not owner or started is None or ended is None:
+        return None
+    if not isinstance(events, list) or not all(isinstance(e, str) for e in events):
+        return None
+    return {'owner': owner, 'started': started, 'ended': ended, 'events': events}
+
+
+def load_journal(journal_dir):
+    """{owner: [{'started', 'ended', 'events'}, ...]} from every `*.jsonl` of a directory; {} when it is missing.
+
+    The simulator does not know the project keys the files are named after, so records are indexed by owner. Lines that
+    are not usable records are skipped.
+    """
+    out = {}
+    if not journal_dir:
+        return out
+    folder = os.path.expanduser(str(journal_dir))
+    try:
+        names = sorted(n for n in os.listdir(folder) if n.endswith('.jsonl'))
+    except OSError:
+        return out
+    for name in names:
+        try:
+            with open(os.path.join(folder, name), encoding='utf-8', errors='replace') as fh:
+                for line in fh:
+                    rec = _journal_record(line)
+                    if rec is not None:
+                        out.setdefault(rec['owner'], []).append(
+                            {'started': rec['started'], 'ended': rec['ended'], 'events': rec['events']})
+        except OSError:
+            continue
+    return out
+
+
+def _journal_events(journal, owner, armed_at, notified_at):
+    """The event lines of the single journal record of `owner` inside [armed_at, notified_at] (with slack), else []."""
+    if not journal or owner is None or armed_at is None or notified_at is None:
+        return []
+    hits = [r for r in journal.get(owner, ())
+            if r['started'] >= armed_at - JOURNAL_SLACK_S and r['ended'] <= notified_at + JOURNAL_SLACK_S]
+    return event_lines('\n'.join(hits[0]['events'])) if len(hits) == 1 else []
+
+
+def parse_transcript(path, since=None, until=None, journal=None):
     """Stream one transcript into turns.
 
     `since`/`until` are window_bound() values. Returns {'armings', 'first_arming', 'first_ts', 'last_ts', 'flow',
     'turns'}; a transcript with `armings == 0` is not a supervisor transcript. Each turn: kind ('preamble' = records
     before the first user turn, 'other', 'wake'), ts, usage by class, and for wakes the guard flag, the watcher event
-    lines, the tool names, the needed-criteria that fired, and whether the turn ended or held a compaction.
+    lines and where they came from, the tool names, the needed-criteria that fired, the number of main-model messages
+    of its own, and whether the turn ended or held a compaction. `journal` is a load_journal() result, used only for a
+    wake whose events neither the transcript nor the output file hold.
     """
-    armings = {}      # tool_use id -> armed with --guard
+    armings = {}      # tool_use id -> {'guard', 'ts' (epoch of the arming record), 'owner'}
     turns = []
     cur = _new_turn(turns, 'preamble', None)
     messages = {}     # message id -> [turn index, [usage values]]
@@ -323,6 +402,7 @@ def parse_transcript(path, since=None, until=None):
                     messages[mid][1] = [max(a, b) for a, b in zip(messages[mid][1], values)]
                 else:
                     messages[mid] = [cur['index'], values]
+                    cur['assistant_messages'] += 1
                 content = msg.get('content')
                 for block in content if isinstance(content, list) else ():
                     if not isinstance(block, dict) or block.get('type') != 'tool_use':
@@ -335,7 +415,8 @@ def parse_transcript(path, since=None, until=None):
                     name = str(block.get('name') or '')
                     tool_input = block.get('input') if isinstance(block.get('input'), dict) else {}
                     if name == 'Bash' and tool_input.get('run_in_background') and _is_arming(tool_input):
-                        armings[tid] = _is_guard(tool_input)
+                        armings[tid] = {'guard': _is_guard(tool_input), 'ts': to_epoch(stamp),
+                                        'owner': _arm_owner(tool_input)}
                         if first_arming is None:
                             first_arming = to_epoch(stamp)
                     if cur['kind'] == 'wake':
@@ -353,6 +434,8 @@ def parse_transcript(path, since=None, until=None):
                             turn = pending.pop(block.get('tool_use_id'), None)
                             if turn is not None and not turn['events']:
                                 turn['events'] = event_lines(text_of(block.get('content')))
+                                if turn['events']:
+                                    turn['events_source'] = 'transcript'
                     continue
                 if rec.get('isMeta'):
                     continue
@@ -363,7 +446,9 @@ def parse_transcript(path, since=None, until=None):
                 tuid = _tag(text, 'tool-use-id') if notified else None
                 if tuid is not None and tuid in armings:
                     cur = _new_turn(turns, 'wake', to_epoch(stamp))
-                    cur['guard'] = armings[tuid]
+                    cur['guard'] = armings[tuid]['guard']
+                    cur['arm_ts'] = armings[tuid]['ts']
+                    cur['owner'] = armings[tuid]['owner']
                     cur['task_id'] = _tag(text, 'task-id')
                     cur['output_file'] = _tag(text, 'output-file')
                     cur['status'] = _tag(text, 'status')
@@ -378,6 +463,13 @@ def parse_transcript(path, since=None, until=None):
     for turn in turns:
         if turn['kind'] == 'wake' and not turn['events'] and turn['output_file']:
             turn['events'] = _read_output_file(turn['output_file'])
+            if turn['events']:
+                turn['events_source'] = 'output file'
+    for turn in turns:
+        if turn['kind'] == 'wake' and not turn['events']:
+            turn['events'] = _journal_events(journal, turn['owner'], turn['arm_ts'], turn['ts'])
+            if turn['events']:
+                turn['events_source'] = 'journal'
     return {'armings': len(armings), 'first_arming': first_arming, 'first_ts': first_ts, 'last_ts': last_ts,
             'flow': flow, 'turns': turns}
 
@@ -412,11 +504,14 @@ def classify_wake(turn):
         result['kind'] = 'hard'
         result['reason'] = 'event'
         return result
+    if not turn['ended']:
+        result.update(kind='unclassified', reason='turn not ended')   # the supervisor may still answer it
+        return result
+    if not turn['assistant_messages']:
+        result.update(kind='unclassified', reason='no turn')   # soft only: the wake started nothing a rule could save
+        return result
     if turn['compacted']:
         result.update(kind='unclassified', reason='compaction in turn')
-        return result
-    if not turn['ended']:
-        result.update(kind='unclassified', reason='turn not ended')
         return result
     result['kind'] = kind
     result['criteria'] = sorted(turn['criteria'])
@@ -489,8 +584,13 @@ def _tool_label(name):
     return 'mcp__*__' + name.split('__')[-1] if name.startswith('mcp__') else name
 
 
-def analyze(projects_dir, since=None, until=None, weights=None):
-    """Parse every supervisor transcript of the projects directory and return the report figures (no ids, no paths)."""
+def analyze(projects_dir, since=None, until=None, weights=None, journal=None):
+    """Parse every supervisor transcript of the projects directory and return the report figures (no ids, no paths).
+
+    `journal` is a load_journal() result or the directory to load it from; None uses no journal.
+    """
+    if isinstance(journal, (str, os.PathLike)):
+        journal = load_journal(journal)
     since_n, until_n = window_bound(since), window_bound(until)
     since_epoch = to_epoch(since_n) if since_n else None
     found = []
@@ -500,7 +600,7 @@ def analyze(projects_dir, since=None, until=None, weights=None):
                 continue
             if not file_has_marker(path):
                 continue
-            parsed = parse_transcript(path, since_n, until_n)
+            parsed = parse_transcript(path, since_n, until_n, journal)
         except OSError:
             continue
         if parsed['armings']:
@@ -515,6 +615,7 @@ def summarize(parsed, weights, since=None, until=None):
     by_kind = {k: dict.fromkeys(CLASSES, 0) for k in (*KIND_ORDER, 'other')}
     wake_counts = Counter()
     reasons = Counter()
+    from_journal = 0
     hard_reasons = Counter()
     criteria_seen = Counter()
     needed_total = 0
@@ -535,6 +636,8 @@ def summarize(parsed, weights, since=None, until=None):
                 turn['class'], turn['reason'], turn['needed'], turn['criteria_fired'] = (
                     info['kind'], info['reason'], info['needed'], info['criteria'])
                 wakes[info['kind']] += 1
+                if turn.get('events_source') == 'journal':
+                    from_journal += 1
                 _add(by_kind[info['kind']], turn['usage'])
                 if info['kind'] == 'unclassified':
                     reasons[info['reason']] += 1
@@ -580,6 +683,7 @@ def summarize(parsed, weights, since=None, until=None):
         'weights': list(weights) if weights else None,
         'basis': 'weighted' if weights else 'raw',
         'supervisors': supervisors,
+        'wakes_from_journal': from_journal,
         'hours_total': round(sum(s['hours'] for s in supervisors), 2),
         'wakes': {'total': sum(wake_counts.values()), **{k: wake_counts[k] for k in KIND_ORDER},
                   'hard_reasons': {r: hard_reasons[r] for r in HARD_REASONS},
@@ -646,6 +750,9 @@ def render_markdown(res):
     wk = res['wakes']
     out += ['', '## Wakes by kind', '', f'Total wakes: {wk["total"]}.', '']
     out += _table(['Kind', 'Wakes'], [[KIND_LABEL[k], wk[k]] for k in KIND_ORDER])
+    out += ['', 'Events are read from the transcript, else from the temporary output file, else from the durable watcher '
+            'journal. A soft wake that started no turn of its own is unclassified (reason "no turn").',
+            '', f'Wakes whose events were read from the journal: {res["wakes_from_journal"]}.']
     out += ['', 'Hard, by reason: ' + ', '.join(f'{r} {n}' for r, n in wk['hard_reasons'].items()) + '.']
     if wk['unclassified_reasons']:
         out += ['', 'Unclassified, by reason: ' + ', '.join(f'{r} {n}' for r, n in wk['unclassified_reasons'].items())
@@ -703,16 +810,23 @@ def _parse_weights(text):
     return values
 
 
+def default_journal_dir():
+    """`<supervisor home>/wakes`, the supervisor home being $SUPERVISOR_LOCK_HOME or ~/.claude/supervisor."""
+    return os.path.join(os.path.expanduser(os.environ.get('SUPERVISOR_LOCK_HOME', '~/.claude/supervisor')), 'wakes')
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Replay recorded supervisor wakes and compare today with a fixed rule.')
     parser.add_argument('--projects-dir', default='~/.claude/projects')
     parser.add_argument('--since', help='ISO date or time (UTC when it has no offset)')
     parser.add_argument('--until', help='ISO date or time (UTC when it has no offset)')
+    parser.add_argument('--journal-dir', default=default_journal_dir(),
+                        help='folder of the watcher journal files (*.jsonl); default <supervisor home>/wakes')
     parser.add_argument('--weights', type=_parse_weights, help='FRESH,CACHE_READ,CACHE_WRITE,OUTPUT')
     parser.add_argument('--json', metavar='FILE', help='also write the figures as JSON')
     args = parser.parse_args(argv)
     try:
-        res = analyze(args.projects_dir, args.since, args.until, args.weights)
+        res = analyze(args.projects_dir, args.since, args.until, args.weights, args.journal_dir)
     except ValueError as err:
         parser.error(str(err))
     sys.stdout.write(render_markdown(res))

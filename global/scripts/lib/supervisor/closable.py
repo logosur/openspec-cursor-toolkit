@@ -263,7 +263,7 @@ def closable_block(owner, local):
     pending.sort(key=lambda e: 0 if e.get('verdict') else 1)  # a session that already said it is done goes first
     e = pending[0]
     queue = (f'registra la decisión con `~/.claude/scripts/ask-queue add --project "$PWD" --question "¿Archivo la sesión '
-             f'«{e.get("title")}»?" --default "No archivarla" --why … --blocks …` y apárcala con '
+             f'«{e.get("title")}»?" --default "No archivarla" --why … --blocks "nada: solo su archivado"` y apárcala con '
              f'~/.claude/scripts/supervisor-lock hold --session {local} --target {e.get("id")} --reason "ask-queue <id>: '
              f'espera autorización" --hours <hasta {HOLD_MAX_H}>')
     if e.get('verdict'):

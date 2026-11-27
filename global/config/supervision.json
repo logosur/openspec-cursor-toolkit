@@ -14,6 +14,8 @@
   "queued_reannounce_min": 120,
   "slotheld_reannounce_min": 120,
   "all_idle_backoff_max_min": 120,
+  "ask_due_after_h": 24,
+  "ask_partial_batch_window_h": 12,
   "questions_session_titles": [
     "sesión de preguntas",
     "preguntas de la supervisión",

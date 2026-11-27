@@ -108,6 +108,7 @@ empiezo la escalera.
 | `IDLE <id>` (guardia) | Una sesión terminó y nadie le escribe en 20 min | Leer su último mensaje: como `HANDOFF`, dejarla si algo suyo avanza, o F4b |
 | `CLOSABLE <id>` (guardia) | Candidata al cierre | F4b en ese tick |
 | `BACKLOG` (guardia) | Un change con tareas abiertas que nadie aparcó, o cuyo aparcado caducó | Salir de guardia si es del alcance y está autorizado, o aparcarlo con lo comprobado (F9) |
+| `ASKDUE <n> <ids>` (también de guardia) | Preguntas de la cola que bloquean trabajo y nunca se le presentaron: una orden suya (`--order`) o trabajo real bloqueado más de `ask_due_after_h` horas, con la ventana de la tanda parcial abierta. `beat` lo repite en stderr | En ese tick, la tanda parcial (`f5-decisiones.md`, «Antes del final»): `ask-queue asked <ids> --to <sesión de preguntas>` y todas juntas a la sesión de preguntas. Lo que bloquean se aparca; lo demás sigue. Tras mandarla, sigues en la fase en la que estabas |
 | `CLOUD …` | Una sesión en la nube del repositorio necesita atención (si hay con qué verla) | Ver «Sesiones fuera de la máquina» |
 | `QUEUED`, `SLOTHELD` | Un trabajo pesado del proyecto espera turno, o tiene hueco mucho tiempo mientras otros esperan (módulo `heavy-jobs`) | Decir «en cola, puesto N»; comprobar que quien ocupa avanza; adelantar lo que no depende de ella. Lo de otro proyecto no se toca |
 | `NEW` | Apareció una sesión del proyecto | Censo (F1) e informe (F2). Su modo se anota, no se cambia |
@@ -153,7 +154,7 @@ Son mínimos: cuando el proyecto documenta una duración, manda el runbook, y el
 - **Qué es:** sigues con el cerrojo en fase `guardia`, con la sección de guardia en el registro, y armas
   `$L wait --owner <id> --guard --timeout 21600 --exclude <preguntas> --exclude <cierre>`. La guardia no concede nada.
 - **Qué la despierta:** las señales de la tabla menos `TURN`, `STATUS` y `ALLIDLE`, que serían demasiadas; en su lugar
-  están `IDLE`, `CLOSABLE` y `BACKLOG`.
+  están `IDLE`, `CLOSABLE` y `BACKLOG`. `ASKDUE` también: una pregunta que bloquea no espera a otro ciclo.
 - **Al despertar:** lo mismo que en un ciclo. Con `TIMEOUT`, recorres otra vez las cuatro fuentes y reescribes «Motivo de la
   guardia» con la hora. Después vuelves con `$L beat --phase guardia`, que se niega (7) si queda trabajo.
 - **Un mensaje del desarrollador en tu sesión es una orden, no una nota.** Si pide trabajo, es un ciclo nuevo:
@@ -181,8 +182,9 @@ Son mínimos: cuando el proyecto documenta una duración, manda el runbook, y el
     decisión, su fuente y que la decide la supervisora, no el desarrollador. Si el diálogo la tiene parada y bloquea
     trabajo, puedes cortar el turno con `stop_session` y mandarle la respuesta;
   - **solo del desarrollador** (autorización, alcance, límite duro): la copias a la cola con «No hacerlo» o «Esperar»
-    por defecto y le dices a la sesión que siga con lo que no dependa de eso. Si su diálogo bloquea trabajo, la cortas
-    solo después de copiarla.
+    por defecto, con lo que de verdad bloquea en `--blocks` (y `--order "<sus palabras>"` si bloquea algo que él
+    ordenó), y le dices a la sesión que siga con lo que no dependa de eso. Si su diálogo bloquea trabajo, la cortas
+    solo después de copiarla. Si bloquea, le llega en la tanda parcial (`ASKDUE`), no al final.
 - **«He terminado» o «¿hago commit?»** no son preguntas para el desarrollador: lo terminado entra en F4b, y el commit se
   hace solo si sus reglas u órdenes lo autorizan.
 

@@ -824,6 +824,138 @@ print(json.dumps(res))
         self.assertEqual(got, [['QUEUED', 'SLOTHELD'], [], ['QUEUED', 'SLOTHELD']])
 
 
+ASK_QUEUE = str(REPO_ROOT / 'global/scripts/ask-queue')
+
+
+class AskDueTest(Base):
+    """ASKDUE: ask-queue says when the project's partial batch of blocking questions may be sent; beat and the
+    watcher tell the lock owner, once per set of due ids on the watcher, and say nothing when the queue is unreadable."""
+
+    def setUp(self):
+        super().setUp()
+        self.env.update(ASK_QUEUE_BIN=ASK_QUEUE, SUPERVISOR_NUDGE='', SUPERVISOR_NOTIFY='',
+                        SUPERVISOR_APP_SESSIONS_GLOB=os.path.join(self.mkdir('app'), '*', '*', 'local_*.json'))
+        self.repo_dir = self.repo('proj')
+        r = self.run_cli('acquire', '--dir', self.repo_dir, '--session', 'local_sup')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.beat().returncode, 0)
+
+    def beat(self, env=None):
+        return self.run_cli('beat', '--dir', self.repo_dir, '--session', 'local_sup', '--mailbox', 'local_box', env=env)
+
+    def queue(self, *args):
+        r = subprocess.run([sys.executable, ASK_QUEUE, *args], capture_output=True, text=True, env=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.strip()
+
+    def add(self, question, *extra, blocks='la tarea ordenada'):
+        return self.queue('add', '--project', self.repo_dir, '--question', question, '--default', 'Esperar',
+                          '--why', 'solo lo sabe el desarrollador', '--blocks', blocks, *extra)
+
+    def test_beat_tells_the_owner_on_stderr_when_an_ordered_item_is_due(self):
+        self.assertNotIn('ASKDUE', self.beat().stderr)
+        qid = self.add('¿Qué cuenta uso?', '--order', 'hazlo primero')
+        r = self.beat()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(r.stdout.startswith('BEAT '))
+        line = next(l for l in r.stderr.splitlines() if l.startswith('ASKDUE'))
+        self.assertTrue(line.startswith(f'ASKDUE 1 {qid} '), line)
+        for needle in ('tanda parcial', 'ask-queue list --due', 'ask-queue asked <ids> --to', self.repo_dir):
+            self.assertIn(needle, line)
+        self.queue('asked', qid, '--to', 'local_box')
+        self.assertNotIn('ASKDUE', self.beat().stderr)
+
+    def test_a_young_item_or_a_closed_window_says_nothing(self):
+        self.add('¿Joven?')
+        self.add('¿No bloquea?', blocks='nada')
+        self.assertNotIn('ASKDUE', self.beat().stderr)
+        old = self.add('¿Vieja?')
+        presented = self.add('¿Presentada?')
+        self.queue('asked', presented, '--to', 'local_box')
+        with open(os.path.join(self.config, 'supervision.json'), 'w') as fh:
+            json.dump({'ask_due_after_h': 0}, fh)  # every item that blocks work is due at once
+        self.assertNotIn('ASKDUE', self.beat().stderr)  # ...but a batch was just presented: the window is closed
+        with open(os.path.join(self.config, 'supervision.json'), 'w') as fh:
+            json.dump({'ask_due_after_h': 0, 'ask_partial_batch_window_h': 0}, fh)
+        line = next(l for l in self.beat().stderr.splitlines() if l.startswith('ASKDUE'))
+        self.assertIn(old, line)
+
+    def test_the_watcher_announces_a_set_once_and_a_set_with_a_new_id_at_once(self):
+        first = self.add('¿Uno?', '--order', 'ya')
+        code = LOADER + f'''
+import json
+lock = load('supervisor_lock')
+askdue, projects = lock._module('askdue'), lock._module('projects')
+project = projects.resolve({self.repo_dir!r})
+print(json.dumps([askdue.askdue_events(project, now=1000.0), askdue.askdue_events(project, now=1000.0 + 3600)]))
+'''
+        once, again = json.loads(self.python(code))
+        self.assertEqual(len(once), 1)
+        self.assertTrue(once[0].startswith(f'ASKDUE 1 {first} '))
+        self.assertEqual(again, [])
+        second = self.add('¿Dos?', '--order', 'también')
+        later, = json.loads(self.python(code))[:1]
+        self.assertEqual(len(later), 1)
+        self.assertTrue(later[0].startswith('ASKDUE 2 '))
+        self.assertIn(second, later[0])
+
+    def test_the_watcher_reports_it_also_on_guard(self):
+        qid = self.add('¿Uno?', '--order', 'ya')
+        for extra in ((), ('--guard',)):
+            with self.subTest(extra=extra):
+                r = self.run_cli('wait', '--dir', self.repo_dir, '--owner', 'local_sup', '--interval', '0.2',
+                                 '--timeout', '5', '--all-idle-after', '0', *extra, timeout=60)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertTrue(r.stdout.startswith(f'ASKDUE 1 {qid} '), r.stdout)
+                os.remove(os.path.join(self.home, '.claude', 'supervisor', 'announced',
+                                       json.loads(self.run_cli('project', '--dir', self.repo_dir, '--json').stdout)['key']
+                                       + '.askdue.json'))
+
+    def test_without_a_readable_queue_beat_and_the_watcher_are_unchanged(self):
+        self.add('¿Uno?', '--order', 'ya')
+        missing = {'ASK_QUEUE_BIN': os.path.join(self.tmp, 'no-ask-queue')}
+        r = self.beat(env=missing)
+        self.assertEqual((r.returncode, 'ASKDUE' in r.stderr), (0, False))
+        r = self.run_cli('wait', '--dir', self.repo_dir, '--owner', 'local_sup', '--interval', '0.2', '--timeout', '1',
+                         '--all-idle-after', '0', env=missing, timeout=60)
+        self.assertEqual(r.stdout.split(), ['TIMEOUT', '1s'])
+        self.assertFalse(os.path.exists(os.path.join(self.home, '.claude', 'supervisor', 'askdue-errors.log')))
+
+
+class AskDueTextsTest(Base):
+    """The deny texts name the partial batch next to the radical path and teach --blocks and --order."""
+
+    def test_deny_texts(self):
+        out = self.python(LOADER + '''
+import json
+lock = load('supervisor_lock')
+deny, roles = lock._module('deny'), lock._module('session_roles')
+reason = lambda text: json.loads(text)['hookSpecificOutput']['permissionDecisionReason']
+roles.mailbox_alive = lambda mailbox: True
+owner = reason(deny.deny_question({'project': 'p', 'key': 'k', 'mailbox': 'local_box'}, 'local_me'))
+print(json.dumps({'owner': owner, 'absent': reason(deny.deny_absent(20)),
+                  'supervised': reason(deny.deny_supervised({'project': 'p', 'key': 'k'}, 20))}))
+''')
+        texts = json.loads(out)
+        for needle in ('radical por unanimidad', '--radical --cost', 'tanda parcial', 'ask-queue list --due', 'ASKDUE'):
+            self.assertIn(needle, texts['owner'])
+        for name in ('absent', 'supervised'):
+            with self.subTest(name=name):
+                for needle in ('--order "<sus palabras>"', 'tanda parcial', '--blocks',
+                               'sesión hija está archivada o aparcada con su decisión en ask-queue'):
+                    self.assertIn(needle, texts[name])
+        self.assertFalse(any('\n' in t for t in texts.values()))
+
+    def test_askdue_is_a_guard_event_and_the_archive_template_blocks_nothing(self):
+        out = self.python(LOADER + '''
+lock = load('supervisor_lock')
+print('ASKDUE' in lock._module('watch').GUARD_EVENTS)
+''')
+        self.assertEqual(out.strip(), 'True')
+        source = (REPO_ROOT / 'global/scripts/lib/supervisor/closable.py').read_text(encoding='utf-8')
+        self.assertIn('--blocks "nada: solo su archivado"', source)
+
+
 class DegradationTest(Base):
     """Without any optional piece every subcommand exits cleanly, with no traceback."""
 

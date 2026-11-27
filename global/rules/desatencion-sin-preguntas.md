@@ -11,8 +11,10 @@ puede preguntar.
 - **Lo que exige autorización no se decide:** commit, push, merge, publicar, desplegar, archivar y los límites duros
   (`~/.claude/rules/despliegue-y-limites-duros.md`). Sin autorización va a `~/.claude/scripts/ask-queue` con «No hacerlo»
   por defecto, y la sesión sigue con lo que no dependa de eso.
-- **Las preguntas se agrupan** en la sesión de preguntas cuando hay supervisora, al final de su ciclo. Solo se adelanta
-  un rumbo radical votado por unanimidad del panel.
+- **Las preguntas se agrupan** en la sesión de preguntas cuando hay supervisora, al final de su ciclo. Antes solo se
+  adelantan un rumbo radical votado por unanimidad del panel y la tanda parcial de las preguntas que bloquean trabajo
+  (`ask-queue list --due`): por eso, en `--blocks` va lo que de verdad bloquea y, si bloquea algo que el desarrollador
+  ordenó, se añade `--order "<sus palabras>"`. Lo que no se le ha preguntado no «espera su respuesta».
 - **Desarrollador presente:** si ha escrito en esa sesión hace muy poco, o en los últimos `presence_min` minutos (pieza
   de configuración `supervision`, 20 por defecto) pidiendo que se le pregunte, se le pregunta allí.
 - Que un hook impida preguntar no concede permiso: lo no autorizado sigue sin hacerse.

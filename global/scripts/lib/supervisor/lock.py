@@ -313,8 +313,21 @@ def cmd_beat(args):
     hint = no_mailbox_hint(project, owner)
     if hint:
         print(hint, file=sys.stderr)  # supervisors call `beat … >/dev/null`: stdout never reaches them
+    askdue_hint(project)
     rename_hint(owner)
     return 0
+
+
+def askdue_hint(project):
+    """The ASKDUE line on stderr when the project's partial batch of blocking questions may be sent now (ask-queue
+    decides). Every beat, like the NOMAILBOX hint: it costs no wake. Only reads; a failure prints nothing."""
+    try:
+        from . import askdue  # lazily: askdue imports cloud, which imports this module
+        line = askdue.askdue_line(project)
+        if line:
+            print(line, file=sys.stderr)
+    except Exception:
+        pass
 
 
 def rename_hint(owner):

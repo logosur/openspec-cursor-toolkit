@@ -3115,6 +3115,54 @@ def cmd_self_test(args):
           and 'ábrela' in reasons['question missing'] and 'La sesión de preguntas local_gone guardada' in reasons['question archived'])
     check('deny texts: absent and supervised ones say the final batch is asked in the questions session',
           all('sesión de preguntas' in reasons[k] and 'sesión hija está archivada o aparcada con su decisión en ask-queue' in reasons[k] for k in ('absent', 'supervised')))
+    check('deny texts: the owner variants name the partial batch of blocking questions next to the radical path',
+          all('tanda parcial' in reasons[k] and 'ask-queue list --due' in reasons[k] and 'ASKDUE' in reasons[k]
+              and '\n' not in reasons[k] for k in ('question alive', 'question missing', 'question archived')))
+    check('deny texts: absent and supervised ones teach a real --blocks and --order for an order of the developer',
+          all('--order "<sus palabras>"' in reasons[k] and 'tanda parcial' in reasons[k] and '--blocks' in reasons[k]
+              for k in ('absent', 'supervised')))
+
+    # 11c. partial batch of blocking questions: ask-queue decides what is due, beat and the watcher tell the owner
+    ad_repo = os.path.realpath(os.path.join(tmp, 'askdue-proj'))
+    make_repo(ad_repo)
+    ad_locks = set(os.listdir(os.path.join(lock_home, 'locks')))
+    try:
+        r = run('acquire', '--dir', ad_repo, '--session', 'local_ad')
+        check('ASKDUE: a fresh project takes its own lock', r.returncode == 0 and 'ACQUIRED' in r.stdout)
+        r = run('beat', '--dir', ad_repo, '--session', 'local_ad')
+        check('ASKDUE: an empty queue -> beat says nothing about it', r.returncode == 0 and 'ASKDUE' not in r.stderr)
+        aq('add', '--project', ad_repo, '--question', '¿Qué valor pongo?', '--default', 'Esperar', '--why', 'w',
+           '--blocks', 'nada: solo su archivado')
+        aq('add', '--project', ad_repo, '--question', '¿Qué dato falta?', '--default', 'Esperar', '--why', 'w',
+           '--blocks', 'la tarea ordenada')
+        r = run('beat', '--dir', ad_repo, '--session', 'local_ad')
+        check('ASKDUE: young items, or items that block nothing, are not due', r.returncode == 0 and 'ASKDUE' not in r.stderr)
+        q_order = aq('add', '--project', ad_repo, '--question', '¿Qué cuenta uso?', '--default', 'Esperar', '--why', 'w',
+                     '--blocks', 'la tarea ordenada', '--order', 'hazlo primero')
+        r = run('beat', '--dir', ad_repo, '--session', 'local_ad')
+        check('ASKDUE: an --order item -> beat tells the owner on stderr, stdout unchanged',
+              r.returncode == 0 and r.stdout.strip().startswith('BEAT ') and f'ASKDUE 1 {q_order} ' in r.stderr
+              and 'ask-queue list --due' in r.stderr)
+        ad_saved = {k: os.environ.get(k) for k in ('ASK_QUEUE_BIN', 'ASK_QUEUE_DIR', 'SUPERVISOR_LOCK_HOME')}
+        os.environ.update({k: env[k] for k in ad_saved})
+        try:
+            from . import askdue
+            ad_project = projects.resolve(ad_repo)
+            first, again = askdue.askdue_events(ad_project), askdue.askdue_events(ad_project)
+        finally:
+            for k, v in ad_saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        check('ASKDUE: the watcher announces a set of due ids once, and it is a guard event',
+              len(first) == 1 and first[0].startswith(f'ASKDUE 1 {q_order} ') and again == [] and 'ASKDUE' in watch.GUARD_EVENTS)
+        aq('asked', q_order, '--to', 'local_box')
+        r = run('beat', '--dir', ad_repo, '--session', 'local_ad')
+        check('ASKDUE: once presented (asked) the item is not due any more', r.returncode == 0 and 'ASKDUE' not in r.stderr)
+    finally:
+        for name in set(os.listdir(os.path.join(lock_home, 'locks'))) - ad_locks:
+            os.remove(os.path.join(lock_home, 'locks', name))
 
     def a_text(mins, text):
         return {'type': 'assistant', 'timestamp': stamp(mins),

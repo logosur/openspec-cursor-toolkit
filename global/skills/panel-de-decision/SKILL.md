@@ -24,7 +24,9 @@ panel sustituye esa pregunta por una decisión razonada, anotada y reversible.
   - envíos reales a terceros (correo masivo, redes, publicación en tiendas de apps, ediciones públicas en su nombre);
   - reescribir historia publicada y `push --force`.
 
-  Eso no se hace, no para nada más y se apunta en la cola de preguntas del proyecto con «No hacerlo» por defecto.
+  Eso no se hace, no para nada más y se apunta en la cola de preguntas del proyecto con «No hacerlo» por defecto,
+  diciendo qué bloquea. Se le pregunta en la tanda final o, si bloquea trabajo, antes, en la tanda parcial de la
+  supervisora (`ask-queue list --due`; con `--order "<sus palabras>"` si bloquea algo que él ordenó).
 - **Aprobaciones que una regla le reserva** (una imagen, una voz): el panel elige el candidato provisional para que el
   trabajo no se pare, y la aprobación queda apuntada.
 
@@ -61,7 +63,8 @@ panel sustituye esa pregunta por una decisión razonada, anotada y reversible.
 4b. **Voto aparte: ¿es un rumbo radical?** Es radical si elegir mal obligaría a tirar o rehacer una parte grande del
    trabajo futuro (otra arquitectura o stack, abandonar o redefinir una spec entera). Solo sale «sí» por unanimidad
    3/3, con el coste escrito. Si sale sí, se pregunta al desarrollador en cuanto se pueda, se aparca lo afectado y todo
-   lo demás sigue. Si sale no, se aplica la opción del panel y se sigue.
+   lo demás sigue. Si sale no, se aplica la opción del panel y se sigue. Un radical y la tanda parcial de las preguntas
+   que bloquean trabajo son lo único que se le pregunta antes de la tanda final.
 5. **Se anota y se sigue.** En el registro de decisiones del proyecto se escribe una entrada fechada con la pregunta y
    la decisión, los votos (3-0, 2-1), el motivo principal y la objeción del que discrepó, la fuente («panel de N
    agentes»), cómo se deshace, y `radical: sí/no (votos)` con su coste. Después se ejecuta, sin diálogo a mitad del

@@ -853,5 +853,193 @@ class SupervisedProjectRootTest(Base):
         self.assertEqual(self.root_of(repo), ws)
 
 
+
+def hours_ago(hours):
+    return (datetime.now(timezone.utc).astimezone() - timedelta(hours=hours)).isoformat(timespec='seconds')
+
+
+class BlockingDueTest(Base):
+    """`list --due` and the partial batch window: open, not radical, with an order or blocking real work for
+    ask_due_after_h hours; one batch per project per ask_partial_batch_window_h unless a due item carries an order."""
+
+    def queue_file(self):
+        (name,) = [n for n in os.listdir(self.state) if n.endswith('.jsonl')]
+        return os.path.join(self.state, name)
+
+    def edit(self, qid, **fields):
+        path = self.queue_file()
+        with open(path) as fh:
+            rows = [json.loads(line) for line in fh]
+        for row in rows:
+            if row['id'] == qid:
+                row.update(fields)
+        with open(path, 'w') as fh:
+            fh.writelines(json.dumps(row, ensure_ascii=False) + '\n' for row in rows)
+
+    def due(self, *args):
+        r = self.run_cli('list', '--due', '--json', *args)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return {i['id']: i for i in json.loads(r.stdout)}
+
+    def due_text(self, *args):
+        r = self.run_cli('list', '--due', *args)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout
+
+    def config(self, **values):
+        with open(os.path.join(self.env['CLAUDE_TOOLKIT_CONFIG_DIR'], 'supervision.json'), 'w') as fh:
+            json.dump(values, fh)
+
+    def test_an_order_makes_an_item_due_at_once(self):
+        proj = self.mkdir('p')
+        qid = self.add(proj, blocks='la candidatura', order='hazlo primero')
+        plain = self.add(proj, 'otra')
+        got = self.due('--project', proj)
+        self.assertEqual(set(got), {qid})
+        self.assertEqual((got[qid]['due_reason'], got[qid]['order'], got[qid]['age_h']), ('order', 'hazlo primero', 0.0))
+        self.assertNotIn(plain, got)
+
+    def test_real_work_blocked_longer_than_the_threshold_is_due_and_a_younger_item_is_not(self):
+        proj = self.mkdir('p')
+        old, young = self.add(proj, 'vieja', blocks='el envío'), self.add(proj, 'joven', blocks='el envío')
+        self.edit(old, ts=hours_ago(25))
+        self.edit(young, ts=hours_ago(23))
+        got = self.due('--project', proj)
+        self.assertEqual(set(got), {old})
+        self.assertEqual(got[old]['due_reason'], 'blocks')
+        self.assertGreaterEqual(got[old]['age_h'], 25)
+
+    def test_an_item_that_blocks_nothing_is_never_due(self):
+        proj = self.mkdir('p')
+        ids = [self.add(proj, f'q{n}', blocks=text)
+               for n, text in enumerate(('Nada', 'nada: solo su archivado', 'Ninguno', 'NINGUNA', 'ningún trabajo',
+                                         'Nothing', 'none', '', '  ...  '))]
+        for qid in ids:
+            self.edit(qid, ts=hours_ago(100))
+        self.assertEqual(self.due('--project', proj), {})
+        real = self.add(proj, 'real', blocks='nadar en la piscina')  # only the whole first word counts
+        self.edit(real, ts=hours_ago(100))
+        self.assertEqual(set(self.due('--project', proj)), {real})
+
+    def test_asked_answered_closed_and_radical_items_are_not_due(self):
+        proj = self.mkdir('p')
+        asked, answered, closed = (self.add(proj, t, order='ya') for t in ('a', 'b', 'c'))
+        radical = self.run_cli('add', '--project', proj, '--question', 'r', '--default', 'd', '--why', 'w',
+                               '--blocks', 'todo', '--radical', '--order', 'ya').stdout.strip()
+        self.run_cli('asked', asked)
+        self.run_cli('answer', answered, '--text', 'sí')
+        self.run_cli('close', closed)
+        for qid in (asked, answered, closed, radical):
+            self.edit(qid, ts=hours_ago(100))
+        self.assertEqual(self.due('--project', proj), {})
+
+    def test_items_without_the_new_field_follow_the_age_rule_and_keep_working(self):
+        proj = self.mkdir('p')
+        self.add(proj, 'nueva')
+        old = {'id': 'q-old', 'ts': '2000-01-01T10:00:00+01:00', 'project': os.path.realpath(proj), 'session': '',
+               'question': 'Antigua', 'default': 'd', 'why': 'w', 'blocks': 'el despliegue', 'status': 'open',
+               'answer': None}
+        with open(self.queue_file(), 'a') as fh:
+            fh.write(json.dumps(old) + '\n')
+        self.assertEqual(set(self.due('--project', proj)), {'q-old'})
+        self.assertEqual(self.run_cli('pending', 'q-old').stdout.split(), ['q-old', 'open'])
+
+    def test_a_blank_order_is_refused_and_writes_nothing(self):
+        proj = self.mkdir('p')
+        r = self.run_cli('add', '--project', proj, '--question', 'q', '--default', 'd', '--why', 'w', '--blocks', 'b',
+                         '--order', '   ')
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('--order', r.stderr)
+        self.assertEqual(self.listing('--project', proj), [])
+
+    def test_a_later_plain_add_keeps_the_order_and_a_new_order_replaces_it(self):
+        proj = self.mkdir('p')
+        qid = self.add(proj, order='hazlo ya')
+        self.assertEqual(self.add(proj), qid)
+        (item,) = self.listing('--project', proj)
+        self.assertEqual(item['order'], 'hazlo ya')
+        self.assertEqual(self.add(proj, order='  antes que nada  '), qid)
+        (item,) = self.listing('--project', proj)
+        self.assertEqual(item['order'], 'antes que nada')
+
+    def test_the_window_counts_from_the_last_non_radical_item_asked(self):
+        proj = self.mkdir('p')
+        name = os.path.basename(proj)
+        first, second, presented = (self.add(proj, t, blocks='la tarea') for t in ('uno', 'dos', 'tres'))
+        for qid in (first, second, presented):
+            self.edit(qid, ts=hours_ago(30))
+        self.run_cli('asked', presented)
+        self.edit(presented, asked_ts=hours_ago(13))
+        out = self.due_text('--project', proj)
+        self.assertIn(f'partial batch {name}: due now (2)', out)
+        self.assertIn(first, out)
+        self.edit(presented, asked_ts=hours_ago(2))
+        out = self.due_text('--project', proj)
+        self.assertIn(first, out)  # still listed: only the batch waits
+        self.assertRegex(out, rf'partial batch {name}: window closed until \d{{4}}-\d\d-\d\dT.* \(last asked ')
+        self.assertNotIn('due now', out)
+
+    def test_a_due_order_opens_a_closed_window(self):
+        proj = self.mkdir('p')
+        name = os.path.basename(proj)
+        presented = self.add(proj, 'presentada')
+        self.run_cli('asked', presented)
+        old = self.add(proj, 'vieja', blocks='la tarea')
+        self.edit(old, ts=hours_ago(30))
+        self.assertIn('window closed until', self.due_text('--project', proj))
+        self.add(proj, 'ordenada', order='primero esto')
+        self.assertIn(f'partial batch {name}: due now (2)', self.due_text('--project', proj))
+
+    def test_a_radical_asked_recently_does_not_close_the_window(self):
+        proj = self.mkdir('p')
+        name = os.path.basename(proj)
+        radical = self.run_cli('add', '--project', proj, '--question', 'r', '--default', 'd', '--why', 'w',
+                               '--blocks', 'todo', '--radical').stdout.strip()
+        self.run_cli('asked', radical)
+        old = self.add(proj, 'vieja', blocks='la tarea')
+        self.edit(old, ts=hours_ago(30))
+        self.assertIn(f'partial batch {name}: due now (1)', self.due_text('--project', proj))
+
+    def test_thresholds_come_from_the_supervision_piece_and_a_wrong_value_keeps_the_default(self):
+        proj = self.mkdir('p')
+        qid = self.add(proj, blocks='la tarea')
+        self.edit(qid, ts=hours_ago(3))
+        self.assertEqual(self.due('--project', proj), {})
+        self.config(ask_due_after_h=2)
+        self.assertEqual(set(self.due('--project', proj)), {qid})
+        for bad in ('soon', -1, True, None, [2]):
+            with self.subTest(bad=bad):
+                self.config(ask_due_after_h=bad)
+                self.assertEqual(self.due('--project', proj), {})
+        self.config(ask_due_after_h=0, ask_partial_batch_window_h=0)
+        presented = self.add(proj, 'presentada')
+        self.run_cli('asked', presented)
+        self.assertIn('due now', self.due_text('--project', proj))
+
+    def test_the_shipped_config_piece_carries_the_defaults(self):
+        with open(REPO_ROOT / 'global/config/supervision.json', encoding='utf-8') as fh:
+            shipped = json.load(fh)
+        self.assertEqual((shipped['ask_due_after_h'], shipped['ask_partial_batch_window_h']), (24, 12))
+
+    def test_without_due_items_it_says_so_and_lists_every_project_otherwise(self):
+        self.assertEqual(self.due_text().strip(), '(no items)')
+        a, b = self.mkdir('a'), self.mkdir('b')
+        qa, qb = self.add(a, order='x'), self.add(b, order='y')
+        self.add(b, 'sin orden')
+        self.assertEqual(set(self.due()), {qa, qb})
+        out = self.due_text()
+        self.assertIn('partial batch a: due now (1)', out)
+        self.assertIn('partial batch b: due now (1)', out)
+
+    def test_the_prompt_hook_injects_an_ordered_item_as_any_other_without_a_supervisor(self):
+        repo = self.make_repo('repo')
+        self.env.update(CLAUDE_CODE_SESSION_ID='cli-human', SUPERVISOR_LOCK_BIN=LOCK_SCRIPT)
+        qid = self.add(repo, order='hazlo ya')
+        payload = {'hook_event_name': 'UserPromptSubmit', 'cwd': repo, 'prompt': 'hola', 'session_id': 'cli-human'}
+        r = subprocess.run([sys.executable, HOOK], input=json.dumps(payload), capture_output=True, text=True,
+                           env=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(qid, json.loads(r.stdout)['hookSpecificOutput']['additionalContext'])
+
 if __name__ == '__main__':
     unittest.main()

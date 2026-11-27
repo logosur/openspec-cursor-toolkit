@@ -5,7 +5,7 @@ import time
 import traceback
 
 from . import (
-    backlog, census, closable, cloud, human_turns, interrupted,
+    askdue, backlog, census, closable, cloud, human_turns, interrupted,
     lint, lock as lock_mod, machine_queue, projects, providers, transcripts,
     settings, util, verdicts,
 )
@@ -77,7 +77,7 @@ def hold_while_paused(project, interval):
 # Only what needs it wakes it: a turn ending or a status flip in one of a dozen sessions the developer drives would wake
 # it hundreds of times a day.
 GUARD_EVENTS = ('NEW', 'GONE', 'AWAITING', 'CRASH', 'HUNG', 'MODE', 'WAITING', 'MODELSTALL', 'HANDOFF', 'IDLE',
-                'CLOSABLE', 'CUT', 'SUBAGENT_SILENT', 'REF', 'CLOUD', 'QUEUED', 'SLOTHELD', 'BACKLOG')
+                'CLOSABLE', 'CUT', 'SUBAGENT_SILENT', 'REF', 'CLOUD', 'QUEUED', 'SLOTHELD', 'BACKLOG', 'ASKDUE')
 
 
 ALLIDLE_ACTIVITY_TOLERANCE_S = 5   # idle_s is an integer: the same last activity reads a second apart between polls
@@ -290,7 +290,7 @@ def wait_events(args):
     quiet_levels = set(levels(first, time.time())) | set(due)
     heads_before = heads()
     last_beat = time.monotonic()
-    polled = {'cloud': -1e9, 'heavy': -1e9, 'backlog': -1e9}
+    polled = {'cloud': -1e9, 'heavy': -1e9, 'backlog': -1e9, 'askdue': -1e9}
 
     def machine_events():
         """Cloud sessions of the project and its jobs in the machine queue, polled every few minutes and
@@ -313,6 +313,14 @@ def wait_events(args):
                     out += cloud.announce_once(project['key'], 'backlog',
                                          [(f'{w["id"]}:{w["digest"]}', f'BACKLOG {w["id"]} open={w["open"]} «{w["first"]}»')
                                           for w in work], backlog.BACKLOG_REANNOUNCE_S)
+            except Exception:
+                util.hook_log('wait-errors.log', traceback.format_exc().rstrip())
+        if time.monotonic() - polled['askdue'] >= askdue.ASKDUE_POLL_S:
+            # questions of the queue that block work and were never presented: the partial batch (also on guard)
+            polled['askdue'] = time.monotonic()
+            try:
+                if not providers.pause_of(project.get('checkout')):
+                    out += askdue.askdue_events(project)
             except Exception:
                 util.hook_log('wait-errors.log', traceback.format_exc().rstrip())
         if time.monotonic() - polled['heavy'] >= machine_queue.HEAVY_POLL_S:

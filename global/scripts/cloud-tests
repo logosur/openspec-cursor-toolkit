@@ -1253,8 +1253,19 @@ def cmd_poll(args):
                 print(describe(rid, e, now, data))
 
 
+def script_mtime(path):
+    try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return None
+
+
 def cmd_pump(args):
-    """Keeps settling (and so dispatching) until nothing is queued or sent. One per project: it holds a flock."""
+    """Keeps settling (and so dispatching) until nothing is queued or sent. One per project: it holds a flock. When an
+    install replaces this script, the pump re-executes itself (its lock fd closes on exec) so it never dispatches with
+    old code: a pump started before an install once sent runs to a runner of the previous brief."""
+    me = os.path.realpath(__file__)
+    born = script_mtime(me)
     proj = Project(args.repo)
     os.makedirs(STATE_DIR, exist_ok=True)
     with open(os.path.join(STATE_DIR, f'{proj.key}.pump.lock'), 'a+') as lk:
@@ -1270,6 +1281,9 @@ def cmd_pump(args):
         end = time.time() + PUMP_MAX_S
         failures = 0
         while time.time() < end:
+            if script_mtime(me) != born:
+                print('pump restarts: the script was replaced', flush=True)
+                os.execv(sys.executable, [sys.executable, me] + sys.argv[1:])
             if not os.path.isdir(proj.top):  # the worktree it was started from is gone: let the next request respawn it
                 print(f'pump stops: {proj.top} no longer exists')
                 return

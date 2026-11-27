@@ -43,6 +43,19 @@ them; it SHALL never make a command fail.
 - **WHEN** node runs any other script
 - **THEN** its arguments are unchanged
 
+### Requirement: vitest results through the same preload
+The Node preload SHALL add a JSON reporter next to the default one to the vitest CLI process, only when the command
+sets no `--reporter` or `--outputFile` and is not in watch mode, because a command-line reporter replaces the reporters
+of the project's config.
+
+#### Scenario: npm test runs vitest
+- **WHEN** the command is `npm test` and the script runs `vitest run`
+- **THEN** a vitest JSON file is written and converted into TSV lines, and the default reporter output stays in the log
+
+#### Scenario: The command names its own reporter
+- **WHEN** the command runs `vitest run --reporter=junit`
+- **THEN** its arguments are unchanged
+
 ### Requirement: JUnit fallback
 When the hooks recorded nothing, the kit SHALL convert JUnit XML files written during the run.
 

@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""PreToolUse(mcp__ccd_session_mgmt__set_session_model|set_session_effort): the usage role needs a ticket.
+
+Why: the usage role (one session per machine, module `usage`) may change a session's model or effort only after a
+question the developer answered in the queue authorised it. `usage-watch apply <finding>` is the single apply point: for
+a session-model or session-effort finding it writes a one-use ticket to <state_dir>/tickets.json. This gate lets the
+role's call to the app's session tool through only against such a ticket (same session, field and value, unused, not
+expired) and marks it used, so one ticket allows one call.
+
+Who: only the usage role holder (the hook input's session_id or CLAUDE_CODE_HOST_SESSION_ID equal to session_id or
+cli_session_id of <supervisor home>/usage-role.json). Any other session, or no usage role record: allowed silently.
+
+Never breaks a session: unparseable input passes with no output; an internal error passes and its traceback goes to
+<state_dir>/gate-errors.log. A deny is never the result of a crash. Config piece: usage-watch (state_dir).
+"""
+import json
+import os
+import sys
+import time
+import traceback
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'scripts', 'lib'))
+
+
+def log_error():
+    try:
+        from usage_watch import config as C
+        state = C.path(C.load(), 'state_dir')
+    except Exception:
+        state = os.path.expanduser('~/.claude/state/usage-watch')
+    try:
+        os.makedirs(state, exist_ok=True)
+        with open(os.path.join(state, 'gate-errors.log'), 'a', encoding='utf-8') as fh:
+            fh.write(f'--- {time.strftime("%Y-%m-%dT%H:%M:%S")}\n{traceback.format_exc()}\n')
+    except Exception:
+        pass
+
+
+def main():
+    try:
+        payload = json.loads(sys.stdin.read())
+    except Exception:
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    try:
+        from usage_watch import gate
+        reason = gate.check(payload)
+    except Exception:
+        log_error()
+        return 0
+    if reason:
+        json.dump({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
+                                          'permissionDecisionReason': reason}}, sys.stdout)
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

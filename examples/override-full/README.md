@@ -43,13 +43,14 @@ answers their questions with a decision panel, and `heavy-jobs` denies heavy com
 emulators) that are not launched through its semaphore. `accounts` installs the session sync between Claude
 accounts and `account-switch`, which resumes the sessions a switch left stopped; they only run once you start
 the sync's service. `routines` installs the machine's own routine engine, which runs nothing until you add
-its timer. `access` installs two read-only commands, `mailbox` and `stores`, that do nothing until a session calls them. The [main README](../../README.md#modules) has the table.
+its timer. `access` installs two read-only commands, `mailbox` and `stores`, that do nothing until a session calls them. `usage` installs
+`usage-watch`, which only reads the transcripts and measures nothing until you run it or add its timer. The [main README](../../README.md#modules) has the table.
 
 ## What each file turns on
 
 | Path | Effect |
 |---|---|
-| `override.yaml` | all nine modules: `openspec`, `core`, `devtools`, `sessions`, `supervision`, `heavy-jobs`, `accounts`, `routines`, `access` |
+| `override.yaml` | all ten modules: `openspec`, `core`, `devtools`, `sessions`, `supervision`, `heavy-jobs`, `accounts`, `routines`, `access`, `usage` |
 | `config/supervision.json` | the four message exceptions (`account_switch`, `project_resume`, `skill_reload`, `supervisor_revive`), and `~/.claude` as the folder whose sessions may send a skill reload or a revive |
 | `config/heavy-job.json` | two slots for compiling and tests; set what your machine can take |
 | `config/worktree-location.json`, `config/test-account.json` | the worktree root and the notes folder test users must never be written to |

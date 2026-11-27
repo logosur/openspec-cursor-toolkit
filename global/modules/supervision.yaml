@@ -34,8 +34,9 @@ notes:
     is unavailable and alerts do nothing.
   - "Deploys are never pre-authorised by default: only deploy_preauthorised in the supervision config says so."
 # Named by these pieces and not installed by this module or its dependencies: installed by another module
-# (account-switch, routines, heavy-job) or absent from the toolkit. Every caller works without them.
+# (account-switch, routines, heavy-job, usage-watch) or absent from the toolkit. Every caller works without them.
 project_provided:
+  - scripts/usage-watch
   - scripts/account-switch
   - scripts/cloud-tests
   - scripts/routines
@@ -64,6 +65,7 @@ files:
   - {src: global/skills/supervisa-sesiones/reference/f6-f9.md, dest: skills/supervisa-sesiones/reference/f6-f9.md}
   - {src: global/skills/supervisa-sesiones/reference/modo-publicar-primero.md, dest: skills/supervisa-sesiones/reference/modo-publicar-primero.md}
   - {src: global/skills/supervisa-sesiones/reference/piezas-opcionales.md, dest: skills/supervisa-sesiones/reference/piezas-opcionales.md}
+  - {src: global/skills/supervisa-sesiones/reference/subsupervision-consumo.md, dest: skills/supervisa-sesiones/reference/subsupervision-consumo.md}
   - {src: global/skills/supervisa-sesiones/reference/registro-y-cierre.md, dest: skills/supervisa-sesiones/reference/registro-y-cierre.md}
   - {src: global/skills/supervisa-sesiones/reference/vigilancia.md, dest: skills/supervisa-sesiones/reference/vigilancia.md}
   - {src: global/commands/supervisa-sesiones.md, dest: commands/supervisa-sesiones.md}

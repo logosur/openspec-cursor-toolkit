@@ -5,7 +5,7 @@ import sys
 import time
 import traceback
 
-from . import census, closable, cloud, lock as lock_mod, projects, providers, session_roles, settings, util
+from . import census, closable, cloud, lock as lock_mod, projects, providers, session_roles, settings, usage_role, util
 
 
 def is_mailbox_row(row, owner):
@@ -37,8 +37,9 @@ def is_closer_row(row, owner):
 
 
 def is_helper_row(row, owner):
-    """The supervisor's fixed children, which are never closed nor counted as work: questions and closing sessions."""
-    return is_mailbox_row(row, owner) or is_closer_row(row, owner)
+    """Rows that are never closed nor counted as a project's work: the supervisor's questions and closing sessions, and
+    the machine-wide usage role holder (usage-watch), wherever it runs."""
+    return is_mailbox_row(row, owner) or is_closer_row(row, owner) or usage_role.is_usage_row(row)
 
 
 def acts_for(owner, session):

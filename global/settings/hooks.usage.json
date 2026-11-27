@@ -1,0 +1,14 @@
+{
+  "PreToolUse": [
+    {
+      "matcher": "mcp__ccd_session_mgmt__set_session_model|mcp__ccd_session_mgmt__set_session_effort",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 ~/.claude/hooks/usage-apply-gate",
+          "timeout": 10
+        }
+      ]
+    }
+  ]
+}

@@ -4,7 +4,7 @@ import sys
 
 from . import (
     backlog, census, closable, closing, cloud, hook as hook_mod,
-    lint, lock as lock_mod, projects, revival, settings, titles, watch,
+    lint, lock as lock_mod, projects, revival, settings, titles, usage_role, watch,
     watchdog, workmode,
 )
 
@@ -88,6 +88,13 @@ def build_parser():
     p.add_argument('--session', help='local id of the session that records it')
     p.add_argument('--get', action='store_true', help='print only the mode word')
     add('list', lock_mod.cmd_list, json_out=True)
+    p = add('usage-role', usage_role.cmd_usage_role, session=True)
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument('--claim', action='store_true', help='take the machine-wide usage role (RESUMED for the holder)')
+    g.add_argument('--beat', action='store_true', help="refresh the holder's heartbeat")
+    g.add_argument('--release', action='store_true', help='drop the role (the holder only)')
+    p.add_argument('--from', dest='from_id', help='with --claim: the stale holder to take the role over from')
+    p.add_argument('--title')
     p = add('sessions', census.cmd_sessions, json_out=True)
     p.add_argument('--all', action='store_true', help='also list CLI-only records whose process is dead')
     p = add('wait', watch.cmd_wait)

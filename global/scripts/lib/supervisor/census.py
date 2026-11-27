@@ -4,17 +4,19 @@ import json
 import os
 from datetime import datetime
 
-from . import projects, settings, transcripts, util
+from . import projects, settings, transcripts, usage_role, util
 
 
 def open_sessions(project, owner, rows=None):
-    """Census rows still open: every non-archived session of the project except the lock owner and its questions session.
+    """Census rows still open: every non-archived session of the project except the lock owner, its questions and
+    closing sessions, and the machine-wide usage role holder.
 
     `owner` is the lock dict (or None). Ids match on the row id (`local_…`) or on its CLI session id. `rows` is an
     already collected census (collect_sessions(project, False, {})), to avoid reading it twice."""
     if rows is None:
         rows = collect_sessions(project, False, {})
     mine = {i for i in ((owner or {}).get('session_id'), (owner or {}).get('mailbox'), (owner or {}).get('closer')) if i}
+    mine |= usage_role.ids()
     return [r for r in rows if r['id'] not in mine and r.get('cli') not in mine]
 
 

@@ -864,6 +864,44 @@ class DegradationTest(Base):
         revive = self.run_cli('revive', '--json')
         self.assertEqual(set(json.loads(revive.stdout)), {'targets', 'notes'})
 
+    def test_a_supervisor_on_guard_is_stalled_only_when_its_turn_was_cut_by_the_limit(self):
+        # the process of a cut supervisor stays alive and its heartbeat stays still, which on guard is normal: only the
+        # limit's error as the newest record of its main transcript tells the two apart
+        lock_home, projects = self.mkdir('sup-home'), self.mkdir('sup-projects')
+        out = self.python(LOADER + '''
+import datetime, json, os, time
+lock = load('supervisor_lock')
+revival = lock._module('revival')
+home, projects = os.environ['SUPERVISOR_LOCK_HOME'], os.environ['SUPERVISOR_PROJECTS_DIR']
+now = time.time()
+iso = lambda ago: time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(now - ago)) + '.000Z'
+beat = lambda ago: datetime.datetime.fromtimestamp(now - ago).astimezone().isoformat(timespec='seconds')
+text = {'role': 'assistant', 'content': [{'type': 'text', 'text': "You've hit your limit"}]}
+fine = [{'type': 'assistant', 'timestamp': iso(4000), 'message': text}]
+cut = fine + [{'type': 'assistant', 'timestamp': iso(3900), 'isApiErrorMessage': True, 'error': 'rate_limit',
+               'message': text}]
+os.makedirs(os.path.join(home, 'locks'))
+live = {}
+for key, phase, records in (('guard-cut', 'guardia', cut), ('guard-quiet', 'guardia', fine), ('work-cut', 'F3', cut),
+                            ('work-quiet', 'F3', fine)):
+    sid = 'local_' + key
+    json.dump({'key': key, 'session_id': sid, 'state': 'running', 'phase': phase, 'project': 'demo',
+               'checkout': home + '/none', 'heartbeat': beat(3600)},
+              open(os.path.join(home, 'locks', key + '.json'), 'w'))
+    path = os.path.join(projects, 'p', 'cli-' + key + '.jsonl')
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, 'w').write(''.join(json.dumps(r) + '\\n' for r in records))
+    os.utime(path, (now - 3900, now - 3900))
+    live[sid] = {'sessionId': 'cli-' + key, 'cwd': '/work/demo', 'status': 'idle'}
+revival.live_hosts = lambda: live
+print(json.dumps({k: v[0] for k, _, v in revival.stalled_supervisors(revival.STALLED_AFTER_S, now)}))
+''', env={'SUPERVISOR_LOCK_HOME': lock_home, 'SUPERVISOR_PROJECTS_DIR': projects})
+        got = json.loads(out)
+        self.assertEqual(got.get('guard-cut'), 'limit')
+        self.assertEqual(got.get('work-cut'), 'limit')
+        self.assertNotIn('guard-quiet', got)      # quiet on guard is normal
+        self.assertIn('work-quiet', got)          # quiet in a working phase is not
+
     def test_open_accepts_the_asking_session_like_status_does(self):
         # supervisors pass `--session <their id>` to `open` as they do to `status`; it is not a usage error and it
         # changes nothing: the owner, its questions session and its closing session are left out either way

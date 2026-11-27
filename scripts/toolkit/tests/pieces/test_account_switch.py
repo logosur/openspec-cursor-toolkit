@@ -53,6 +53,8 @@ class AccountSwitchTest(unittest.TestCase):
         # the prompts of the app tasks that `arm` writes: on a machine without them installed, arm does nothing
         self.tasks = tempfile.mkdtemp(prefix='account-switch-tasks-')
         self.addCleanup(shutil.rmtree, self.tasks, True)
+        self.locks_home = tempfile.mkdtemp(prefix='account-switch-locks-')   # no real supervisor lock is ever read
+        self.addCleanup(shutil.rmtree, self.locks_home, True)
         for name in ('resume.md', 'revive.md'):
             with open(os.path.join(self.tasks, name), 'w') as fh:
                 fh.write('prompt\n')
@@ -82,6 +84,7 @@ class AccountSwitchTest(unittest.TestCase):
         env.update(ACCOUNT_SWITCH_STATE=self.state, ACCOUNT_SWITCH_PROJECTS=self.projects,
                    ACCOUNT_SWITCH_APP_SESSIONS=self.app,
                    ACCOUNT_SWITCH_CLI_CREDENTIALS=os.path.join(self.state, 'no-credentials.json'),   # no token: no network
+                   SUPERVISOR_LOCK_HOME=self.locks_home,
                    ACCOUNT_SWITCH_TASK_FILE=os.path.join(self.tasks, 'resume.md'),
                    ACCOUNT_SWITCH_REVIVE_TASK_FILE=os.path.join(self.tasks, 'revive.md'))
         env.update(extra)
@@ -640,6 +643,159 @@ class AccountSwitchTest(unittest.TestCase):
                              timeout=60, env=self.env(CLAUDE_TOOLKIT_CONFIG_DIR=config))
         self.assertIn('«[cambio de cuenta] ', out.stdout)
 
+    # --- sessions that hold a supervision role and lost their background watcher ------------------------------------
+
+    def lock(self, key='demo', ago=60, **fields):
+        """A supervisor lock file with a heartbeat `ago` seconds old (ISO time with offset, like supervisor-lock)."""
+        beat = (datetime.datetime.now().astimezone() - datetime.timedelta(seconds=ago)).isoformat(timespec='seconds')
+        os.makedirs(os.path.join(self.locks_home, 'locks'), exist_ok=True)
+        with open(os.path.join(self.locks_home, 'locks', key + '.json'), 'w') as fh:
+            json.dump(dict({'key': key, 'project': 'demo', 'state': 'running', 'heartbeat': beat}, **fields), fh)
+
+    def record(self, cli, **extra):
+        """The app's record of the session local_<cli> in the active account folder."""
+        folder = self.app_folder('c', 'd')
+        with open(os.path.join(folder, f'local_{cli}.json'), 'w') as fh:
+            json.dump(dict({'sessionId': f'local_{cli}', 'cliSessionId': cli, 'title': cli, 'cwd': '/work/demo',
+                            'lastActivityAt': time.time() * 1000}, **extra), fh)
+        return folder
+
+    @staticmethod
+    def stamped(entry, ago):
+        stamp = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(time.time() - ago)) + '.123Z'
+        return dict(entry, timestamp=stamp)
+
+    def idle(self, cli, ago=1800):
+        """A session idle between turns: it answered, and nothing came after."""
+        self.transcript(cli, [user('x'), self.stamped(answer('Vigilo en segundo plano.'), ago)])
+
+    def selected(self, folder, paused=(), own=None):
+        loader = importlib.machinery.SourceFileLoader('account_switch_watchers', SCRIPT)
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        with mock.patch.dict(os.environ, self.env()):
+            loader.exec_module(mod)
+            with mock.patch.object(mod, 'paused_project', lambda cwd: cwd in paused):
+                return {s['sessionId']: s['kind'] for s in mod.stopped_sessions(folder, own)}
+
+    def test_an_idle_lock_owner_and_closer_are_selected_as_watchers_but_an_ordinary_session_is_not(self):
+        for cli in ('boss', 'closer', 'worker'):
+            self.idle(cli)
+            folder = self.record(cli)
+        self.lock(session_id='local_boss', closer='local_closer')
+        self.assertEqual(self.selected(folder), {'local_boss': 'watcher', 'local_closer': 'watcher'})
+
+    def test_a_watcher_quiet_for_hours_is_still_selected_while_its_heartbeat_is_fresh(self):
+        self.idle('boss', ago=9 * 3600)
+        folder = self.record('boss', lastActivityAt=(time.time() - 9 * 3600) * 1000)
+        self.record('worker', lastActivityAt=(time.time() - 9 * 3600) * 1000)
+        self.lock(session_id='local_boss', ago=120)
+        self.assertEqual(self.selected(folder), {'local_boss': 'watcher'})
+
+    def test_a_stale_heartbeat_a_paused_project_an_archived_or_own_session_are_left_out(self):
+        self.idle('boss')
+        folder = self.record('boss')
+        self.lock(session_id='local_boss', ago=7 * 3600)
+        self.assertEqual(self.selected(folder), {})
+        self.lock(session_id='local_boss', ago=60)
+        self.assertEqual(self.selected(folder), {'local_boss': 'watcher'})
+        self.assertEqual(self.selected(folder, paused=('/work/demo',)), {})
+        self.assertEqual(self.selected(folder, own='local_boss'), {})
+        folder = self.record('boss', isArchived=True)
+        self.assertEqual(self.selected(folder), {})
+        folder = self.record('boss', scheduledTaskId='account-switch-resume')
+        self.assertEqual(self.selected(folder), {})
+
+    def test_a_lock_without_a_readable_heartbeat_selects_nothing(self):
+        self.idle('boss')
+        folder = self.record('boss')
+        self.lock(session_id='local_boss', heartbeat='yesterday')
+        self.assertEqual(self.selected(folder), {})
+        self.lock(session_id='local_boss', heartbeat=None)
+        self.assertEqual(self.selected(folder), {})
+
+    def test_a_hard_or_soft_cut_keeps_its_kind_over_watcher(self):
+        self.transcript('boss', [user('x'), answer(LIMIT, error=True)])
+        self.transcript('closer', [user('x'), answer('Lanzo los tests.'), user('[tool_result]')])
+        self.record('boss')
+        folder = self.record('closer')
+        self.lock(session_id='local_boss', closer='local_closer')
+        self.assertEqual(self.selected(folder), {'local_boss': 'hard', 'local_closer': 'soft'})
+
+    def test_without_a_locks_folder_nothing_changes(self):
+        self.idle('boss')
+        self.transcript('hard1', [user('x'), answer(LIMIT, error=True)])
+        self.record('boss')
+        folder = self.record('hard1')
+        self.assertEqual(self.selected(folder), {'local_hard1': 'hard'})   # no locks at all
+        self.locks_home = os.path.join(self.locks_home, 'missing')
+        self.assertEqual(self.selected(folder), {'local_hard1': 'hard'})   # no folder
+
+    def watcher_event(self, **extra):
+        self.idle('boss')
+        self.transcript('hard1', [user('x'), answer(LIMIT, error=True)])
+        self.event([('boss', 'watcher'), ('hard1', 'hard')], at=time.time() - 300, **extra)
+
+    def test_a_watcher_stays_pending_until_it_gets_the_resume_or_runs_a_turn(self):
+        loader = importlib.machinery.SourceFileLoader('account_switch_pending', SCRIPT)
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        with mock.patch.dict(os.environ, self.env()):
+            loader.exec_module(mod)
+        kinds = lambda: {s['cliSessionId']: s['kind'] for s in mod.pending_sessions(self.saved_event())}
+        self.watcher_event()
+        self.assertEqual(kinds(), {'boss': 'watcher', 'hard1': 'hard'})
+        # a turn from before the switch does not count
+        self.assertEqual(kinds(), {'boss': 'watcher', 'hard1': 'hard'})
+        # it received the resume
+        self.transcript('boss', [user('x'), self.delivery()])
+        self.assertEqual(kinds(), {'hard1': 'hard'})
+        # it ran a turn after the switch (the app woke it by itself)
+        self.transcript('boss', [user('x'), self.stamped(answer('Rearmo el vigilante.'), 100)])
+        self.assertEqual(kinds(), {'hard1': 'hard'})
+
+    def test_claim_keeps_the_watchers_in_the_event_and_the_message_carries_the_marker(self):
+        self.watcher_event()
+        text = self.hook(mode='bypassPermissions')
+        self.assertEqual({s['cliSessionId']: s['kind'] for s in self.saved_event()['sessions']},
+                         {'boss': 'watcher', 'hard1': 'hard'})
+        self.assertIn('local_boss', text)
+        self.assertIn('vigilante', text)
+        self.assertIn('supervisor-lock wait', text)
+        self.assertIn('wait-closer', text)
+        lines = text.splitlines()
+        plain = next(i for i, l in enumerate(lines) if l.startswith('1. Envía'))
+        other = next(i for i, l in enumerate(lines) if l.startswith('   Y a estas otras'))
+        self.assertLess(plain, other)
+        self.assertIn('«[cambio de cuenta] ', lines[plain])
+        self.assertIn('«[cambio de cuenta] ', lines[other])
+        self.assertNotIn('vigilante en segundo plano', lines[plain])
+        self.assertIn('vigilante en segundo plano', lines[other])
+        self.assertTrue(lines[plain + 1].startswith('   - local_hard1'))
+        self.assertTrue(lines[other + 1].startswith('   - local_boss'))
+
+    def test_only_watchers_get_one_block_with_the_watcher_text(self):
+        self.idle('boss')
+        self.event([('boss', 'watcher')], at=time.time() - 300)
+        text = self.hook(mode='bypassPermissions')
+        self.assertEqual(text.count('«[cambio de cuenta] '), 1)
+        self.assertIn('vigilante en segundo plano', text)
+        self.assertNotIn('Y a estas otras', text)
+
+    def test_a_watcher_that_ran_a_turn_since_the_switch_is_not_resumed(self):
+        self.transcript('boss', [user('x'), self.stamped(answer('Rearmo el vigilante.'), 100)])
+        self.event([('boss', 'watcher')], at=time.time() - 300)
+        self.assertEqual(self.hook(mode='bypassPermissions'), '')
+        self.assertTrue(self.saved_event()['done'])
+
+    def test_mine_and_status_show_which_sessions_are_watchers(self):
+        self.watcher_event(claimed_by='me', claimed_at=time.time() - 60)
+        rc, out = self.run_rc('mine', sid='me')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('local_boss · boss (vigilante', out)
+        self.assertNotIn('local_hard1 · hard1 (vigilante', out)
+        rc, out = self.run_rc('status')
+        self.assertIn('watcher  local_boss', out)
+        self.assertIn('hard     local_hard1', out)
+
 
 class ModuleTest(unittest.TestCase):
     """The script loaded as a module, with the network, notifications, systemd and sleeps replaced."""
@@ -653,7 +809,8 @@ class ModuleTest(unittest.TestCase):
         os.makedirs(os.path.join(self.projects, 'proj'))
         self.credentials = os.path.join(self.tmp, 'credentials.json')
         env = dict(ACCOUNT_SWITCH_STATE=self.state, ACCOUNT_SWITCH_PROJECTS=self.projects,
-                   ACCOUNT_SWITCH_APP_SESSIONS=self.app, ACCOUNT_SWITCH_CLI_CREDENTIALS=self.credentials)
+                   ACCOUNT_SWITCH_APP_SESSIONS=self.app, ACCOUNT_SWITCH_CLI_CREDENTIALS=self.credentials,
+                   SUPERVISOR_LOCK_HOME=self.mkdir('locks-home'))
         with mock.patch.dict(os.environ, env):
             loader = importlib.machinery.SourceFileLoader('account_switch_under_test', SCRIPT)
             spec = importlib.util.spec_from_loader(loader.name, loader)

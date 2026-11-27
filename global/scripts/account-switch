@@ -20,6 +20,12 @@ What happens on a switch (claude-sessions-sync calls `detect` on every pass; it 
      (CLI refused/undelivered input) while the sending session was in auto mode, and took it at once when the
      sender was in Bypass permissions (2026-11-04; the developer's diagnosis, consistent with the log). So the
      session that resumes them must run in Bypass permissions; if it does not, it says so to the developer.
+  4b. A session that holds a supervision role (the owner or the closer of a supervisor lock) spends its time idle
+     between turns, waiting on a background watcher (`supervisor-lock wait` or `wait-closer`). The switch kills
+     the CLI processes and with them that watcher, and nothing wakes the idle session: its transcript shows no
+     cut. So such a session, with a lock heartbeat within LOOKBACK, is listed with the kind "watcher" even when
+     it is not cut, and gets resume_text() plus a sentence telling it to re-arm its watcher. It stays pending
+     only until it receives the resume or runs a turn after the switch.
   5. Nothing starts a session by itself after a switch, so `arm` leaves the app's own scheduled task
      `account-switch-resume` ready in the scheduled-tasks.json of every account/org folder except the active one:
      one-shot, enabled, never run, fireAt already past, saved in Bypass permissions. The app loads the new
@@ -329,19 +335,49 @@ def paused_project(cwd):
         return False
 
 
+def lock_roles():
+    """{local session id: "owner" | "closer"} of the supervisor locks whose heartbeat is within LOOKBACK. The locks are
+    the JSON files of <SUPERVISOR_LOCK_HOME or ~/.claude/supervisor>/locks. Never raises: without the folder or with
+    unreadable files the result is empty, so the selection behaves as if the supervision piece were absent."""
+    base = os.path.expanduser(os.environ.get("SUPERVISOR_LOCK_HOME") or os.path.join(HOME, ".claude", "supervisor"))
+    roles = {}
+    for path in sorted(glob.glob(os.path.join(base, "locks", "*.json"))):
+        lock = load(path, None)
+        if not isinstance(lock, dict):
+            continue
+        try:
+            beat = datetime.datetime.fromisoformat(lock["heartbeat"])
+            if beat.tzinfo is None:
+                beat = beat.astimezone()
+            age = now() - beat.timestamp()
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        if not -300 <= age <= LOOKBACK:
+            continue
+        for key, role in (("closer", "closer"), ("session_id", "owner")):   # an owner wins over a closer
+            if isinstance(lock.get(key), str) and lock[key]:
+                roles[lock[key]] = role
+    return roles
+
+
 def stopped_sessions(folder, own_session=None):
     out = []
+    roles = lock_roles()
     for path in glob.glob(os.path.join(folder, "local_*.json")):
         rec = load(path, {})
         if rec.get("isArchived") or rec.get("sessionId") == own_session or not rec.get("cliSessionId"):
             continue
         if rec.get("scheduledTaskId") == TASK_ID:
             continue  # 2026-11-14: a run of the resume task cut by the limit is not work; the next run does its job
-        if now() - (rec.get("lastActivityAt") or 0) / 1000 > LOOKBACK:
-            continue
+        role = roles.get(rec.get("sessionId"))
+        quiet = now() - (rec.get("lastActivityAt") or 0) / 1000 > LOOKBACK
+        if quiet and not role:
+            continue  # a supervisor on guard may be quiet for hours: its lock heartbeat says it is alive
         if paused_project(rec.get("cwd")):
             continue  # 2026-11-13: a project the developer paused is resumed only by his order (project-pause)
-        kind = stop_kind(transcript_tail(rec["cliSessionId"]))
+        kind = None if quiet else stop_kind(transcript_tail(rec["cliSessionId"]))
+        if not kind and role:
+            kind = "watcher"   # idle between turns on a background watcher the switch killed
         if kind:
             out.append({"sessionId": rec["sessionId"], "cliSessionId": rec["cliSessionId"],
                         "title": rec.get("title") or "?", "cwd": rec.get("cwd"), "kind": kind})
@@ -722,6 +758,7 @@ def cmd_on_switch(args):
         limit = None
     hard = [s for s in event["sessions"] if s["kind"] == "hard"]
     soft = [s for s in event["sessions"] if s["kind"] == "soft"]
+    watchers = [s for s in event["sessions"] if s["kind"] == "watcher"]
     lines = []
     if limit:
         lines.append(f"La cuenta nueva también está sin uso ({limit_text(limit['what'])}) hasta {until_text(limit['until'])}: "
@@ -734,6 +771,9 @@ def cmd_on_switch(args):
                      "sesión de la app; si en unos minutos no ves movimiento, abre una sesión nueva y escribe cualquier cosa.")
     if hard:
         lines.append(f"{len(hard)} se cortaron con el error del límite: las reanuda una sesión en Bypass permissions.")
+    if watchers and not limit:
+        lines.append(f"{len(watchers)} sesiones de supervisión perdieron su vigilante con el cambio: se les avisará "
+                     "para que lo rearmen.")
     if not need:
         lines.append(plan_warning())
         missing = missing_connectors(org)
@@ -915,15 +955,40 @@ def resume_text():
             "preguntar si continuar.")
 
 
+def watcher_text():
+    """What a session that lost its background watcher receives: the resume plus how to get the watcher back."""
+    return (resume_text() + " Tu proceso se cerró con el cambio de cuenta y con él tu vigilante en segundo plano: "
+            "rearma tu vigilante como dice tu skill (`supervisor-lock wait …`, o `wait-closer` si eres la sesión de "
+            "cierre) y sigue donde estabas.")
+
+
 def pending_sessions(event):
     """The sessions of the event still stopped now: a second claimer must not resume twice what the first one did,
     a session that wrote to its transcript in the last two minutes is working, not cut mid-turn, and one that
-    already holds the resume in its transcript got it from an earlier claimer or a send before a compaction."""
-    return [dict(s, kind=k) for s in event["sessions"]
-            for k in [stop_kind(transcript_tail(s["cliSessionId"]))]
-            if k and not (k == "soft" and (transcript_age(s["cliSessionId"]) or 1e9) < 120)
-            and delivered_at(s["cliSessionId"], event["at"]) is None
-            and not leave_alone(s["sessionId"])]
+    already holds the resume in its transcript got it from an earlier claimer or a send before a compaction.
+    A "watcher" session was not cut: it stays while it holds no resume and has run no turn since the switch."""
+    out = []
+    for s in event["sessions"]:
+        cli = s["cliSessionId"]
+        if leave_alone(s["sessionId"]) or delivered_at(cli, event["at"]) is not None:
+            continue
+        if s.get("kind") == "watcher":
+            if not ran_turn_since(cli, event["at"]):
+                out.append(dict(s))
+            continue
+        k = stop_kind(transcript_tail(cli))
+        if k and not (k == "soft" and (transcript_age(cli) or 1e9) < 120):
+            out.append(dict(s, kind=k))
+    return out
+
+
+def ran_turn_since(cli_session_id, since):
+    """True when the transcript has an assistant entry stamped at or after `since`: the session ran a turn."""
+    for entry in transcript_tail(cli_session_id):
+        at = _iso_epoch(entry.get("timestamp") or "")
+        if entry.get("type") == "assistant" and at is not None and at >= since:
+            return True
+    return False
 
 
 def leave_alone(session_id):
@@ -977,6 +1042,13 @@ def connectors_step(missing):
             "la autorización es suya. Díselo en una línea.")
 
 
+def session_line(s):
+    """One listed session: its id and title, and what sets it apart when it needs different handling."""
+    note = {"hard": " (se cortó con el error del límite)",
+            "watcher": " (vigilante: lleva el texto con la frase del vigilante)"}.get(s["kind"], "")
+    return f"{s['sessionId']} · {s['title']}{note}"
+
+
 def steps(event):
     deadline = hhmm((event.get("claimed_at") or now()) + CLAIM_WINDOW)
     lines = [f"CAMBIO DE CUENTA (account-switch, {hhmm(event['at'])}): el desarrollador ha cambiado de cuenta en la "
@@ -987,13 +1059,23 @@ def steps(event):
              "Esto es tuyo aunque esas sesiones sean de otros proyectos o tu encargo sea otro: es orden del "
              "desarrollador (rules/cambio-de-cuenta.md) y cross-project-message-gate deja pasar exactamente estos "
              "mensajes; si de verdad no puedes enviarlos, ejecuta `~/.claude/scripts/account-switch release` para que "
-             "los envíe otra sesión y sigue con tu tarea.",
-             "1. Envía con mcp__ccd_session_mgmt__send_message, a cada una de estas sesiones, exactamente este texto "
-             "(antes de enviar, y de nuevo si tu turno se corta o se compacta, ejecuta "
-             "`~/.claude/scripts/account-switch mine`: si dice «No», no envíes nada; si dice «Sí», envía solo a las "
-             f"que liste, porque una sesión no recibe el aviso dos veces): «{resume_text()}»"]
-    lines += [f"   - {s['sessionId']} · {s['title']}"
-              + (" (se cortó con el error del límite)" if s["kind"] == "hard" else "") for s in event["sessions"]]
+             "los envíe otra sesión y sigue con tu tarea."]
+    normal = [x for x in event["sessions"] if x["kind"] != "watcher"]
+    watchers = [x for x in event["sessions"] if x["kind"] == "watcher"]
+    first = True
+    for text, group in ((resume_text(), normal), (watcher_text(), watchers)):
+        if not group:
+            continue
+        if first:
+            lines.append("1. Envía con mcp__ccd_session_mgmt__send_message, a cada una de estas sesiones, exactamente "
+                         "este texto (antes de enviar, y de nuevo si tu turno se corta o se compacta, ejecuta "
+                         "`~/.claude/scripts/account-switch mine`: si dice «No», no envíes nada; si dice «Sí», envía "
+                         "solo a las que liste, porque una sesión no recibe el aviso dos veces): «" + text + "»")
+        else:
+            lines.append("   Y a estas otras, que no se cortaron pero perdieron su vigilante en segundo plano, exactamente "
+                         "este otro texto, no el anterior: «" + text + "»")
+        first = False
+        lines += [f"   - {session_line(x)}" for x in group]
     lines.append("2. Las que se cortaron con el error del límite rechazan el mensaje («refused» o «undelivered») si tu "
                  "sesión no está en Bypass permissions (comprobado el 2026-11-04). Si te pasa, reinténtalo una vez "
                  "pasado un minuto; si sigue igual, dile al desarrollador en una línea que ponga esta sesión en Bypass "
@@ -1076,7 +1158,7 @@ def cmd_mine(args):
         return 0
     print(head + " Faltan:")
     for s in left:
-        print(f"   - {s['sessionId']} · {s['title']}")
+        print(f"   - {session_line(s)}")
     return 0
 
 
@@ -1134,7 +1216,7 @@ def cmd_status(args):
             print(f"Cuenta nueva sin uso hasta {until_text(event['not_before'])} según lo anotado; sin comprobar: mira "
                   "get_usage antes de darlo por vigente")
     for s in event["sessions"]:
-        print(f"  {s['kind']:4}  {s['sessionId']}  {s['title']}")
+        print(f"  {s['kind']:7}  {s['sessionId']}  {s['title']}")
     return 0
 
 

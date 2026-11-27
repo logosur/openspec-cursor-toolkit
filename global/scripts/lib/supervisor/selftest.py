@@ -1294,7 +1294,8 @@ def cmd_self_test(args):
         os.remove(os.path.join(lock_home, 'locks', name))
 
     # 6b-2. revive: a live, idle supervisor whose turn was cut by the usage limit (its process alive, so never DEAD)
-    # is woken once the account has usage again; on guard, busy, paused, young or waiting on the developer it is not
+    # is woken once the account has usage again, on guard too; busy, paused, young, waiting on the developer, or quiet
+    # on guard without a cut, it is not
     fake_pause = os.path.join(tmp, 'fake-project-pause')
     with open(fake_pause, 'w') as fh:
         fh.write("def paused_marker(path):\n    return {'by': 'test'} if str(path).endswith('paused-proj') else None\n")
@@ -1306,6 +1307,9 @@ def cmd_self_test(args):
     wd_session('local_sg', 'k-guard', cut_recs, ago=3600)
     put(os.path.join(lock_home, 'locks'), 'k-guard.json',
         dict(json.load(open(os.path.join(lock_home, 'locks', 'k-guard.json'))), phase='guardia'))
+    wd_session('local_sq', 'k-gquiet', [text_rec(4100)], ago=3600)           # on guard, quiet 1 h, not cut: normal
+    put(os.path.join(lock_home, 'locks'), 'k-gquiet.json',
+        dict(json.load(open(os.path.join(lock_home, 'locks', 'k-gquiet.json'))), phase='guardia'))
     wd_session('local_sb', 'k-sbusy', [text_rec(4100), tool_rec(4000, 'Bash', 'sb')], ago=3600)  # busy, not cut
     cli('local_sb', sessionId='cli-local_sb', status='busy')                 # the CLI says it is working now
     wd_session('local_sp', 'k-spaused', cut_recs, ago=3600)
@@ -1331,8 +1335,8 @@ def cmd_self_test(args):
     plan = json.loads(srevive('yes', '--json').stdout or '{}')
     named = sorted(t['session_id'] for t in plan.get('targets') or [])
     msg = next((t['message'] for t in plan.get('targets') or [] if t['session_id'] == 'local_sc'), '')
-    check('revive: cut by the limit and usage back -> woken, also one cut 20 min ago and one whose subagents still work',
-          named == ['local_sc', 'local_sl', 'local_sw'] and all(t['reason'] == 'stalled' and t['cause'] == 'limit' and t['attempt'] == 1
+    check('revive: cut by the limit and usage back -> woken, also one cut 20 min ago, one on guard and one whose subagents still work',
+          named == ['local_sc', 'local_sg', 'local_sl', 'local_sw'] and all(t['reason'] == 'stalled' and t['cause'] == 'limit' and t['attempt'] == 1
                                                     for t in plan['targets']))
     check('revive: its text says the truth (turn cut by the limit, process alive), with the marker and the F1 census',
           msg.startswith('[reanimar supervisora] ') and 'sigue vivo' in msg and 'límite de uso' in msg
@@ -1342,11 +1346,12 @@ def cmd_self_test(args):
     check('revive: its plan entry lets the cross-project gate pass the marker (session, fresh planned_at)',
           rv['k-cut']['session'] == 'local_sc' and rv['k-cut']['kind'] == 'stalled' and time.time() - rv['k-cut']['planned_at'] < 60)
     notes = '\n'.join(plan.get('notes') or [])
-    check('revive: on guard, paused, quiet less than 45 min without a cut, cut less than 5 min ago -> not woken; busy and '
-          'waiting on the developer -> said, not woken',
-          not any(k in rv for k in ('k-guard', 'k-sbusy', 'k-spaused', 'k-syoung', 'k-shuman', 'k-snew'))
+    check('revive: on guard without a cut, paused, quiet less than 45 min without a cut, cut less than 5 min ago -> not '
+          'woken; busy and waiting on the developer -> said, not woken; on guard and cut by the limit -> woken',
+          not any(k in rv for k in ('k-gquiet', 'k-sbusy', 'k-spaused', 'k-syoung', 'k-shuman', 'k-snew'))
+          and 'k-guard' in rv
           and 'BUSY local_sb k-sbusy' in notes and 'HUMAN local_sh k-shuman' in notes
-          and not any(x in notes for x in ('k-guard', 'k-spaused', 'k-syoung', 'k-snew')))
+          and not any(x in notes for x in ('k-gquiet', 'k-spaused', 'k-syoung', 'k-snew')))
     r = srevive('yes')
     check('revive: within REVIVE_RETRY_S the same cut waits', 'WAIT-STALLED local_sc k-cut' in r.stdout
           and not re.search(r'^STALLED ', r.stdout, re.M))

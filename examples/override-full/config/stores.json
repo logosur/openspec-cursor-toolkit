@@ -1,0 +1,8 @@
+{
+  "play": {"developer_id": "1234567890123456789", "console_user": 0, "key_file": "~/.config/example/play-service-account.json"},
+  "ios": {"key_id": "ABCDE12345", "issuer_id": "00000000-0000-0000-0000-000000000000", "key_file": "~/.config/example/AuthKey_ABCDE12345.p8"},
+  "apps": {
+    "demo": {"provider": "play", "id": "com.example.app", "console_id": "1234567890123456789", "name": "Demo"},
+    "demo-ios": {"provider": "ios", "id": "com.example.app", "console_id": "1234567890", "name": "Demo"}
+  }
+}

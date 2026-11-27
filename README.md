@@ -58,10 +58,10 @@ What the installer guarantees:
 
 ## Modules
 
-`openspec`, `core` and `devtools` are installed by default. `sessions`, `supervision`, `heavy-jobs`, `accounts` and
-`routines` are opt-in, because they change what sessions do unattended (`sessions` makes started sessions run without
+`openspec`, `core` and `devtools` are installed by default. `sessions`, `supervision`, `heavy-jobs`, `accounts`,
+`routines` and `access` are opt-in, because they change what sessions do unattended (`sessions` makes started sessions run without
 permission prompts) or what runs on the machine: choose them with
-`--modules openspec,core,devtools,sessions,supervision,heavy-jobs,accounts,routines` or in
+`--modules openspec,core,devtools,sessions,supervision,heavy-jobs,accounts,routines,access` or in
 the override's `modules`. A later `install` without `--modules` keeps the modules of the last install; to drop
 one, name the ones you want.
 
@@ -75,6 +75,7 @@ one, name the ones you want.
 | `heavy-jobs` | `heavy-job` (one semaphore for the machine's suites, builds, installs, emulators and models; set `default_slots` for the machine) `heavy-job-gate`, which denies a heavy command launched outside it, and `cloud-tests`, which runs the suites a project declares in `.claude/cloud-tests.json` in a Claude Code cloud session instead of the local slots |
 | `accounts` | for several Claude accounts on one machine: `claude-sessions-sync` copies the desktop app's Code-tab session records between every account and organisation, so after a switch the sidebar lists the same sessions; `account-switch` (with its `SessionStart` hook, its rule and the app task `account-switch-resume`) notices the switch, asks for the CLI and routines logins that are needed and hands the sessions the old account stopped to one session that resumes them. The installer writes no service: `python3 ~/.claude/scripts/claude-sessions-sync install` starts the sync as a `systemd --user` unit |
 | `routines` | scheduled routines that belong to the machine, not to an account: a registry of prompts with a cron schedule, run by the Claude Code CLI under `dontAsk` with only the permission profiles each routine declares (profiles live in its config piece), `routines notify` for desktop notices, and a login with the CLI's own long-lived token. The installer writes no timer: a `systemd --user` timer that runs `routines tick` every 5 minutes starts them |
+| `access` | read-only access to what lives outside every repository: `mailbox` (the mailboxes named in its config piece, through live IMAP, a desktop mail client's local store or the session's mail connector: search, show, thread, attachments) and `stores` (Google Play and App Store Connect: what is missing to connect, releases, reviews, the public listing, the console address of an app), with one short skill, `cuentas-externas`, that routes sessions to both. It ships with no account, no app and no key |
 
 Manifests are in `global/modules/<name>.yaml`; the files they install are in `global/` (and, for
 `openspec`, in `.claude/`). The rule texts of `core` and `devtools` are written in Spanish, like the

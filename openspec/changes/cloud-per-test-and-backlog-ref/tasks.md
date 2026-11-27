@@ -24,6 +24,13 @@ Design decisions: **D1**–**D6**.
 
 ## 4. Publish and verify
 
-- [ ] 4.1 PR develop→main, CI read once, merge, develop synced; install, drift, skill-lint.
-- [ ] 4.2 `supervisor-lock backlog` in the toolkit's main checkout lists the changes of `origin/main`.
-- [ ] 4.3 A natural cloud run after install lists tests with `cloud-tests result <run> --tests`.
+- [x] 4.1 PR develop→main, CI read once, merge, develop synced; install, drift, skill-lint.
+- [x] 4.2 `supervisor-lock backlog` in the toolkit's main checkout lists the changes of `origin/main`.
+- [x] 4.3 A natural cloud run after install lists tests with `cloud-tests result <run> --tests` (jest, 2300 lines).
+
+## 5. Found in the first real runs
+
+- [x] 5.1 The JUnit fallback reaches Gradle results (`<dir>/<module>/build/test-results/<task>/`): depth 7.
+- [x] 5.2 A pump started before an install re-executes itself when the script is replaced, so it never dispatches
+      runs to a runner of the previous brief.
+- [ ] 5.3 A natural pytest run in the cloud lists its tests.

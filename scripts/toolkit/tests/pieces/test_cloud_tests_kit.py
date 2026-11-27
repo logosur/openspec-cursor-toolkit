@@ -175,6 +175,12 @@ class CollectTest(KitCase):
                                          roots=[os.path.join(self.dir, 'home')])
         self.assertEqual((lines, source), ([('passed', 't::x')], 'hooks'))
 
+    def test_gradle_results_five_levels_down_are_found(self):
+        self.write('android/quick-actions/build/test-results/testDebugUnitTest/TEST-a.xml', self.JUNIT)
+        lines, source = self.kit.collect(os.path.join(self.dir, 'results'), time.time() - 5, self.dir,
+                                         roots=[self.dir])
+        self.assertEqual((len(lines), source), (4, 'junit'))
+
     def test_request_junit_path_is_read_from_the_checkout(self):
         self.write('out/j.xml', self.JUNIT)
         lines, source = self.kit.collect(os.path.join(self.dir, 'results'), time.time(), self.dir, junit='out/j.xml')

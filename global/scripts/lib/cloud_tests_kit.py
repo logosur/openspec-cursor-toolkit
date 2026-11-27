@@ -176,7 +176,7 @@ def junit_lines(path):
     return out
 
 
-def junit_candidates(roots, since, skip, limit=50, depth=4):
+def junit_candidates(roots, since, skip, limit=50, depth=7):  # Gradle: <dir>/<module>/build/test-results/<task>/
     """XML files modified at or after `since` whose root is a JUnit testsuite(s), under `roots`."""
     found = []
     for root in roots:

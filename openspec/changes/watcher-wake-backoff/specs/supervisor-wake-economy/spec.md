@@ -17,6 +17,18 @@ The watcher SHALL compute the quiet time of a project from the most recent activ
 - **WHEN** any live session of the project is busy
 - **THEN** no `ALLIDLE` line is produced, whatever the quiet time
 
+#### Scenario: Threshold of zero
+- **WHEN** the watcher runs with `--all-idle-after 0`
+- **THEN** no `ALLIDLE` line is ever produced
+
+#### Scenario: Guard mode
+- **WHEN** the watcher runs with `--guard`
+- **THEN** no `ALLIDLE` line is produced, because a supervisor on guard has no next turn to push
+
+#### Scenario: No session reports an idle time
+- **WHEN** the project has no session with a known idle time
+- **THEN** the quiet time runs from the recorded activity or, without one, from the first wait, and re-arming does not restart it
+
 ### Requirement: ALLIDLE backs off while nothing moves
 Within one quiet stretch, report number `n` (counting from 0) SHALL require a quiet time of at least `min(base × 2^n, cap)`, where `base` is the watcher's `--all-idle-after` and `cap` comes from configuration. A report after the first SHALL also wait at least the previous threshold since the last report. The first report of a stretch SHALL also wait `base` after the watcher first saw the stretch.
 
@@ -70,6 +82,10 @@ The three intervals (`queued_reannounce_min`, `slotheld_reannounce_min`, `all_id
 ### Requirement: The skill states the cost of a wake
 The supervision skill's watcher reference SHALL state that a tick costs a re-read of the supervisor's context, SHALL allow doubling `--timeout` after two unchanged ticks up to 7200 s without passing the nearest deadline of the work in flight, and SHALL describe the back-off of `ALLIDLE` and the re-announce interval of `QUEUED` and `SLOTHELD` with their configuration keys.
 
-#### Scenario: Skill lint
+#### Scenario: Reading the watcher reference
+- **WHEN** the watcher reference of the installed skill is read
+- **THEN** it says that a wake re-reads the whole context, gives 7200 s as the upper bound of the doubled `--timeout` together with the deadline rule, and names `all_idle_backoff_max_min`, `queued_reannounce_min` and `slotheld_reannounce_min`
+
+#### Scenario: Skill lint still passes
 - **WHEN** `supervisor-lock skill-lint` runs on the installed skill
-- **THEN** it reports no finding for the watcher reference
+- **THEN** it reports no finding

@@ -7,43 +7,80 @@ Defines the record of every pool call and the figures derived from it, so that t
 ## ADDED Requirements
 
 ### Requirement: One row per request
-Every `ask`, whatever its outcome, SHALL write one row with: an id, the time, the caller's session, its project, its role (supervisor or child), the task kind, the member (or none), the mode, the dial level, input and output tokens, latency, the cost the gateway reports (zero when it reports none), the outcome and the verdict when the task kind has one.
+Every `ask`, whatever its outcome, SHALL leave exactly one row with: an id, the time, the caller's session, its project, its role (supervisor or child), the task kind, the member (or none), the model the gateway says answered, the mode, the level in force, input and output tokens, latency, the cost and whether the gateway reported it or the module computed it, the outcome and the verdict when the task kind has one.
 
 #### Scenario: Refused by the gate
 - **WHEN** a request is refused by the privacy gate
 - **THEN** a row exists with the outcome "refused by gate", no member, zero tokens and no payload
 
+### Requirement: The row exists before the request leaves
+The row SHALL be written before any request is sent, with the outcome `pending` and the budget it reserves, and completed when the answer or the failure is known. A `pending` row older than the request's time limit SHALL be closed as `lost` by the next command, and its reservation SHALL count as spent. Concurrent writers SHALL NOT lose or corrupt rows.
+
+#### Scenario: The process is killed mid-request
+- **WHEN** an `ask` is killed after sending and before the answer arrives
+- **THEN** its row exists as `pending`, the next command marks it `lost`, and its reserved tokens count against the day's budget
+
+#### Scenario: Ten callers at once
+- **WHEN** ten `ask` commands run at the same moment
+- **THEN** the ledger holds ten rows and the budget counts all ten
+
 ### Requirement: The payload is kept redacted and for a bounded time
-The request and the answer SHALL be stored only after redaction and SHALL be deleted after the configured number of days (default 7). With the value 0, no payload SHALL be stored. The ledger file SHALL be readable by its owner only.
+The request and the answer SHALL be stored only after redaction and SHALL be deleted after the configured number of days (default 7). With the value 0, no payload SHALL be stored. Figures SHALL be kept for the configured number of days (default 400). The purge SHALL run at the start of a command, at most once a day, with no background process. The ledger file SHALL be readable by its owner only.
 
 #### Scenario: Retention passed
-- **WHEN** a row is 8 days old with the default retention
+- **WHEN** a row is 8 days old with the default retention and any command runs
 - **THEN** its figures remain and its request and answer are gone
 
 ### Requirement: Avoided tokens are an estimate with a stated rule
-Each row SHALL carry the main-model tokens it is estimated to have avoided, and the rule used: for an honoured `sleep`, the median cost of that supervisor's last 20 wakes; for a digest read in `assist`, the size of the text the main model did not read minus the size of the digest; for `shadow` rows and for every outcome that fell back, zero.
+Each row SHALL carry the main-model tokens it is estimated to have avoided and the rule used, and the figure SHALL be labelled "estimate" wherever it is shown. For an honoured `sleep` judged `agreed` it SHALL be the median cost of that supervisor's last 20 soft wakes: with 5 to 19 soft wakes it SHALL be marked "thin baseline", and with fewer than 5 "no baseline", counting as zero. A `sleep` judged `missed` or left `unknown` SHALL count as zero.
+
+#### Scenario: No wake history
+- **WHEN** a supervisor has fewer than 5 recorded soft wakes
+- **THEN** the estimate for its honoured sleeps is marked "no baseline" and counts as zero in the totals
+
+#### Scenario: A sleep nobody judged
+- **WHEN** an honoured sleep is still `unknown`
+- **THEN** it adds nothing to the avoided total
+
+### Requirement: Digests, shadow rows and fallbacks have their own rule
+For a digest read in `assist`, the avoided tokens SHALL be the size of the original minus the size of the digest, and zero when the caller reports that it read the original in full. For `shadow` rows and every outcome that fell back they SHALL be zero.
 
 #### Scenario: Shadow row
 - **WHEN** a request runs in `shadow`
 - **THEN** its avoided tokens are zero
 
-#### Scenario: No wake history
-- **WHEN** a supervisor has fewer than 5 recorded wakes
-- **THEN** the estimate for its honoured sleeps is marked "no baseline" and counts as zero in the totals
+#### Scenario: The session read the original anyway
+- **WHEN** a session receives a digest and reports that it then read the whole original
+- **THEN** that row's avoided tokens are zero
 
-### Requirement: Rows are judged afterwards
-A row SHALL be marked `agreed`, `missed` or `unknown` once what really happened is known: for `wake-triage`, by the supervisor at its next wake; for other task kinds, by the main model that read the answer or by a canary check. A command SHALL record the judgement by ledger id.
+### Requirement: Rows are judged by an explicit act
+A row SHALL be marked `agreed` or `missed` only by a command: for `wake-triage`, the supervisor's judging step; for other task kinds, the console's review view or a session the developer asks to review. A row nobody judges SHALL stay `unknown` and SHALL NOT count as agreement in any scorecard.
 
 #### Scenario: The supervisor finds a slept event mattered
 - **WHEN** a supervisor, on waking, sees that an event slept by the pool needed action earlier
 - **THEN** it records `missed` for that row with one command, and the miss counts for demotion
 
-### Requirement: Totals show spend, saving and leverage
-`llm-pool status` and the console SHALL show, for today, the last 7 days and the current month, per member and in total: pool tokens spent, cost, main-model tokens avoided (raw and weighted with the configured weights for cache reads and cache writes), leverage (avoided ÷ spent), the number of requests by outcome, and the number of misses.
+#### Scenario: The tick ends without judging
+- **WHEN** a supervisor's tick ends and it judged nothing
+- **THEN** the slept rows stay `unknown`
+
+### Requirement: Scorecards per pair
+The module SHALL compute, per pair (task kind, member), from judged rows only: the number of samples, how many were cases where the supervisor was needed, the agreement, the false sleeps, the misses, the median latency and the tokens per request. `llm-pool status --scorecards` SHALL print them.
+
+#### Scenario: Mostly unjudged rows
+- **WHEN** a pair has 200 shadow rows and 15 of them are judged
+- **THEN** its scorecard says 15 samples
+
+### Requirement: Totals show spend, saving and leverage, raw and weighted
+`llm-pool status` and the console SHALL show, for today, the last 7 days and the current month, per member and in total: pool tokens spent, cost, main-model tokens avoided, leverage (avoided ÷ spent), the number of requests by outcome, and the number of misses. Avoided tokens and leverage SHALL be shown raw and weighted with the configured weights of cache reads and cache writes. While no weights are configured the weighted figures SHALL read "not set", never a number.
 
 #### Scenario: Weighted figure
 - **WHEN** the configured weight of a cache-read token is 0.1 and a sleep avoided 1 000 000 tokens of which 980 000 were cache reads
 - **THEN** the weighted saving shown for that row is 118 000 token units
+
+#### Scenario: Weights not measured yet
+- **WHEN** the config holds no cache weights
+- **THEN** the weighted columns read "not set" and the raw columns are labelled raw
 
 ### Requirement: Usage is reconciled with the gateway
 When the gateway exposes usage per key or per request, a command SHALL compare the ledger's tokens and cost with it for a period and report the difference. When it does not, the ledger SHALL say that its figures are its own count.

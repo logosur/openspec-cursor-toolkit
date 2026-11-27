@@ -1242,7 +1242,7 @@ class SelfTestTest(Base):
         self.assertEqual(failed, [], r.stdout[-3000:] + r.stderr[-2000:])
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
         checks = sum(1 for line in r.stdout.splitlines() if line.startswith('ok '))
-        self.assertGreaterEqual(checks, 558 if SKILL.is_file() else 557)
+        self.assertGreaterEqual(checks, 564 if SKILL.is_file() else 563)
         self.assertTrue(r.stdout.rstrip().endswith('ok: 0 failed'))
         self.assertFalse(os.listdir(self.env['TMPDIR']), 'the self-test left files in the temp dir')
 

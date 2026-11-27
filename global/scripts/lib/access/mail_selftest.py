@@ -121,6 +121,26 @@ def standard_messages() -> dict[str, bytes]:
     }
 
 
+def list_messages() -> dict[str, bytes]:
+    """Extra synthetic messages for the identifier and header-filter tests (a mailing list, a repeated header, no
+    `Message-ID`, a mixed-case one, a long subject). They are not part of `standard_messages`, so no count of the
+    standard fixture changes; a test writes the ones it needs into a folder."""
+    return {
+        'alpha1': message('Digest alpha 1', 'List <list@example.org>', ADDRESS, 'Mon, 09 Nov 2026 08:00:00 +0000',
+                          'alpha-1@example.org', extra=[('List-ID', 'Alpha list <alpha.example.org>')]),
+        'alpha2': message('Digest alpha 2', 'List <list@example.org>', ADDRESS, 'Tue, 10 Nov 2026 08:00:00 +0000',
+                          'alpha-2@example.org', extra=[('List-ID', 'Alpha list <alpha.example.org>')]),
+        'beta1': message('Digest beta 1', 'List <list@example.org>', ADDRESS, 'Wed, 11 Nov 2026 08:00:00 +0000',
+                         'beta-1@example.org', extra=[('List-ID', 'Beta list <beta.example.org>')]),
+        'twice': message('Two list headers', 'List <list@example.org>', ADDRESS, 'Thu, 12 Nov 2026 08:00:00 +0000',
+                         'twice-1@example.org', extra=[('List-ID', '<first.example.org>'), ('List-ID', '<second.example.org>')]),
+        'plain': message('Plain note', OTHER, ADDRESS, 'Fri, 13 Nov 2026 08:00:00 +0000', 'plain-1@example.org'),
+        'noid': message('No identifier', OTHER, ADDRESS, 'Sat, 14 Nov 2026 08:00:00 +0000', None),
+        'mixed': message('Mixed case identifier', OTHER, ADDRESS, 'Sun, 15 Nov 2026 08:00:00 +0000', 'Case.Mixed-1@example.test'),
+        'long': message('L' * 300, OTHER, ADDRESS, 'Mon, 16 Nov 2026 08:00:00 +0000', 'long-1@example.org'),
+    }
+
+
 def build_thunderbird(root: Path, address: str = ADDRESS, host: str = HOST, *, old_defines: bool = True,
                       new_defines: bool = True, directory: str | None = None, extra_prefs: list[str] | None = None) -> dict:
     """A profile root with an old profile (empty `INBOX`, one old message) and the default one (live `INBOX-1`,
@@ -232,6 +252,9 @@ def run(main) -> int:
         check('indexing and search read both store formats', found.get('total') == 7 and found.get('backend') == 'local',
               str(found.get('total')))
         check('a deleted message is not listed', 'Deleted for good' not in out)
+        by_subject = {item.get('subject'): item.get('message_id', 'missing') for item in found.get('items', [])}
+        check('every item carries its normalised Message-ID', by_subject.get('Lunch tomorrow') == 'lunch-1@example.com'
+              and by_subject.get('Invoice 2026') == 'invoice-1@example.org', str(by_subject))
         check('an undated message is listed last', found.get('items', [{}])[-1].get('subject') == 'Broken date')
         check('the no-status note is given for the newer format',
               any('deleted or moved' in n for n in found.get('notes', [])))

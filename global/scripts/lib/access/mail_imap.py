@@ -406,7 +406,7 @@ class ImapBackend:
     def _item(self, info: dict, folder: str, validity: int, uid: int) -> Item:
         direction, party = party_and_direction(info['from_addr'], info['from_party'], info['to_first'], self.own)
         return Item(self.make_id(folder, validity, uid), info['date'], direction, party, info['subject'],
-                    bool(info['att']), folder)
+                    bool(info['att']), folder, info['mid'] or '')
 
     # ------------------------------------------------------------ reading one message
     def fresh_of(self, item_id: str) -> str:

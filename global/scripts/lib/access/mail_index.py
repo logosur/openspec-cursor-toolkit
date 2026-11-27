@@ -269,15 +269,16 @@ class FolderIndex:
             block = fh.read(max(row['hend'] - row['hstart'], 0))
         return [(name, decode_words(value)) for name, value, _ in split_headers(block)]
 
-    def header_filter(self, rows, name: str, needle: str, cap: int = 50000):
-        """(rows whose header NAME contains NEEDLE, number scanned)."""
+    def header_filter(self, rows, name: str, needle: str):
+        """(rows whose header NAME contains NEEDLE, number scanned). It has no bound of its own: the caller cuts ROWS
+        to the candidates it is willing to read (`header_scan_max`), so the bound is stated in one place."""
         out, scanned = [], 0
         try:
             with mail_local.open_mbox(self.mbox) as fh:
-                for row in rows[:cap]:
-                    scanned += 1
+                for row in rows:
                     fh.seek(row['hstart'])
                     block = fh.read(max(row['hend'] - row['hstart'], 0))
+                    scanned += 1                      # counted once its header was read: a failed read is not a check
                     if any(n == name and needle in decode_words(v).casefold() for n, v, _ in split_headers(block)):
                         out.append(row)
         except OSError:

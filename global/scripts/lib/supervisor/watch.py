@@ -7,7 +7,7 @@ import traceback
 from . import (
     askdue, backlog, census, closable, cloud, human_turns, interrupted,
     lint, lock as lock_mod, machine_queue, projects, providers, transcripts,
-    settings, util, verdicts,
+    settings, util, verdicts, wakes,
 )
 
 
@@ -35,17 +35,43 @@ def registry_big_line(project, owner_id, limit):
             f'keep only the state sections)')
 
 
+PRINTED = []   # the stdout lines of the current wait, in order: what the wake journal records
+
+
+def emit(line):
+    """Print one line of the watcher's stdout and remember it for the journal."""
+    print(line)
+    PRINTED.append(line)
+
+
+def journal_wake(args, started):
+    """Append this wake to the journal of the project's lock. Never changes how wait ends."""
+    try:
+        wakes.record(projects.resolve(args.dir)['key'], args.owner, started, time.time(), PRINTED)
+    except Exception:
+        util.hook_log('wait-errors.log', traceback.format_exc().rstrip())
+
+
 def cmd_wait(args):
-    """Wait (see wait_events); with --owner, an oversized registry adds one advisory line at the end."""
-    code = wait_events(args)
-    if args.owner:
-        try:
-            line = registry_big_line(projects.resolve(args.dir), args.owner, args.registry_max)
-        except Exception:
-            line = None  # advisory only: never changes how wait ends
-        if line:
-            print(line)
-    return code
+    """Wait (see wait_events); with --owner, an oversized registry adds one advisory line at the end, and the wake
+    (what was printed) is appended to the journal before the watcher exits."""
+    started = time.time()
+    PRINTED.clear()
+    finished = False
+    try:
+        code = wait_events(args)
+        finished = True
+        if args.owner:
+            try:
+                line = registry_big_line(projects.resolve(args.dir), args.owner, args.registry_max)
+            except Exception:
+                line = None  # advisory only: never changes how wait ends
+            if line:
+                emit(line)
+        return code
+    finally:
+        if args.owner and (finished or PRINTED):
+            journal_wake(args, started)
 
 
 def usage_back_line(project, owner_id):
@@ -69,7 +95,7 @@ def hold_while_paused(project, interval):
         return False
     while providers.pause_of(project['checkout']):
         time.sleep(max(5.0, float(interval or 30)))
-    print(f'RESUMED {project["key"]} (pausa levantada; estaba en pausa desde {marker.get("paused_at")})')
+    emit(f'RESUMED {project["key"]} (pausa levantada; estaba en pausa desde {marker.get("paused_at")})')
     return True
 
 
@@ -256,7 +282,7 @@ def wait_events(args):
 
     line = skill_line()  # a state to act on: reported at once, not only when it changes
     if line:
-        print(line)
+        emit(line)
         return 0
     cut_now = []   # resumable cut sessions of the latest round (the same census as the closable cache)
     verdict_now = []  # closable sessions whose last message is «Sí, puedes cerrar» (same census)
@@ -339,7 +365,7 @@ def wait_events(args):
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            print(f'TIMEOUT {tick(args.timeout)}s')
+            emit(f'TIMEOUT {tick(args.timeout)}s')
             return 0
         time.sleep(min(args.interval, remaining))
         if args.owner and time.monotonic() - last_beat >= args.beat_every:
@@ -347,7 +373,7 @@ def wait_events(args):
             last_beat = time.monotonic()
         line = skill_line()
         if line:
-            print(line)
+            emit(line)
             return 0
         rows = everyone()
         due = closable_cache(rows) if args.owner else {}
@@ -404,5 +430,6 @@ def wait_events(args):
         if args.guard:
             events = [e for e in events if e.split(' ', 1)[0] in GUARD_EVENTS]
         if events:
-            print('\n'.join(events))
+            for event in events:
+                emit(event)
             return 0

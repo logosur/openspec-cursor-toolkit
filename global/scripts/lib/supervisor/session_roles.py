@@ -61,6 +61,47 @@ def recent_closed_mailboxes():
     return found
 
 
+def hangs_from(record):
+    """The local id of the session this app record hangs from in the app's sidebar, else None (top level).
+
+    It hangs when `spawnedFrom.sessionId` is a non-empty string and `lineageDetached` is not True; a detached record
+    keeps its old `spawnedFrom` and is top level. Never raises on a malformed record."""
+    try:
+        if not isinstance(record, dict) or record.get('lineageDetached') is True:
+            return None
+        spawned = record.get('spawnedFrom')
+        parent = spawned.get('sessionId') if isinstance(spawned, dict) else None
+        return parent if isinstance(parent, str) and parent else None
+    except Exception:
+        return None
+
+
+def app_record_of_cli(cli_session_id):
+    """The newest non-archived app record whose `cliSessionId` is `cli_session_id` (newest by `lastActivityAt`), else
+    None. A file whose text does not contain the id is skipped before parsing (one substring test per record), and a
+    file that is not valid JSON reads as no record. Never raises."""
+    found = None
+    try:
+        if not isinstance(cli_session_id, str) or not cli_session_id:
+            return None
+        for path in glob.glob(census.app_glob()):
+            try:
+                with open(path) as fh:
+                    text = fh.read()
+                if cli_session_id not in text:
+                    continue
+                rec = json.loads(text)
+            except (OSError, ValueError):
+                continue
+            if not isinstance(rec, dict) or rec.get('cliSessionId') != cli_session_id or rec.get('isArchived'):
+                continue
+            if found is None or (util.num(rec.get('lastActivityAt')) or 0) >= (util.num(found.get('lastActivityAt')) or 0):
+                found = rec
+    except Exception:
+        return None
+    return found
+
+
 def title_names_project(title, project):
     """True when `project` appears in `title` as a whole word, ignoring case and accents."""
     name = util.fold_text(project).strip()

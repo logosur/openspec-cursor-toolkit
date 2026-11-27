@@ -19,7 +19,7 @@ acaba sin vigilante no lo despierta nadie y un proceso muerto se lleva consigo t
 | **Hook al arrancar o compactar** | Proceso nuevo o compactación | Te recuerda fase, ronda y que la vigilancia anterior ya no existe |
 | **Vigía externo** (opcional, `piezas-opcionales.md`) | El proceso de la supervisora murió o no late | Avisa al desarrollador fuera de Claude |
 | **Latido de respaldo** (opcional) | Cada ~15 min con la sesión ociosa | Una tarea programada de la sesión con `/supervisa-sesiones (tick de vigilancia)`. Muere con el proceso: no sustituye al vigilante |
-| **Avisos de la app** | Termina una sesión que abriste o un subagente tuyo | No siempre llegan: no sustituyen al vigilante |
+| **Avisos de la app** | Termina una sesión que abriste o un subagente tuyo | No siempre llegan: no sustituyen al vigilante. De la sesión de preguntas no llegan: vive en el nivel superior, y su respuesta te la trae `ANSWERED` del vigilante |
 
 **Cada turno termina con el vigilante armado**, también tras cumplir una orden directa o cuando todo parece hecho. Solo
 se termina sin él al soltar el cerrojo (F9).
@@ -109,6 +109,8 @@ empiezo la escalera.
 | `CLOSABLE <id>` (guardia) | Candidata al cierre | F4b en ese tick |
 | `BACKLOG` (guardia) | Un change con tareas abiertas que nadie aparcó, o cuyo aparcado caducó | Salir de guardia si es del alcance y está autorizado, o aparcarlo con lo comprobado (F9) |
 | `ASKDUE <n> <ids>` (también de guardia) | Preguntas de la cola que bloquean trabajo y nunca se le presentaron: una orden suya (`--order`) o trabajo real bloqueado más de `ask_due_after_h` horas, con la ventana de la tanda parcial abierta. `beat` lo repite en stderr | En ese tick, la tanda parcial (`f5-decisiones.md`, «Antes del final»): `ask-queue asked <ids> --to <sesión de preguntas>` y todas juntas a la sesión de preguntas. Lo que bloquean se aparca; lo demás sigue. Tras mandarla, sigues en la fase en la que estabas |
+| `ANSWERED <id> [turno a->b] [contestadas <ids>]` (también de guardia) | La sesión de preguntas terminó un turno o una pregunta de la cola pasó a contestada. Una vez por respuesta y por turno, aunque la tengas en `--exclude`; las respuestas de un mismo turno llegan juntas | Leer el resultado con `list_events` de esa sesión y seguir según `f5-decisiones.md`, «La sesión de preguntas», punto 5 |
+| `DETACH <id> questions (cuelga de <madre>)` (en `titles` y `beat`) | La sesión de preguntas cuelga de una sesión y sus diálogos saldrían en la ventana de esa | `arranque.md`, «Sesiones hijas en la barra lateral» |
 | `CLOUD …` | Una sesión en la nube del repositorio necesita atención (si hay con qué verla) | Ver «Sesiones fuera de la máquina» |
 | `QUEUED`, `SLOTHELD` | Un trabajo pesado del proyecto espera turno, o tiene hueco mucho tiempo mientras otros esperan (módulo `heavy-jobs`) | Decir «en cola, puesto N»; comprobar que quien ocupa avanza; adelantar lo que no depende de ella. Lo de otro proyecto no se toca |
 | `NEW` | Apareció una sesión del proyecto | Censo (F1) e informe (F2). Su modo se anota, no se cambia |
@@ -154,7 +156,8 @@ Son mínimos: cuando el proyecto documenta una duración, manda el runbook, y el
 - **Qué es:** sigues con el cerrojo en fase `guardia`, con la sección de guardia en el registro, y armas
   `$L wait --owner <id> --guard --timeout 21600 --exclude <preguntas> --exclude <cierre>`. La guardia no concede nada.
 - **Qué la despierta:** las señales de la tabla menos `TURN`, `STATUS` y `ALLIDLE`, que serían demasiadas; en su lugar
-  están `IDLE`, `CLOSABLE` y `BACKLOG`. `ASKDUE` también: una pregunta que bloquea no espera a otro ciclo.
+  están `IDLE`, `CLOSABLE` y `BACKLOG`. `ASKDUE` también: una pregunta que bloquea no espera a otro ciclo. Y
+  `ANSWERED`, aunque la sesión de preguntas esté en `--exclude`: una respuesta del desarrollador te despierta.
 - **Al despertar:** lo mismo que en un ciclo. Con `TIMEOUT`, recorres otra vez las cuatro fuentes y reescribes «Motivo de la
   guardia» con la hora. Después vuelves con `$L beat --phase guardia`, que se niega (7) si queda trabajo.
 - **Un mensaje del desarrollador en tu sesión es una orden, no una nota.** Si pide trabajo, es un ciclo nuevo:

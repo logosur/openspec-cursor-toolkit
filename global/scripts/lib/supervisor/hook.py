@@ -14,8 +14,21 @@ from . import (
 )
 
 
+def in_selftest_sandbox(pid, sandbox):
+    """True when process `pid` runs inside the self-test sandbox `sandbox` (its environment names it)."""
+    try:
+        with open(f'/proc/{pid}/environ', 'rb') as fh:
+            return f'SUPERVISOR_SELFTEST_SANDBOX={sandbox}'.encode() in fh.read().split(b'\0')
+    except OSError:
+        return False
+
+
 def wait_armed_in_proc(owner_id):
-    """Fallback when the hook payload has no background_tasks: look for `supervisor-lock wait --owner ID`."""
+    """Fallback when the hook payload has no background_tasks: look for `supervisor-lock wait --owner ID`.
+
+    Inside the self-test sandbox only the processes of that same sandbox count: a fake watcher of another self-test
+    run on the machine must not arm this one's owner."""
+    sandbox = os.environ.get('SUPERVISOR_SELFTEST_SANDBOX')
     for entry in os.listdir('/proc'):
         if not entry.isdigit() or int(entry) == os.getpid():
             continue
@@ -29,6 +42,8 @@ def wait_armed_in_proc(owner_id):
                 a in (f'--owner={owner_id}', f'--exclude={owner_id}')
                 or (a in ('--owner', '--exclude') and i + 1 < len(argv) and argv[i + 1] == owner_id)
                 for i, a in enumerate(argv)):
+            if sandbox and not in_selftest_sandbox(entry, sandbox):
+                continue
             return True
     return False
 
@@ -93,6 +108,13 @@ def hook_decide(raw):
             return supervised.stop_supervised_question(payload) or supervised.stop_supervised_english(payload)
         return ask_gate.ask_gate_decide(payload, locks) if event == 'PreToolUse' else ''
     owner = locks[local]
+    if event == 'Stop':
+        # before every block and whatever stop_hook_active says: a report resets the report clock even on a turn the
+        # hook blocks for something else, so the report block stays at most one per turn (never raises)
+        try:
+            guard_report.record_report(owner, payload, session)
+        except Exception:
+            util.hook_log('hook-errors.log', traceback.format_exc().rstrip())
     paused = providers.pause_of(owner.get('checkout')) if event in ('Stop', 'SessionStart') else None
     if paused:
         # The developer paused the project (optional project-pause provider): its supervisor may end any turn, and on

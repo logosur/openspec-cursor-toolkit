@@ -366,6 +366,45 @@ print(json.dumps([watch.allidle_line('p', busy, 20000.0, 900, 7200, 0.0),
 CLOUD_TESTS = str(REPO_ROOT / 'global/scripts/cloud-tests')
 
 
+class LineageRuleTest(Base):
+    """session_roles.hangs_from and app_record_of_cli: one lineage rule for titles and the ask gate."""
+
+    def test_the_truth_table_and_the_newest_record_of_a_cli_session(self):
+        app = self.mkdir('app')
+        folder = self.mkdir(os.path.join('app', 'acct', 'org'))
+        for name, rec in (('local_a', {'sessionId': 'local_a', 'cliSessionId': 'cli-a', 'lastActivityAt': 1}),
+                          ('local_b', {'sessionId': 'local_b', 'cliSessionId': 'cli-a', 'lastActivityAt': 9}),
+                          ('local_c', {'sessionId': 'local_c', 'cliSessionId': 'cli-a', 'lastActivityAt': 99,
+                                       'isArchived': True})):
+            with open(os.path.join(folder, name + '.json'), 'w') as fh:
+                json.dump(rec, fh)
+        with open(os.path.join(folder, 'local_bad.json'), 'w') as fh:
+            fh.write('{"cliSessionId": "cli-bad", ')                      # not valid JSON
+        out = self.python(LOADER + """
+import json
+lock = load('supervisor_lock')
+roles = lock._module('session_roles')
+cases = [
+    {'spawnedFrom': {'sessionId': 'local_sup'}},
+    {'spawnedFrom': {'sessionId': 'local_sup'}, 'lineageDetached': True},
+    {'spawnedFrom': {'sessionId': 'local_sup'}, 'lineageDetached': False},
+    {'spawnedFrom': {'sessionId': 'local_sup'}, 'lineageDetached': None},
+    {'spawnedFrom': {'sessionId': 'local_sup'}, 'lineageDetached': 'true'},
+    {}, {'spawnedFrom': {}}, {'spawnedFrom': {'sessionId': ''}}, {'spawnedFrom': {'sessionId': 7}},
+    {'spawnedFrom': 'local_sup'}, {'spawnedFrom': None, 'lineageDetached': False}, None, 'x', [],
+]
+print(json.dumps([[roles.hangs_from(c) for c in cases],
+                  (roles.app_record_of_cli('cli-a') or {}).get('sessionId'),
+                  roles.app_record_of_cli('cli-bad'), roles.app_record_of_cli('cli-none'),
+                  roles.app_record_of_cli(''), roles.app_record_of_cli(None)]))
+""", env={'SUPERVISOR_APP_SESSIONS_GLOB': os.path.join(app, '*', '*', 'local_*.json')})
+        hangs, newest, bad, none, empty, nothing = json.loads(out)
+        self.assertEqual(hangs, ['local_sup', None, 'local_sup', 'local_sup', 'local_sup',
+                                 None, None, None, None, None, None, None, None, None])
+        self.assertEqual(newest, 'local_b')        # newest non-archived copy
+        self.assertEqual((bad, none, empty, nothing), (None, None, None, None))
+
+
 class TitlesBase(Base):
     """A project with a lock, app records in a folder of their own and the real cloud-tests script on a fake API."""
 
@@ -584,42 +623,69 @@ class TitlesCommandTest(TitlesBase):
         self.assertEqual(r.returncode, 0, r.stderr)
         return [ln for ln in r.stdout.splitlines() if ln.startswith('ADOPT')]
 
-    def test_adopt_lists_the_helpers_that_are_not_children_of_the_supervisor(self):
+    def detach_lines(self):
+        r = self.titles('--session', 'local_sup')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return [ln for ln in r.stdout.splitlines() if ln.startswith('DETACH')]
+
+    def test_adopt_lists_the_closing_session_that_is_not_a_child_of_the_supervisor(self):
         self.take_lock()
         self.record('local_sup', 'Supervisora de demo')
         box = ('local_box', 'Sesión de preguntas de demo')
         closer = ('local_closer', 'Cierre de sesiones de demo')
-        # children of the owner: nothing
+        # children of the owner: no ADOPT (the questions session gets DETACH instead, see below)
         self.record(*box, spawnedFrom={'sessionId': 'local_sup'})
         self.record(*closer, spawnedFrom={'sessionId': 'local_sup'}, lineageDetached=False)
         self.assertEqual(self.adopt_lines(), [])
-        # opened by another session (a previous supervisor): ADOPT, naming the parent
+        # the questions session opened by another session or moved to the top level: never ADOPT
         self.record(*box, spawnedFrom={'sessionId': 'local_old'})
-        self.assertEqual(self.adopt_lines(), ['ADOPT local_box questions (abierta por local_old)'])
-        # moved to the top level: ADOPT, even when it was once the owner's child
+        self.assertEqual(self.adopt_lines(), [])
+        self.record(*box, spawnedFrom={'sessionId': 'local_old'}, lineageDetached=True)
+        self.assertEqual(self.adopt_lines(), [])
+        # the closing session moved to the top level: ADOPT, even when it was once the owner's child
         self.record(*closer, spawnedFrom={'sessionId': 'local_sup'}, lineageDetached=True)
-        self.assertEqual(self.adopt_lines(), ['ADOPT local_box questions (abierta por local_old)',
-                                              'ADOPT local_closer closer (abierta por local_sup)'])
+        self.assertEqual(self.adopt_lines(), ['ADOPT local_closer closer (abierta por local_sup)'])
         self.record(*closer, lineageDetached=True)
-        self.assertEqual(self.adopt_lines()[1], 'ADOPT local_closer closer (abierta por -)')
+        self.assertEqual(self.adopt_lines(), ['ADOPT local_closer closer (abierta por -)'])
+        # the closing session opened by another session: ADOPT, naming the parent, and never DETACH
+        self.record(*closer, spawnedFrom={'sessionId': 'local_old'})
+        self.assertEqual(self.adopt_lines(), ['ADOPT local_closer closer (abierta por local_old)'])
+        self.assertFalse(any('closer' in ln for ln in self.detach_lines()))
 
-    def test_adopt_prints_nothing_without_a_record_or_without_the_fields(self):
+    def test_detach_lists_the_questions_session_that_hangs_from_any_session(self):
         self.take_lock()
-        self.assertEqual(self.adopt_lines(), [])                      # no records at all
+        self.record('local_sup', 'Supervisora de demo')
+        box = ('local_box', 'Sesión de preguntas de demo')
+        self.record(*box, spawnedFrom={'sessionId': 'local_sup'})              # child of the owner itself
+        self.assertEqual(self.detach_lines(), ['DETACH local_box questions (cuelga de local_sup)'])
+        self.record(*box, spawnedFrom={'sessionId': 'local_old'}, lineageDetached=False)   # child of another session
+        self.assertEqual(self.detach_lines(), ['DETACH local_box questions (cuelga de local_old)'])
+        self.record(*box, spawnedFrom={'sessionId': 'local_old'}, lineageDetached=True)    # moved to the top level
+        self.assertEqual(self.detach_lines(), [])
+        self.record(*box)                                                       # never had a parent
+        self.assertEqual(self.detach_lines(), [])
+        self.record(*box, spawnedFrom={'sessionId': ''})
+        self.assertEqual(self.detach_lines(), [])
+
+    def test_adopt_and_detach_print_nothing_without_a_record_or_without_the_fields(self):
+        self.take_lock()
+        self.assertEqual(self.adopt_lines() + self.detach_lines(), [])      # no records at all
         self.record('local_sup', 'Supervisora de demo', spawnedFrom={'sessionId': 'local_elsewhere'}, lineageDetached=True)
         self.record('local_box', 'Sesión de preguntas de demo')       # neither field
         self.record('local_closer', 'Cierre de sesiones de demo', spawnedFrom={})
-        self.assertEqual(self.adopt_lines(), [])                      # the supervisor itself is never adopted
+        self.assertEqual(self.adopt_lines() + self.detach_lines(), [])  # the supervisor itself is never listed
 
-    def test_beat_shows_the_adopt_lines_too(self):
+    def test_beat_shows_the_adopt_and_detach_lines_too(self):
         self.take_lock()
         self.record('local_sup', 'Supervisora de demo')
         self.record('local_box', 'Sesión de preguntas de demo', spawnedFrom={'sessionId': 'local_old'})
         self.record('local_closer', 'Cierre de sesiones de demo', lineageDetached=True)
         r = self.run_cli('beat', '--dir', self.repo_dir, '--session', 'local_sup')
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual([ln for ln in r.stderr.splitlines() if ln.startswith(('ADOPT', 'RENAME'))],
-                         ['ADOPT local_box questions (abierta por local_old)', 'ADOPT local_closer closer (abierta por -)'])
+        self.assertTrue(r.stdout.startswith('BEAT '), r.stdout)
+        self.assertNotIn('DETACH', r.stdout)
+        self.assertEqual([ln for ln in r.stderr.splitlines() if ln.startswith(('ADOPT', 'RENAME', 'DETACH'))],
+                         ['ADOPT local_closer closer (abierta por -)', 'DETACH local_box questions (cuelga de local_old)'])
 
     def test_one_unreadable_lock_does_not_stop_the_other_work(self):
         self.take_lock()
@@ -672,6 +738,185 @@ print(json.dumps([counts, lines]))
         self.assertIn('REMOTE cse_C HTTP 500', lines)
         self.assertTrue(any(ln.startswith('REMOTE skipped 2') for ln in lines), lines)
         self.assertFalse(any('unavailable' in ln for ln in lines), lines)
+
+
+class AskGateDetachOnceTest(TitlesBase):
+    """The ask gate denies a questions session that still hangs from another session once, then allows it."""
+
+    FRAGMENTS = ('Eres la sesión de preguntas', 'todavía cuelgas de la sesión local_sup', 'detach_session',
+                 'session_id "self"', 'vuelve a lanzar la misma pregunta', 'el reintento pasa')
+
+    def setUp(self):
+        super().setUp()
+        self.gate_dir = self.mkdir('ask-gate')
+        self.cli = self.mkdir('cli-sessions')
+        self.env.update(ASK_GATE_DIR=self.gate_dir, SUPERVISOR_SESSIONS_DIR=self.cli,
+                        ASK_GATE_XPROJECT_LOG=os.path.join(self.tmp, 'no-xproject.log'))
+
+    def cli_record(self, cli_id, local_id, name):
+        with open(os.path.join(self.cli, cli_id + '.json'), 'w') as fh:
+            json.dump({'sessionId': cli_id, 'hostSessionId': local_id, 'name': name, 'cwd': self.repo_dir,
+                       'pid': 999999999}, fh)
+
+    def box(self, **extra):
+        self.cli_record('cli-box', 'local_box', 'Sesión de preguntas de demo')
+        return self.record('local_box', 'Sesión de preguntas de demo', cliSessionId='cli-box', **extra)
+
+    def ask(self, session='cli-box', question='¿Qué opción prefieres?'):
+        payload = {'hook_event_name': 'PreToolUse', 'tool_name': 'AskUserQuestion', 'session_id': session,
+                   'cwd': self.repo_dir, 'tool_input': {'questions': [{'question': question, 'options': []}]}}
+        r = self.run_cli('hook', stdin=json.dumps(payload))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn('Traceback', r.stderr)
+        return r.stdout.strip()
+
+    def decisions(self):
+        path = os.path.join(self.gate_dir, 'decisions.log')
+        if not os.path.exists(path):
+            return []
+        with open(path) as fh:
+            return [ln.split('\t')[2] for ln in fh.read().splitlines()]
+
+    def reason(self, out):
+        return json.loads(out)['hookSpecificOutput']['permissionDecisionReason']
+
+    def test_first_attempt_denied_then_every_retry_allowed(self):
+        self.take_lock()
+        self.box(spawnedFrom={'sessionId': 'local_sup'})
+        out = self.ask()
+        self.assertEqual(json.loads(out)['hookSpecificOutput']['permissionDecision'], 'deny')
+        for fragment in self.FRAGMENTS:
+            self.assertIn(fragment, self.reason(out))
+        self.assertEqual(self.ask(), '')
+        self.assertEqual(self.ask(question='Otra pregunta distinta'), '')
+        self.assertEqual(self.decisions(), ['deny-mailbox-attached', 'allow-mailbox-attached', 'allow-mailbox-attached'])
+        with open(os.path.join(self.gate_dir, 'detach-asked', 'local_box')) as fh:
+            self.assertEqual(json.load(fh)['parent'], 'local_sup')
+
+    def test_detached_or_top_level_is_allowed_with_or_without_an_earlier_deny(self):
+        self.take_lock()
+        self.box(spawnedFrom={'sessionId': 'local_sup'}, lineageDetached=True)
+        self.assertEqual(self.ask(), '')
+        self.box()
+        self.assertEqual(self.ask(), '')
+        self.box(spawnedFrom={'sessionId': 'local_sup'})
+        self.assertNotEqual(self.ask(), '')                       # attached again in the fixture: the one deny
+        self.box(spawnedFrom={'sessionId': 'local_sup'}, lineageDetached=True)
+        self.assertEqual(self.ask(), '')
+        self.assertEqual(self.decisions(), ['allow-mailbox', 'allow-mailbox', 'deny-mailbox-attached', 'allow-mailbox'])
+
+    def test_recognised_by_title_without_a_lock_is_denied_once_too(self):
+        self.box(spawnedFrom={'sessionId': 'local_old'})
+        self.assertIn('todavía cuelgas de la sesión local_old', self.reason(self.ask()))
+        self.assertEqual(self.ask(), '')
+        self.assertEqual(self.decisions(), ['deny-mailbox-attached', 'allow-mailbox-attached'])
+
+    def test_every_failure_fails_open(self):
+        self.take_lock()
+        # no app record at all (the CLI record names it): allowed
+        self.cli_record('cli-box', 'local_box', 'Sesión de preguntas de demo')
+        self.assertEqual(self.ask(), '')
+        # an app record that is not valid JSON reads as no record
+        folder = self.mkdir(os.path.join('app', 'acct', 'org'))
+        with open(os.path.join(folder, 'local_box.json'), 'w') as fh:
+            fh.write('{"sessionId": "local_box", "cliSessionId": "cli-box", "spawnedFrom": ')
+        self.assertEqual(self.ask(), '')
+        # the marker cannot be written: allowed, and the error is logged
+        self.box(spawnedFrom={'sessionId': 'local_sup'})
+        with open(os.path.join(self.gate_dir, 'detach-asked'), 'w') as fh:
+            fh.write('not a directory')
+        self.assertEqual(self.ask(), '')
+        self.assertEqual(self.decisions(), ['allow-mailbox', 'allow-mailbox', 'allow-mailbox-attached'])
+        with open(os.path.join(self.gate_dir, 'errors.log')) as fh:
+            self.assertIn('detach marker', fh.read())
+
+    def test_a_corrupt_marker_counts_and_an_old_one_is_pruned(self):
+        self.take_lock()
+        self.box(spawnedFrom={'sessionId': 'local_sup'})
+        markers = self.mkdir(os.path.join('ask-gate', 'detach-asked'))
+        open(os.path.join(markers, 'local_box'), 'w').close()      # empty: still "already denied"
+        old = os.path.join(markers, 'local_gone')
+        open(old, 'w').close()
+        os.utime(old, (1, 1))
+        self.assertEqual(self.ask(), '')
+        self.assertTrue(os.path.exists(old))                         # pruned only when a marker is written
+        os.remove(os.path.join(markers, 'local_box'))
+        self.assertNotEqual(self.ask(), '')
+        self.assertFalse(os.path.exists(old))
+        self.assertEqual(self.decisions(), ['allow-mailbox-attached', 'deny-mailbox-attached'])
+
+    def test_other_sessions_keep_their_decision(self):
+        self.take_lock()
+        self.box(spawnedFrom={'sessionId': 'local_sup'})
+        self.cli_record('cli-work', 'local_work', 'demo · tarea')
+        self.record('local_work', 'demo · tarea', cliSessionId='cli-work', spawnedFrom={'sessionId': 'local_sup'})
+        out = self.ask('cli-work')
+        self.assertIn('Esta sesión la supervisa', self.reason(out))
+        self.assertNotIn('detach_session', self.reason(out))
+        self.assertEqual(self.decisions(), ['deny-supervised'])
+        self.assertFalse(os.path.exists(os.path.join(self.gate_dir, 'detach-asked')))
+
+
+class ReportStampHookTest(TitlesBase):
+    """A closing message that is a report writes the report stamp on every Stop of the lock owner (point f)."""
+
+    PARTE = ('En espera, no parada. Esperamos a que la implementadora pase las pruebas completas; sin ese verde no se '
+             'integra. Lo acabo de comprobar: su trabajo es el primero de la cola (`heavy-job status`: primero de 10) y '
+             'main no se ha movido (`git log -1 origin/main`: 3f2a9c1). ' + 'Sigo mirando la cola y relanzo si muere. ' * 4)
+    ENGLISH = ('Still waiting, not stopped. The implementer has to pass the whole suite first; without that green build '
+               'nothing is merged. I have just checked it: its job is the first in the queue (`heavy-job status`: first of '
+               '10) and main has not moved (`git log -1 origin/main`: 3f2a9c1). ' + 'I keep watching the queue and will '
+               'relaunch it if the process dies. ' * 3)
+
+    def setUp(self):
+        super().setUp()
+        self.env.update(SUPERVISOR_SESSIONS_DIR=self.mkdir('cli-sessions'))
+        self.take_lock()
+        self.record('local_sup', 'Supervisión de demo', cliSessionId='cli-sup')
+        self.key = json.loads(self.run_cli('status', '--dir', self.repo_dir, '--json').stdout)['key']
+        self.stamp = os.path.join(self.home, '.claude', 'supervisor', 'backlog', self.key + '.last-report')
+
+    def stop(self, text, active=False, armed=True):
+        payload = {'hook_event_name': 'Stop', 'session_id': 'cli-sup', 'cwd': self.repo_dir,
+                   'stop_hook_active': active, 'last_assistant_message': text,
+                   'background_tasks': ([{'status': 'running', 'command':
+                                          '~/.claude/scripts/supervisor-lock wait --owner local_sup --timeout 600'}]
+                                        if armed else [])}
+        r = self.run_cli('hook', stdin=json.dumps(payload))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn('Traceback', r.stderr)
+        return r.stdout.strip()
+
+    def reason(self, out):
+        return json.loads(out)['reason'] if out else ''
+
+    def test_a_retry_with_stop_hook_active_stamps_and_prints_nothing(self):
+        self.assertEqual(self.stop(self.PARTE, active=True), '')
+        self.assertTrue(os.path.isfile(self.stamp))
+        # the next turn ends short within the interval: no report block
+        self.assertNotIn('parte de estado', self.reason(self.stop('Sigo esperando.')))
+
+    def test_an_earlier_block_is_returned_and_the_report_still_stamps(self):
+        reason = self.reason(self.stop(self.ENGLISH))
+        self.assertIn('en inglés', reason)
+        self.assertNotIn('parte de estado', reason)
+        self.assertTrue(os.path.isfile(self.stamp))
+
+    def test_no_watcher_returns_its_block_and_stamps(self):
+        reason = self.reason(self.stop(self.PARTE, armed=False))
+        self.assertIn('sin vigilante', reason)
+        self.assertTrue(os.path.isfile(self.stamp))
+
+    def test_a_short_message_does_not_stamp(self):
+        self.stop('Sigo esperando.', active=True)
+        self.assertFalse(os.path.exists(self.stamp))
+        self.stop('Sigo esperando.', armed=False)
+        self.assertFalse(os.path.exists(self.stamp))
+
+    def test_the_report_block_is_still_returned_once_on_a_due_normal_stop(self):
+        self.assertIn('parte de estado', self.reason(self.stop('Sigo esperando.')))
+        self.assertEqual(self.stop('Sigo esperando.', active=True), '')   # the retry is never blocked for the report
+        self.assertFalse(os.path.exists(self.stamp))
 
 
 class WatchdogTitlesTest(TitlesBase):
@@ -922,6 +1167,222 @@ print(json.dumps([askdue.askdue_events(project, now=1000.0), askdue.askdue_event
                          '--all-idle-after', '0', env=missing, timeout=60)
         self.assertEqual(r.stdout.split(), ['TIMEOUT', '1s'])
         self.assertFalse(os.path.exists(os.path.join(self.home, '.claude', 'supervisor', 'askdue-errors.log')))
+
+
+class AnsweredWatchTest(Base):
+    """ANSWERED: the watcher wakes the supervisor when its questions session got an answer, also on guard and with the
+    questions session in --exclude; one wake per answer and per turn."""
+
+    def setUp(self):
+        super().setUp()
+        self.app = self.mkdir('app')
+        self.cli = self.mkdir('cli-sessions')
+        self.env.update(ASK_QUEUE_BIN=ASK_QUEUE, SUPERVISOR_NUDGE='', SUPERVISOR_NOTIFY='',
+                        SUPERVISOR_SESSIONS_DIR=self.cli,
+                        SUPERVISOR_APP_SESSIONS_GLOB=os.path.join(self.app, '*', '*', 'local_*.json'))
+        self.repo_dir = self.repo('proj')
+        r = self.run_cli('acquire', '--dir', self.repo_dir, '--session', 'local_sup')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = self.run_cli('beat', '--dir', self.repo_dir, '--session', 'local_sup', '--mailbox', 'local_box')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.key = json.loads(self.run_cli('project', '--dir', self.repo_dir, '--json').stdout)['key']
+
+    def box(self, turns, status='idle', local='local_box'):
+        """The questions session: a live CLI record (this test's pid) and an app record with its turn count."""
+        with open(os.path.join(self.cli, f'cli-{local}.json'), 'w') as fh:
+            json.dump({'sessionId': f'cli-{local}', 'hostSessionId': local, 'cwd': self.repo_dir, 'pid': os.getpid(),
+                       'status': status, 'name': 'Sesión de preguntas de proj'}, fh)
+        folder = os.path.join(self.app, 'acct', 'org')
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, local + '.json'), 'w') as fh:
+            json.dump({'sessionId': local, 'cliSessionId': f'cli-{local}', 'cwd': self.repo_dir, 'lastActivityAt': 5,
+                       'title': 'Sesión de preguntas de proj', 'completedTurns': turns}, fh)
+
+    def queue(self, *args):
+        r = subprocess.run([sys.executable, ASK_QUEUE, *args], capture_output=True, text=True, env=self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.strip()
+
+    def add(self, question):
+        return self.queue('add', '--project', self.repo_dir, '--question', question, '--default', 'Esperar',
+                          '--why', 'solo lo sabe el desarrollador', '--blocks', 'nada')
+
+    def answer(self, qid, ago=None):
+        self.queue('answer', qid, '--text', 'Sí')
+        if ago is not None:   # move answered_ts back in time
+            path = self.queue_file()
+            with open(path) as fh:
+                items = [json.loads(line) for line in fh if line.strip()]
+            for item in items:
+                if item['id'] == qid:
+                    item['answered_ts'] = datetime.fromtimestamp(datetime.now().timestamp() - ago).astimezone().isoformat()
+            with open(path, 'w') as fh:
+                fh.write(''.join(json.dumps(i) + '\n' for i in items))
+
+    def queue_file(self):
+        folder = os.path.join(self.home, '.claude', 'state', 'ask-queue')
+        return os.path.join(folder, [n for n in os.listdir(folder) if n.endswith('.jsonl')][0])
+
+    def wait(self, *extra, timeout='4', during=None, guard=True):
+        """Run the watcher; `during()` runs once its first snapshot is taken, held before the first poll."""
+        ready, hold = os.path.join(self.tmp, 'ready'), os.path.join(self.tmp, 'hold')
+        for path in (ready, hold):
+            if os.path.exists(path):
+                os.remove(path)
+        args = ['wait', '--dir', self.repo_dir, '--owner', 'local_sup', '--interval', '0.2', '--timeout', timeout,
+                '--all-idle-after', '0', '--exclude', 'local_box', *(['--guard'] if guard else []), *extra]
+        env = dict(self.env, SUPERVISOR_WAIT_READY=ready)
+        if during is None:
+            r = subprocess.run([sys.executable, ENTRY, *args], capture_output=True, text=True, env=env, timeout=60,
+                               cwd=self.tmp)
+            return r.stdout.splitlines()
+        open(hold, 'w').close()
+        proc = subprocess.Popen([sys.executable, ENTRY, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, env=dict(env, SUPERVISOR_WAIT_HOLD=hold), cwd=self.tmp)
+        try:
+            deadline = datetime.now().timestamp() + 30
+            while not os.path.exists(ready) and datetime.now().timestamp() < deadline:
+                subprocess.run(['sleep', '0.05'])
+            during()
+            os.remove(hold)
+            out, _ = proc.communicate(timeout=60)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        return out.splitlines()
+
+    def answered(self, lines):
+        return [ln for ln in lines if ln.startswith('ANSWERED')]
+
+    def test_queue_and_turn_functions(self):
+        a, b, c = self.add('¿Uno?'), self.add('¿Dos?'), self.add('¿Tres?')
+        self.answer(a)
+        self.answer(b, ago=25 * 3600)        # older than the 24 h window
+        out = self.python(LOADER + f"""
+import json
+lock = load('supervisor_lock')
+qw, projects = lock._module('questions_wake'), lock._module('projects')
+project = projects.resolve({self.repo_dir!r})
+source = qw.queue_source(project)
+answers = sorted(qw.recent_answers(source, __import__('time').time()))
+key = project['key']
+row = lambda n: {{'turns': n}}
+turns = [qw.turn_trigger(key, 'local_box', row(3)), qw.turn_trigger(key, 'local_box', row(3)),
+         qw.turn_trigger(key, 'local_box', row(4)), qw.turn_trigger(key, 'local_box', row(2)),
+         qw.turn_trigger(key, 'local_box', row(3)), qw.turn_trigger(key, 'local_new', row(9)),
+         qw.turn_trigger(key, 'local_new', {{'turns': None}}), qw.turn_trigger(key, 'local_new', row(10)),
+         qw.turn_trigger(key, None, row(11))]
+import os
+path = qw.announced_path(key, 'questions-turns')
+open(path, 'w').write('not json')
+turns.append(qw.turn_trigger(key, 'local_new', row(12)))   # corrupt state: first sight
+turns.append(qw.turn_trigger(key, 'local_new', row(13)))
+print(json.dumps([answers, turns]))
+""")
+        answers, turns = json.loads(out)
+        self.assertEqual(answers, [a])
+        self.assertEqual(turns, [None, None, [3, 4], None, [2, 3], None, None, [9, 10], None, None, [12, 13]])
+        self.assertNotEqual(c, a)
+
+    def test_answer_on_guard_with_the_questions_session_excluded_and_never_twice(self):
+        self.box(3)
+        self.wait(timeout='1')                                # first sight of the questions session: silent
+        qid = self.add('¿Uno?')
+        lines = self.wait(during=lambda: self.answer(qid))
+        self.assertEqual(len(self.answered(lines)), 1, lines)
+        line = self.answered(lines)[0]
+        self.assertTrue(line.startswith(f'ANSWERED local_box contestadas {qid} ('), line)
+        self.assertNotIn('turno', line)
+        self.assertIn('list_events', line)
+        # the supervisor re-arms at once: no second wake for the same answer
+        self.assertEqual(self.wait(timeout='1'), ['TIMEOUT 1s'])
+
+    def test_turn_on_guard_once_and_a_turn_ended_between_waits(self):
+        self.box(3)
+        self.assertEqual(self.wait(timeout='1'), ['TIMEOUT 1s'])   # first sight recorded silently
+        lines = self.wait(during=lambda: self.box(4))
+        self.assertEqual(self.answered(lines), [ln for ln in lines if ln.startswith('ANSWERED local_box turno 3->4 (')])
+        self.assertEqual(len(self.answered(lines)), 1, lines)
+        self.assertEqual(self.wait(timeout='1'), ['TIMEOUT 1s'])   # same count: nothing
+        self.box(5)                                                # ended while no watcher ran
+        lines = self.wait(timeout='3')
+        self.assertTrue(lines and lines[0].startswith('ANSWERED local_box turno 4->5 ('), lines)
+
+    def test_a_batch_of_answers_wakes_once_with_the_turn(self):
+        self.box(3, 'busy')
+        self.wait(timeout='1')
+        a, b = self.add('¿Uno?'), self.add('¿Dos?')
+        hold = os.path.join(self.tmp, 'hold')
+
+        def during():
+            self.answer(a)
+            os.remove(hold)                                        # polls start: they see only the first answer, held
+            subprocess.run(['sleep', '0.6'])
+            self.answer(b)
+            subprocess.run(['sleep', '0.6'])
+            self.box(4, 'idle')
+            open(hold, 'w').close()                                # wait() removes it after this returns
+        lines = self.wait(timeout='6', during=during)
+        self.assertEqual(len(self.answered(lines)), 1, lines)
+        self.assertTrue(self.answered(lines)[0].startswith(
+            f'ANSWERED local_box turno 3->4 contestadas {",".join(sorted([a, b]))} ('), lines)
+
+    def test_both_triggers_in_one_poll_are_one_line(self):
+        self.box(3, 'busy')
+        self.wait(timeout='1')
+        qid = self.add('¿Uno?')
+
+        def during():
+            self.answer(qid)
+            self.box(4, 'idle')
+        lines = self.wait(during=during)
+        self.assertEqual(self.answered(lines), [ln for ln in lines if ln.startswith(f'ANSWERED local_box turno 3->4 contestadas {qid} (')])
+        self.assertEqual(len(self.answered(lines)), 1, lines)
+
+    def test_busy_past_the_hold_fires_without_the_turn(self):
+        self.box(3, 'busy')
+        self.wait(timeout='1')
+        qid = self.add('¿Uno?')
+        self.answer(qid, ago=700)
+        lines = self.wait(timeout='3')
+        self.assertTrue(lines and lines[0].startswith(f'ANSWERED local_box contestadas {qid} ('), lines)
+
+    def test_without_a_registered_questions_session_the_queue_fires_alone(self):
+        self.box(3, 'busy')                                        # busy, but not registered: nothing is held
+        lock_dir = os.path.join(self.home, '.claude', 'supervisor', 'locks')
+        path = os.path.join(lock_dir, os.listdir(lock_dir)[0])
+        with open(path) as fh:
+            lock = json.load(fh)
+        lock.pop('mailbox')
+        with open(path, 'w') as fh:
+            json.dump(lock, fh)
+        qid = self.add('¿Uno?')
+        lines = self.wait(during=lambda: self.answer(qid))
+        self.assertEqual(len(self.answered(lines)), 1, lines)
+        self.assertTrue(self.answered(lines)[0].startswith(f'ANSWERED - contestadas {qid} ('), lines)
+
+    def test_ordinary_events_of_the_excluded_session_stay_hidden(self):
+        self.box(3)
+        self.wait(timeout='1')
+        lines = self.wait(timeout='3', during=lambda: self.box(4, 'busy'), guard=False)
+        self.assertFalse([ln for ln in lines if ln.split(' ')[0] in ('TURN', 'STATUS', 'IDLE') and 'local_box' in ln], lines)
+        self.assertEqual(len(self.answered(lines)), 1, lines)
+
+    def test_a_watcher_of_another_owner_does_not_use_up_the_announcement(self):
+        qid = self.add('¿Uno?')
+        self.answer(qid)
+        r = self.run_cli('wait', '--dir', self.repo_dir, '--owner', 'local_former', '--guard', '--interval', '0.2',
+                         '--timeout', '1', '--all-idle-after', '0', timeout=60)
+        self.assertEqual(r.stdout.split(), ['TIMEOUT', '1s'])
+        lines = self.wait(timeout='3')
+        self.assertTrue(lines and lines[0].startswith(f'ANSWERED local_box contestadas {qid} ('), lines)
+
+    def test_unreadable_queue_changes_nothing_else(self):
+        self.add('¿Uno?')
+        self.env['ASK_QUEUE_BIN'] = os.path.join(self.tmp, 'no-ask-queue')
+        self.assertEqual(self.wait(timeout='1'), ['TIMEOUT 1s'])
+        self.assertFalse(os.path.exists(os.path.join(self.home, '.claude', 'supervisor', 'wait-errors.log')))
 
 
 class AskDueTextsTest(Base):
@@ -1242,7 +1703,7 @@ class SelfTestTest(Base):
         self.assertEqual(failed, [], r.stdout[-3000:] + r.stderr[-2000:])
         self.assertEqual(r.returncode, 0, r.stderr[-2000:])
         checks = sum(1 for line in r.stdout.splitlines() if line.startswith('ok '))
-        self.assertGreaterEqual(checks, 569 if SKILL.is_file() else 568)
+        self.assertGreaterEqual(checks, 580 if SKILL.is_file() else 579)
         self.assertTrue(r.stdout.rstrip().endswith('ok: 0 failed'))
         self.assertFalse(os.listdir(self.env['TMPDIR']), 'the self-test left files in the temp dir')
 

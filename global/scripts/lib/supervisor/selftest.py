@@ -31,7 +31,7 @@ SANDBOX_SCRUB_PREFIXES = ('SUPERVISOR_', 'ASK_GATE', 'ASK_QUEUE', 'CLOUD_TESTS_'
                           'CROSS_PROJECT_GATE_', 'CLAUDE_TOOLKIT_', 'XDG_', 'GIT_')
 SANDBOX_SCRUB_NAMES = ('CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_HOST_SESSION_ID',
                        'DBUS_SESSION_BUS_ADDRESS', 'FAKE_USAGE', 'TMPDIR', 'TMP', 'TEMP', 'PYTHONPATH')
-SANDBOX_KEEP = ('SUPERVISOR_SKIP_INSTALLED_LINT',)
+SANDBOX_KEEP = ('SUPERVISOR_SKIP_INSTALLED_LINT', 'SUPERVISOR_SELFTEST_MINUTE_EDGE')
 
 
 def enter_sandbox():
@@ -502,8 +502,33 @@ def cmd_self_test(args):
     check('sessions: mode from the app record, null without one', live_row.get('mode') == 'auto' and app_row.get('mode') is None)
 
     # 3b. transcripts feed idle_s
+    # A fixed "now" for the checks that compare a clock time (`HH:MM`): while `clock['ref']` is set, the synthetic
+    # records and the expected text come from the same instant, so a pass that crosses a minute boundary between writing
+    # the records and checking the text stays green.
+    clock = {'ref': None}
+
+    def now_ref():
+        return time.time() if clock['ref'] is None else clock['ref']
+
+    def clock_reference():
+        """The reference time of a clock-dependent block. With SUPERVISOR_SELFTEST_MINUTE_EDGE=<s> (kept by the sandbox) it
+        is taken <s> seconds before a minute boundary, so the check that follows happens after the boundary."""
+        edge = os.environ.get('SUPERVISOR_SELFTEST_MINUTE_EDGE')
+        if edge:
+            now = time.time()
+            target = (now // 60 + 1) * 60 - float(edge)
+            time.sleep(max(0.0, target - now if target > now + 0.05 else target + 60 - now))
+        return time.time()
+
+    def past_the_minute(ref):
+        """With SUPERVISOR_SELFTEST_MINUTE_EDGE set, wait until the clock is past the minute boundary after `ref`."""
+        if os.environ.get('SUPERVISOR_SELFTEST_MINUTE_EDGE'):
+            time.sleep(max(0.0, (ref // 60 + 1) * 60 + 0.2 - time.time()))
+            print(f'note: clock reference {ref % 60:.1f} s into its minute, check {time.time() - ref:.1f} s later '
+                  f'(crossed a minute boundary: {int(time.time() // 60) != int(ref // 60)})')
+
     def iso(ago=0):
-        return datetime.fromtimestamp(time.time() - ago, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+        return datetime.fromtimestamp(now_ref() - ago, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000Z')
 
     def text_rec(ago, kind='assistant'):
         return {'type': kind, 'timestamp': iso(ago), 'message': {'role': kind, 'content': [{'type': 'text', 'text': 'x'}]}}
@@ -1089,7 +1114,7 @@ def cmd_self_test(args):
     os.makedirs(os.path.join(lock_home, 'locks'), exist_ok=True)
 
     def hb_ago(seconds):
-        return datetime.fromtimestamp(time.time() - seconds).astimezone().isoformat(timespec='seconds')
+        return datetime.fromtimestamp(now_ref() - seconds).astimezone().isoformat(timespec='seconds')
 
     def put_lock(key, session, ago, state='running'):
         put(os.path.join(lock_home, 'locks'), key + '.json', {'key': key, 'project': 'proj', 'session_id': session, 'title': 'T ' + key,
@@ -1275,6 +1300,7 @@ def cmd_self_test(args):
 
     api_text = "API Error: Can't reach the API server \u2014 check your internet or DNS (EAI_AGAIN)"
     lim_text = "You've hit your session limit \u00b7 resets 5:30am (Europe/Madrid)"
+    clock['ref'] = time.time()   # the watchdog texts below carry HH:MM: records and expectation from this instant
     wd_session('local_wb1', 'k-busy1', [text_rec(4000)], age=10)                    # main transcript touched now
     wd_session('local_wb2', 'k-busy2', [text_rec(4000)])                            # only a subagent is touched
     write_jsonl(spath('cli-local_wb2', 'agent-a.jsonl'), [text_rec(4000)], age=10)
@@ -1290,7 +1316,7 @@ def cmd_self_test(args):
           r.returncode == 0 and reasons == {'k-api': 'api', 'k-limit': 'limit', 'k-human': 'human', 'k-idle': 'idle',
                                             'k-unknown': 'unknown', 'k-recovered': 'idle'}
           and not any(x in r.stdout for x in ('k-busy1', 'k-busy2')))
-    hh = lambda ago: datetime.fromtimestamp(time.time() - ago).strftime('%H:%M')
+    hh = lambda ago: datetime.fromtimestamp(now_ref() - ago).strftime('%H:%M')
     r = run('watchdog', '--notify')
     sent = open(notify_log).read().splitlines()
     t = lambda k: 'Supervisión parada: proj|La sesión «T ' + k + '» '
@@ -1325,6 +1351,7 @@ def cmd_self_test(args):
     woke = json.load(open(os.path.join(lock_home, 'locks', 'k-api.json')))
     check('watchdog --notify: an owner that is busy again loses its alert fields, no new notification',
           len(open(notify_log).read().splitlines()) == 7 and not {'alerted_at', 'alert_kind', 'alert_reason'} & set(woke))
+    clock['ref'] = None
     for name in os.listdir(os.path.join(lock_home, 'locks')):
         os.remove(os.path.join(lock_home, 'locks', name))
 
@@ -1337,6 +1364,7 @@ def cmd_self_test(args):
     st_env = lambda usage: dict(env, SUPERVISOR_USAGE=usage, PROJECT_PAUSE_BIN=fake_pause)
     srevive = lambda usage, *a: subprocess.run([sys.executable, runtime.ENTRY, 'revive', *a], capture_output=True,
                                                text=True, env=st_env(usage))
+    clock['ref'] = clock_reference()   # the revive text carries HH:MM: records and expectation from this instant
     cut_recs = [text_rec(4100), api_rec(4000, 'rate_limit', lim_text)]
     wd_session('local_sc', 'k-cut', cut_recs, ago=3600)                      # F1, running, silent 1 h, cut by the limit
     wd_session('local_sg', 'k-guard', cut_recs, ago=3600)
@@ -1373,10 +1401,12 @@ def cmd_self_test(args):
     check('revive: cut by the limit and usage back -> woken, also one cut 20 min ago, one on guard and one whose subagents still work',
           named == ['local_sc', 'local_sg', 'local_sl', 'local_sw'] and all(t['reason'] == 'stalled' and t['cause'] == 'limit' and t['attempt'] == 1
                                                     for t in plan['targets']))
+    past_the_minute(clock['ref'])
     check('revive: its text says the truth (turn cut by the limit, process alive), with the marker and the F1 census',
           msg.startswith('[reanimar supervisora] ') and 'sigue vivo' in msg and 'límite de uso' in msg
           and lim_text in msg and 'murió hacia' not in msg and 'censo' in msg and 'supervisor-lock wait' in msg
           and 'get_usage' in msg and f'se cortó hacia las {hh(4000)}' in msg)
+    clock['ref'] = None
     rv = json.load(open(rv_file))
     check('revive: its plan entry lets the cross-project gate pass the marker (session, fresh planned_at)',
           rv['k-cut']['session'] == 'local_sc' and rv['k-cut']['kind'] == 'stalled' and time.time() - rv['k-cut']['planned_at'] < 60)
@@ -1509,6 +1539,7 @@ def cmd_self_test(args):
             dict({'key': key, 'project': 'proj', 'session_id': sid, 'title': 'T ' + key, 'state': 'paused', 'phase': 'F4',
                   'round': 3, 'heartbeat': hb_ago(60), 'pause_cause': 'limit', 'paused_at': hb_ago(7200)}, **extra))
 
+    clock['ref'] = time.time()   # the paused-limit text carries HH:MM of `paused_at`: lock and expectation from this instant
     pl_clis = ('local_pl', 'local_pt', 'local_pg', 'local_pp', 'local_pb', 'local_pd')
     for sid in pl_clis:
         cli(sid, sessionId='cli-' + sid, status='busy' if sid == 'local_pb' else 'idle')
@@ -1535,6 +1566,7 @@ def cmd_self_test(args):
           and 'no es motivo de pausa' in msg and 'get_usage' in msg and 'beat --session local_pl --state running' in msg
           and 'censo de F1' in msg and 'supervisor-lock wait' in msg and '--third-party' in msg
           and f'desde las {hh(7200)}' in msg)
+    clock['ref'] = None
     rv = json.load(open(rv_file))
     notes = '\n'.join(plan.get('notes') or [])
     check('revive: the paused-limit entry lets the cross-project gate pass the marker (session, fresh planned_at)',
@@ -1675,6 +1707,30 @@ def cmd_self_test(args):
 
     def stop(**extra):
         return dict({'hook_event_name': 'Stop', 'session_id': 'cli-sup', 'cwd': repo, 'stop_hook_active': False}, **extra)
+
+    def best_of_three(decide):
+        """The latency checks: `decide` run three times in-process, with the sandbox's variables set; (its output, or a
+        marker when the runs disagree, and the fastest run in s). One scheduling hiccup on a loaded machine does not turn
+        the check red; a timed path slower than the bound is slower in every run."""
+        saved = {k: os.environ.get(k) for k in env if k.startswith(('SUPERVISOR_', 'ASK_GATE'))}
+        os.environ.update({k: v for k, v in env.items() if k.startswith(('SUPERVISOR_', 'ASK_GATE'))})
+        try:
+            outs, times = [], []
+            for _ in range(3):
+                began = time.perf_counter()
+                outs.append(decide())
+                times.append(time.perf_counter() - began)
+        finally:
+            for k, v in saved.items():
+                os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+        return (outs[0] if len(set(outs)) == 1 else ('runs disagree', outs)), min(times)
+
+    def no_watcher_reason(r):
+        """The hook's answer when it is exactly the no-watcher block of the owner `local_sup`, else ''."""
+        out = json.loads(r.stdout or '{}') if r.returncode == 0 else {}
+        reason = out.get('reason', '') if out.get('decision') == 'block' else ''
+        return reason if ('sin vigilante' in reason and '~/.claude/scripts/supervisor-lock wait --owner local_sup --timeout 600' in reason
+                          and '~/.claude/scripts/supervisor-lock release --session local_sup --verdict <VEREDICTO>' in reason) else ''
 
     armed_task = {'id': 'b1', 'type': 'shell', 'status': 'running', 'description': 'supervisor-lock wait',
                   'command': '~/.claude/scripts/supervisor-lock wait --owner local_sup --timeout 600'}
@@ -2087,10 +2143,11 @@ def cmd_self_test(args):
     reason = out.get('reason', '')
     check('hook: Stop with no task -> block with the Spanish reason',
           r.returncode == 0 and out.get('decision') == 'block' and 'supervisor de proj (cerrojo ' in reason and 'fase F2, ronda 5)' in reason
+          and bool(no_watcher_reason(r))
           and '~/.claude/scripts/supervisor-lock wait --owner local_sup --timeout 600' in reason
           and '~/.claude/scripts/supervisor-lock release --session local_sup --verdict <VEREDICTO>' in reason)
     check('hook: another owner\'s or a finished task does not count',
-          all(json.loads(hook(stop(background_tasks=[t])).stdout or '{}').get('decision') == 'block'
+          all(no_watcher_reason(hook(stop(background_tasks=[t])))
               for t in (dict(armed_task, command=armed_task['command'].replace('local_sup', 'local_oth')), dict(armed_task, status='completed'),
                         dict(armed_task, command='sleep 5', description='sleep'))))
     check('hook: description alone can match, status pending counts',
@@ -2150,13 +2207,7 @@ def cmd_self_test(args):
     for n in range(400):
         put(big_dir, f'local_fake{n}.json', {'sessionId': f'local_fake{n}', 'cliSessionId': f'cli-fake{n}', 'cwd': repo,
                                               'pad': 'x' * (200000 if n % 8 == 0 else 500)})
-    saved = {k: os.environ.get(k) for k in env if k.startswith(('SUPERVISOR_', 'ASK_GATE'))}
-    os.environ.update({k: v for k, v in env.items() if k.startswith(('SUPERVISOR_', 'ASK_GATE'))})
-    began = time.perf_counter()
-    speedy = hook_mod.hook_decide(json.dumps(stop(session_id='cli-not-an-owner', background_tasks=[])))
-    took = time.perf_counter() - began
-    for k, v in saved.items():
-        os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+    speedy, took = best_of_three(lambda: hook_mod.hook_decide(json.dumps(stop(session_id='cli-not-an-owner', background_tasks=[]))))
     check(f'hook: 3 locks + 400 app records, non-owner session -> \'\' in {took:.2f} s (< 0.3)', speedy == '' and took < 0.3)
     check('hook: the owner is still found through its own app record among 400', json.loads(hook(stop(background_tasks=[])).stdout or '{}').get('decision') == 'block')
     empty_env = dict(env, SUPERVISOR_LOCK_HOME=os.path.join(tmp, 'no-locks-here'))
@@ -2171,7 +2222,7 @@ def cmd_self_test(args):
     if os.path.exists(gate) and os.path.realpath(os.path.expanduser('~/.claude/scripts/supervisor-lock')) == os.path.realpath(runtime.ENTRY):
         r = subprocess.run([gate], input=json.dumps(stop(background_tasks=[])), capture_output=True, text=True, env=env)
         check('supervisor-stop-gate: passes stdin through to the hook, exit 0',
-              r.returncode == 0 and json.loads(r.stdout or '{}').get('decision') == 'block')
+              r.returncode == 0 and json.loads(r.stdout or '{}').get('decision') == 'block' and bool(no_watcher_reason(r)))
         r = subprocess.run([gate], input='{}', capture_output=True, text=True, env=dict(env, HOME=os.path.join(tmp, 'nohome')))
         check('supervisor-stop-gate: missing script -> silent, exit 0', r.returncode == 0 and r.stdout == '')
 
@@ -2565,13 +2616,7 @@ def cmd_self_test(args):
     check('hook PreToolUse: non-owner wrap_up with ask -> nothing', hook(pre(wrap, session='cli-px', tool_input={'ask': 'q', 'actions': [1]})).stdout == '')
     for n in range(2):
         put_lock(f'k-pre{n}', f'local_pre{n}', 10)
-    saved = {k: os.environ.get(k) for k in env if k.startswith(('SUPERVISOR_', 'ASK_GATE'))}
-    os.environ.update({k: v for k, v in env.items() if k.startswith(('SUPERVISOR_', 'ASK_GATE'))})
-    began = time.perf_counter()
-    speedy = hook_mod.hook_decide(json.dumps(pre('AskUserQuestion', session='cli-not-an-owner')))
-    took = time.perf_counter() - began
-    for k, v in saved.items():
-        os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+    speedy, took = best_of_three(lambda: hook_mod.hook_decide(json.dumps(pre('AskUserQuestion', session='cli-not-an-owner'))))
     check(f'hook PreToolUse: 3 locks + 400 app records, non-owner AskUserQuestion -> \'\' in {took:.2f} s (< 0.3)',
           speedy == '' and took < 0.3 and len(glob.glob(os.path.join(tmp, 'app', 'big', 'dir', '*.json'))) == 400)
     if os.path.exists(gate) and os.path.realpath(os.path.expanduser('~/.claude/scripts/supervisor-lock')) == os.path.realpath(runtime.ENTRY):
@@ -3433,13 +3478,7 @@ def cmd_self_test(args):
     os.utime(skill, (t0, t0))
     for n in range(2):
         put_lock(f'k-stp{n}', f'local_stp{n}', 10)
-    saved = {k: os.environ.get(k) for k in env if k.startswith(('SUPERVISOR_', 'ASK_GATE'))}
-    os.environ.update({k: v for k, v in env.items() if k.startswith(('SUPERVISOR_', 'ASK_GATE'))})
-    began = time.perf_counter()
-    speedy = hook_mod.hook_decide(json.dumps(stop_sc(session='cli-not-an-owner', background_tasks=[])))
-    took = time.perf_counter() - began
-    for k, v in saved.items():
-        os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+    speedy, took = best_of_three(lambda: hook_mod.hook_decide(json.dumps(stop_sc(session='cli-not-an-owner', background_tasks=[]))))
     check(f'hook Stop: 3 locks + 400 app records, non-owner -> \'\' in {took:.2f} s (< 0.3)', speedy == '' and took < 0.3)
 
 
@@ -4007,6 +4046,143 @@ def cmd_self_test(args):
     check('titles: the questions and closing titles keep matching their recognisers; the others match neither',
           is_questions(settings.questions_title('p')) and is_closer(settings.closer_title('p'))
           and not any(is_questions(t) or is_closer(t) for t in others))
+
+    # 32. questions session at the top level (one self-contained block): `titles` says DETACH for a questions session
+    # that hangs from any session and keeps ADOPT for the closing session only; the ask gate denies an attached questions
+    # session once and then allows it; the watcher's ANSWERED sees past --exclude on guard, once per answer.
+    qrepo = os.path.realpath(os.path.join(tmp, 'qproj'))
+    make_repo(qrepo)
+    qenv = dict(env, ASK_GATE_DIR=os.path.join(tmp, 'q-ask-gate'),
+                ASK_QUEUE_BIN=os.path.join(os.path.dirname(runtime.ENTRY), 'ask-queue'))
+    qrun = lambda *a: subprocess.run([sys.executable, runtime.ENTRY, *a], capture_output=True, text=True, env=qenv)
+    qrun('acquire', '--dir', qrepo, '--session', 'local_qsup')
+    qrun('beat', '--dir', qrepo, '--session', 'local_qsup', '--mailbox', 'local_qbox', '--closer', 'local_qclose',
+         '--skill-seen')   # else the watcher stops at once with SKILL_CHANGED
+    qtitle = settings.questions_title('qproj')
+    cli('local_qbox', sessionId='cli-qbox', cwd=qrepo, name=qtitle)
+
+    def qbox(**lineage):
+        fixture('local_qbox', cwd=qrepo, title=qtitle, cliSessionId='cli-qbox', **lineage)
+
+    def qhints():
+        out = trun('titles', '--session', 'local_qsup').stdout.splitlines()
+        return [ln for ln in out if ln.startswith(('DETACH', 'ADOPT'))]
+
+    qbox(spawnedFrom={'sessionId': 'local_qsup'})
+    check('questions session: DETACH when it hangs from the supervisor itself, and no ADOPT for it',
+          qhints() == ['DETACH local_qbox questions (cuelga de local_qsup)'])
+    qbox(spawnedFrom={'sessionId': 'local_qold'})
+    check('questions session: DETACH names the other session it hangs from',
+          qhints() == ['DETACH local_qbox questions (cuelga de local_qold)'])
+    qbox(spawnedFrom={'sessionId': 'local_qsup'}, lineageDetached=True)
+    check('questions session: at the top level (lineageDetached) it gets neither DETACH nor ADOPT', qhints() == [])
+    fixture('local_qclose', cwd=qrepo, title=settings.closer_title('qproj'), spawnedFrom={'sessionId': 'local_qsup'},
+            lineageDetached=True)
+    check('questions session: the closing session keeps ADOPT when detached, and never gets DETACH',
+          qhints() == ['ADOPT local_qclose closer (abierta por local_qsup)'])
+    os.remove(os.path.join(app_dir, 'local_qclose.json'))
+
+    def qask():
+        payload = {'hook_event_name': 'PreToolUse', 'tool_name': 'AskUserQuestion', 'session_id': 'cli-qbox', 'cwd': qrepo,
+                   'tool_input': {'questions': [{'question': '¿Cuál prefieres?', 'options': []}]}}
+        return subprocess.run([sys.executable, runtime.ENTRY, 'hook'], input=json.dumps(payload), capture_output=True,
+                              text=True, env=qenv).stdout.strip()
+
+    def qlog():
+        path = os.path.join(qenv['ASK_GATE_DIR'], 'decisions.log')
+        with open(path) as fh:
+            return [ln.split('\t')[2] for ln in fh.read().splitlines()]
+
+    qbox(spawnedFrom={'sessionId': 'local_qsup'})
+    out = qask()
+    reason = json.loads(out or '{}').get('hookSpecificOutput', {}).get('permissionDecisionReason', '')
+    check('questions session: attached, its first question is denied once: detach_session with "self", then the same question',
+          'todavía cuelgas de la sesión local_qsup' in reason and 'detach_session' in reason and 'session_id "self"' in reason
+          and 'vuelve a lanzar la misma pregunta' in reason and qlog() == ['deny-mailbox-attached'])
+    check('questions session: its retry while still attached is allowed and logged allow-mailbox-attached',
+          qask() == '' and qlog() == ['deny-mailbox-attached', 'allow-mailbox-attached'])
+    qbox(spawnedFrom={'sessionId': 'local_qsup'}, lineageDetached=True)
+    check('questions session: once detached it is allowed with allow-mailbox',
+          qask() == '' and qlog()[-1] == 'allow-mailbox')
+
+    qwait = lambda timeout: qrun('wait', '--dir', qrepo, '--owner', 'local_qsup', '--guard', '--exclude', 'local_qbox',
+                                 '--interval', '0.2', '--timeout', timeout, '--all-idle-after', '0').stdout.splitlines()
+    qwait('1')   # first sight of the questions session's turn count: recorded silently
+    aq = lambda *a: subprocess.run([sys.executable, qenv['ASK_QUEUE_BIN'], *a], capture_output=True, text=True, env=qenv)
+    qid = aq('add', '--project', qrepo, '--question', '¿Una?', '--default', 'Esperar', '--why', 'prueba',
+             '--blocks', 'nada').stdout.strip()
+    aq('answer', qid, '--text', 'Sí')
+    first, second = qwait('4'), qwait('1')
+    check('questions session: ANSWERED on guard with the questions session in --exclude, once per answer',
+          bool(qid) and len(first) == 1 and first[0].startswith(f'ANSWERED local_qbox contestadas {qid} (')
+          and second == ['TIMEOUT 1s'])
+    for name in ('local_qbox.json',):
+        os.remove(os.path.join(app_dir, name))
+    os.remove(os.path.join(sessions_dir, 'local_qbox.json'))
+
+    # 33. report stamp through the hook (one self-contained block): a closing message that is a report writes the
+    # stamp on the retry (stop_hook_active) and when an earlier block of the chain is returned. The hook runs in a child
+    # environment without SUPERVISOR_SELFTEST_NO_REPORT, which the self-test keeps in os.environ for the other checks.
+    senv = {k: v for k, v in qenv.items() if k != 'SUPERVISOR_SELFTEST_NO_REPORT'}
+    cli('local_qsup', sessionId='cli-qsup', cwd=qrepo)
+    skey = json.loads(qrun('status', '--dir', qrepo, '--json').stdout or '{}').get('key') or 'missing-key'
+    sstamp = os.path.join(lock_home, 'backlog', skey + '.last-report')
+    sproofs = '(`heavy-job status`: primero de 10; `git log -1 origin/main`: 3f2a9c1). '
+    sparte = ('En espera, no parada. Esperamos a que la implementadora pase las pruebas completas; sin ese verde no se '
+              'integra. Lo acabo de comprobar ' + sproofs + 'Sigo mirando la cola y relanzo si su proceso muere. ' * 5)
+    senglish = ('Still waiting, not stopped. The implementer has to pass the whole suite first; without that green build '
+                'nothing is merged. I have just checked it ' + sproofs + 'I keep watching the queue and will relaunch it '
+                'if the process dies. ' * 4)
+
+    def sstop(text, active):
+        payload = {'hook_event_name': 'Stop', 'session_id': 'cli-qsup', 'cwd': qrepo, 'stop_hook_active': active,
+                   'last_assistant_message': text,
+                   'background_tasks': [{'id': 's1', 'type': 'shell', 'status': 'running', 'description': 'vigilante',
+                                         'command': '~/.claude/scripts/supervisor-lock wait --owner local_qsup --guard'}]}
+        return subprocess.run([sys.executable, runtime.ENTRY, 'hook'], input=json.dumps(payload), capture_output=True,
+                              text=True, env=senv)
+
+    r = sstop(sparte, True)
+    check('report stamp: a report on the retry (stop_hook_active) stamps through the hook and prints nothing',
+          r.returncode == 0 and r.stdout == '' and os.path.isfile(sstamp))
+    if os.path.exists(sstamp):
+        os.remove(sstamp)
+    r = sstop(senglish, False)
+    check('report stamp: an earlier block of the chain (English) is returned and the report still stamps',
+          r.returncode == 0 and 'en inglés' in json.loads(r.stdout or '{}').get('reason', '') and os.path.isfile(sstamp))
+    if os.path.exists(sstamp):
+        os.remove(sstamp)
+
+    # 34. the watcher fallback stays inside the sandbox (one self-contained block): `wait_armed_in_proc` scans every
+    # process of the machine, so a fake `wait --owner` of another self-test run must not arm this run's owner, while
+    # one of this sandbox still does.
+    def fake_watcher(sandbox_value):
+        fenv = dict(qenv, SUPERVISOR_SELFTEST_SANDBOX=sandbox_value)
+        return subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', 'supervisor-lock', 'wait', '--owner',
+                                 'local_qsup'], env=fenv)
+
+    def qstop_no_task():
+        payload = {'hook_event_name': 'Stop', 'session_id': 'cli-qsup', 'cwd': qrepo, 'stop_hook_active': False,
+                   'background_tasks': []}
+        return subprocess.run([sys.executable, runtime.ENTRY, 'hook'], input=json.dumps(payload), capture_output=True,
+                              text=True, env=qenv).stdout
+    outsider, insider = fake_watcher(os.path.join(tmp, 'another-sandbox')), None
+    try:
+        time.sleep(0.3)
+        foreign = qstop_no_task()
+        outsider.kill()
+        outsider.wait()
+        insider = fake_watcher(os.environ.get(SANDBOX_ENV, ''))
+        time.sleep(0.3)
+        own = qstop_no_task()
+    finally:
+        for proc in (outsider, insider):
+            if proc is not None:
+                proc.kill()
+                proc.wait()
+    check('hook: a watcher process of another self-test sandbox does not arm the owner; one of this sandbox does',
+          'sin vigilante' in foreign and 'sin vigilante' not in own)
+    os.remove(os.path.join(sessions_dir, 'local_qsup.json'))
 
     lint_dir = os.path.join(tmp, 'lint-skill')
     os.makedirs(os.path.join(lint_dir, 'reference'))

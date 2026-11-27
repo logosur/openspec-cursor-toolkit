@@ -13,4 +13,4 @@
   start_session, advisor below and above the cap, austerity, exempt folder, malformed input).
 - [x] 3.1b Requirement change: the gate ships disabled (`enabled` false); a test pins that it allows everything and writes no state.
 - [x] 3.2 `python3 scripts/validate-toolkit.py`, installer tests and `examples/override-full/try.sh` green.
-- [ ] 3.3 CI `Validate toolkit` green on the branch.
+- [x] 3.3 CI `Validate toolkit` green on the branch (run 46039316516 on cbfa0dd: success).

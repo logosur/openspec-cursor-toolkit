@@ -345,8 +345,10 @@ def cmd_self_test(args):
     started = load()['started']
     r = run('acquire', '--dir', wt, '--session', 'A')
     check('acquire: same session from a worktree -> RESUMED, exit 0', r.returncode == 0 and r.stdout.startswith('RESUMED ') and load()['started'] == started and load()['title'] == 'first')
+    held_before = open(lock_file).read()
     r = run('acquire', '--dir', repo, '--session', 'B')
     check('acquire: other session, fresh -> HELD, exit 3', r.returncode == 3 and r.stdout.startswith('HELD ') and 'heartbeat_age_s=' in r.stdout)
+    check('acquire: other session, fresh -> lock left untouched', open(lock_file).read() == held_before)
     r = run('status', '--dir', repo)
     check('status: HELD line has session and title', r.stdout.startswith('HELD ') and 'session=A' in r.stdout and 'title=first' in r.stdout)
     check('status --session: the owner reads MINE for its own lock', run('status', '--dir', repo, '--session', 'A').stdout.startswith('MINE '))
@@ -2338,6 +2340,13 @@ def cmd_self_test(args):
           and refused(pf_beat([skill_use(100, 's5')])))
     check('skill-seen proof: a cross-session message that quotes the command is not a load',
           refused(pf_beat([command_rec(100, 'Another Claude session sent a message:\n<command-name>/supervisa-sesiones</command-name>')])))
+    # refused for the skill and for the pause at once: the skill wins (8, not 9), both reasons are printed, the state stays
+    pf_state = load().get('state')
+    r = pf_beat([text_rec(30)], '--state', 'paused', beat_env=dict(env, SUPERVISOR_USAGE='yes'))
+    cur = load()
+    check('skill-seen proof: a beat refused for the skill and for the pause exits 8 with both reasons, state kept',
+          r.returncode == 8 and 'PAUSE REFUSED' in r.stderr and 'SKILL SEEN REFUSED' in r.stderr and 'BEAT' not in r.stdout
+          and pf_state == 'running' and cur.get('state') == 'running' and 'pause_cause' not in cur and 'skill_seen' not in cur)
     before = time.time()
     r = pf_beat([text_rec(300), skill_use(100, 's6'), skill_result(99, 's6'), text_rec(50)], '--phase', 'F4')
     check('skill-seen proof: a Skill call after the newest update is accepted: skill_seen, skill_seen_at and the proof',
@@ -3588,6 +3597,29 @@ def cmd_self_test(args):
     r = crun('cloud', '--dir', crepo)
     check('cloud: an unreadable API is CLOUD-UNKNOWN with exit 3, never «none»',
           r.returncode == 3 and 'CLOUD-UNKNOWN' in r.stdout and 'cloud: 0' not in r.stdout)
+    # the owner's archive and send cannot check the target while the rows are unreadable: exit 3, nothing done or logged
+    cloud_log_path = os.path.join(lock_home, 'cloud-actions.log')
+    cloud_log_before = open(cloud_log_path).read() if os.path.exists(cloud_log_path) else ''
+    cloud_lock = os.path.join(lock_home, 'locks', ckey + '.json')
+    still_owner = json.load(open(cloud_lock)) if os.path.exists(cloud_lock) else {}  # its owner still holds it here
+    r = crun('cloud-archive', '--dir', crepo, '--session', 'local_cown', '--target', 'cse_waiting', '--reason', 'x')
+    check('cloud-archive: unreadable cloud rows -> exit 3, nothing archived',
+          still_owner.get('session_id') == 'local_cown' and r.returncode == 3 and 'CLOUD-UNKNOWN' in r.stderr
+          and 'ARCHIVED' not in r.stdout and open(cloud_log_path).read() == cloud_log_before)
+    r = crun('cloud-send', '--dir', crepo, '--session', 'local_cown', '--target', 'cse_waiting', '--text', 'x')
+    check('cloud-send: unreadable cloud rows -> exit 3, nothing sent',
+          r.returncode == 3 and 'CLOUD-UNKNOWN' in r.stderr and 'SENT' not in r.stdout
+          and open(cloud_log_path).read() == cloud_log_before)
+    # no cloud provider at all: CLOUD-UNAVAILABLE (exit 3), never an empty census
+    no_provider = dict(cenv, SUPERVISOR_CLOUD_TESTS=os.path.join(tmp, 'no-such-cloud-tests'))
+    r = subprocess.run([sys.executable, runtime.ENTRY, 'cloud', '--dir', crepo], capture_output=True, text=True, env=no_provider)
+    check('cloud: no cloud provider -> CLOUD-UNAVAILABLE, exit 3, never «none»',
+          r.returncode == 3 and r.stdout.startswith('CLOUD-UNAVAILABLE') and 'cloud: 0' not in r.stdout)
+    r = subprocess.run([sys.executable, runtime.ENTRY, 'cloud', '--dir', crepo, '--json'], capture_output=True, text=True,
+                       env=no_provider)
+    got = json.loads(r.stdout) if r.stdout.strip().startswith('{') else {}
+    check('cloud --json: no cloud provider -> available false, exit 3',
+          r.returncode == 3 and got.get('ok') is False and got.get('available') is False)
     for s in sleepers:
         s.kill()
         s.wait()

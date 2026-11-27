@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+"""stores: read-only view of an app's state in Google Play and App Store Connect.
+
+Apps are named in the config piece `stores` (apps: alias -> provider, id, console_id, name); the provider of an
+alias decides which reads exist for it. Nothing is ever changed in a store: no upload, release, rollout, listing
+edit, review answer or submission exists here. No token is ever printed or handed to another program.
+
+Usage
+  stores apps [--json] [--remote]        configured apps; --remote also lists the App Store Connect team's apps
+  stores doctor [play|ios] [--live] [--json]
+      One line per prerequisite: ok or missing plus the single action that fixes it; exit 3 if any is missing.
+      --live also exchanges the token and asks the service whether each configured app is readable.
+  stores url PROVIDER [APP] [PAGE]       console address (browser) of the account, an app or a page of an app
+  stores public APP [--json]             is the public store page up (no key needed); exit 4 when it is not
+  stores tracks APP [--limit N] [--json]    Google Play: tracks and releases, rollout fraction
+  stores reviews APP [--limit N] [--json]   Google Play: recent reviews (the service gives only the last week)
+  stores listing APP [--lang LANG] [--limit N] [--json]   Google Play: title, short description, full length
+  stores versions APP [--limit N] [--json]  App Store Connect: versions and their store state
+  stores builds APP [--limit N] [--json]    App Store Connect: builds, processing state, expired
+  stores review APP [--limit N] [--json]    App Store Connect: review submissions
+  stores self-test                        signing, token exchange and one read per provider on a loopback simulator
+
+Output: text, one line per item (160 characters at most) and the total when cut; --json for scripts.
+Exit codes: 0 ok, 1 unexpected or remote error, 2 usage or unknown app, 3 not available or not connected,
+4 not found.
+
+Configuration (config piece `stores`; every key has a built-in default, so a file only sets what differs):
+  play: developer_id, console_user, key_file (service-account JSON), api_url, token_url, public_url, console_url,
+        app_path, pages
+  ios:  key_id, issuer_id, key_file (.p8 private key), api_url, public_url, console_url, app_path, pages
+  apps: {"<alias>": {"provider": "play|ios", "id": "<package or bundle id>", "console_id": "...", "name": "..."}}
+  defaults: limit, line_width, timeout_seconds
+  A key file must be mode 0600 and owned by you, or it is not used. Signing needs the `openssl` binary.
+"""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), 'lib'))
+from access import http, output, settings, store_auth, store_ios, store_play, store_selftest  # noqa: E402
+
+PIECE = 'stores'
+PROVIDERS = {store_play.NAME: store_play, store_ios.NAME: store_ios}
+DEFAULTS = {'play': store_play.DEFAULTS, 'ios': store_ios.DEFAULTS, 'apps': {},
+            'defaults': store_auth.COMMON_DEFAULTS}
+
+
+def die(code, message):
+    output.fail(PIECE, code, message)
+
+
+def load_config():
+    """The merged config, a normalised copy and the one-line problem (or None) found while loading."""
+    cfg, problem = settings.load(PIECE, DEFAULTS)
+    if problem and str(settings.config_path(PIECE)) not in problem:
+        problem = f'{settings.config_path(PIECE)}: {problem}'
+    for name in PROVIDERS:
+        if not isinstance(cfg.get(name), dict):
+            cfg[name] = dict(DEFAULTS[name])
+            problem = problem or f'{settings.config_path(PIECE)}: "{name}" is not an object, using the defaults'
+        if not isinstance(cfg[name].get('pages'), dict) or not cfg[name]['pages']:
+            cfg[name]['pages'] = dict(DEFAULTS[name]['pages'])
+    apps = cfg.get('apps')
+    if not isinstance(apps, dict):
+        apps, problem = {}, problem or f'{settings.config_path(PIECE)}: "apps" is not an object, ignoring it'
+    cfg['apps'] = {str(a): dict(v) for a, v in apps.items() if isinstance(v, dict)}
+    shared = dict(store_auth.COMMON_DEFAULTS)
+    for key, value in (cfg.get('defaults') if isinstance(cfg.get('defaults'), dict) else {}).items():
+        if key in shared and isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            shared[key] = value
+    cfg['defaults'] = shared
+    return cfg, problem
+
+
+def pick_app(cfg, alias):
+    app = settings.lookup(cfg['apps'], alias)
+    if app is None:
+        known = ', '.join(sorted(cfg['apps'])) or 'none configured'
+        die(output.USAGE, f'unknown app "{alias}"; configured apps: {known}')
+    provider = app.get('provider')
+    if provider not in PROVIDERS:
+        die(output.USAGE, f'app "{alias}" has provider "{provider}"; use play or ios')
+    if not app.get('id'):
+        die(output.UNAVAILABLE, f'apps.{alias}.id is not set; add the package or bundle id to the config piece stores')
+    return app, PROVIDERS[provider]
+
+
+def guard(call, provider):
+    """Run CALL; a service, transport or key problem becomes one line and its exit code."""
+    try:
+        return call()
+    except http.ServiceError as err:
+        hint = f'; run `stores doctor {provider} --live`' if err.exit_code == output.UNAVAILABLE else ''
+        die(err.exit_code, f'{provider}: {err.message}{hint}')
+    except http.TransportError as err:
+        die(output.ERROR, f'{provider}: {err}')
+    except store_auth.AuthError as err:
+        die(output.UNAVAILABLE, f'{provider}: {err}; run `stores doctor {provider}`')
+
+
+def require_connected(cfg, module):
+    checks = module.read_checks(cfg[module.NAME], cfg['apps'])
+    missing = [c for c in checks if c.reads and not c.ok]
+    if missing:
+        die(output.UNAVAILABLE, f'{module.NAME} is not connected ({missing[0].name}); run `stores doctor {module.NAME}`')
+
+
+def emit_result(result, args, cfg):
+    width = int(cfg['defaults']['line_width'])
+    if args.json:
+        output.print_json(dict(result['data'], total=result['total']))
+    else:
+        output.print_items([output.clip(line, width) for line in result['lines']], result['total'], args.limit,
+                           result['header'])
+
+
+def cmd_apps(args, cfg):
+    rows = [{'alias': alias, 'provider': app.get('provider') or '?', 'id': app.get('id') or '',
+             'console_id': app.get('console_id') or '', 'name': app.get('name') or ''}
+            for alias, app in sorted(cfg['apps'].items())]
+    team = None
+    if args.remote:
+        module = store_ios
+        require_connected(cfg, module)
+        session = module.Session(cfg['ios'], cfg['defaults']['timeout_seconds'])
+        team = guard(lambda: module.team_apps(session, args.limit), 'ios')
+    if args.json:
+        document = {'apps': rows}
+        if team:
+            document['team_apps'] = team['data']['apps']
+        output.print_json(document)
+        return
+    if not rows:
+        output.emit(f'no app is configured; add one under "apps" in {settings.config_path(PIECE)}')
+    else:
+        lines = [f'{r["alias"]}  {r["provider"]}  {r["id"]}  console {r["console_id"] or "-"}  {r["name"]}' for r in rows]
+        output.print_items(lines, len(lines), len(lines))
+    if team:
+        output.print_items(team['lines'], team['total'], args.limit, team['header'])
+
+
+def cmd_doctor(args, cfg):
+    names = [args.provider] if args.provider else list(PROVIDERS)
+    timeout = cfg['defaults']['timeout_seconds']
+    report, any_missing = [], False
+    for name in names:
+        module = PROVIDERS[name]
+        checks = module.read_checks(cfg[name], cfg['apps'])
+        blocked = [c for c in checks if c.reads and not c.ok]
+        if args.live:
+            if blocked:
+                checks.append(store_auth.Check('live checks (token, access per app)', False,
+                                               'fix the missing lines above first; nothing was sent to the service'))
+            else:
+                checks += module.live_checks(cfg[name], cfg['apps'], timeout)
+        for check in checks:
+            any_missing = any_missing or not check.ok
+            report.append((name, check))
+    if args.json:
+        output.print_json({'ok': not any_missing, 'checks': [dict(c.as_dict(), provider=n) for n, c in report]})
+    else:
+        for name, check in report:
+            line = f'{name}  ok       {check.name}' if check.ok else f'{name}  missing  {check.name} -> {check.action}'
+            output.emit(output.clip(line, cfg['defaults']['line_width']))
+    return output.UNAVAILABLE if any_missing else output.OK
+
+
+def cmd_url(args, cfg):
+    module = PROVIDERS[args.provider]
+    alias, app = None, None
+    if args.app:
+        app = settings.lookup(cfg['apps'], args.app)
+        if app is None:
+            die(output.USAGE, f'unknown app "{args.app}"; configured apps: {", ".join(sorted(cfg["apps"])) or "none configured"}')
+        if app.get('provider') != module.NAME:
+            die(output.USAGE, f'app "{args.app}" belongs to {app.get("provider")}, not {module.NAME}')
+        alias = args.app
+    try:
+        output.emit(module.console_url(cfg[module.NAME], alias, app, args.page))
+    except KeyError as missing:
+        die(output.UNAVAILABLE, f'{missing.args[0]} is not set; add it to the config piece stores ({settings.config_path(PIECE)})')
+
+
+def cmd_public(args, cfg):
+    app, module = pick_app(cfg, args.app)
+    result = guard(lambda: module.public(cfg[module.NAME], app, cfg['defaults']['timeout_seconds']), module.NAME)
+    if args.json:
+        output.print_json({'app': args.app, 'provider': module.NAME, 'public': result['public'], 'url': result['url']})
+    else:
+        output.emit(f'{"public" if result["public"] else "not public"} {result["url"]}')
+    return output.OK if result['public'] else output.NOT_FOUND
+
+
+def cmd_read(args, cfg):
+    app, module = pick_app(cfg, args.app)
+    if args.command not in module.READS:
+        die(output.USAGE, f'"{args.command}" does not exist for {module.NAME} apps; reads for {module.NAME}: '
+                          f'{", ".join(module.READS)}')
+    require_connected(cfg, module)
+    session = module.Session(cfg[module.NAME], cfg['defaults']['timeout_seconds'])
+    if args.command == 'listing':
+        result = guard(lambda: module.listing(session, args.app, app, args.lang, args.limit), module.NAME)
+    else:
+        result = guard(lambda: getattr(module, args.command)(session, args.app, app, args.limit), module.NAME)
+    emit_result(result, args, cfg)
+    for warning in session.warnings:
+        sys.stderr.write(f'{PIECE}: {output.clip(warning)}\n')
+
+
+def cmd_self_test(args, cfg):
+    if store_auth.openssl_bin() is None:
+        die(output.UNAVAILABLE, 'self-test needs the openssl binary, which is not installed')
+    ok = store_selftest.run_self_test(output.emit)
+    output.emit('self-test: ok' if ok else 'self-test: FAILED')
+    return output.OK if ok else output.ERROR
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog='stores', add_help=False)
+    sub = parser.add_subparsers(dest='command')
+    default_limit = argparse.ArgumentParser(add_help=False)
+    default_limit.add_argument('--limit', type=int, default=None, help='items to print (default from config, 20)')
+    default_limit.add_argument('--json', action='store_true')
+    apps = sub.add_parser('apps', parents=[default_limit])
+    apps.add_argument('--remote', action='store_true')
+    doctor = sub.add_parser('doctor')
+    doctor.add_argument('provider', nargs='?', choices=sorted(PROVIDERS))
+    doctor.add_argument('--live', action='store_true')
+    doctor.add_argument('--json', action='store_true')
+    url = sub.add_parser('url')
+    url.add_argument('provider', choices=sorted(PROVIDERS))
+    url.add_argument('app', nargs='?')
+    url.add_argument('page', nargs='?')
+    public = sub.add_parser('public')
+    public.add_argument('app')
+    public.add_argument('--json', action='store_true')
+    for name in store_play.READS + store_ios.READS:
+        reader = sub.add_parser(name, parents=[default_limit])
+        reader.add_argument('app')
+        if name == 'listing':
+            reader.add_argument('--lang', default=None)
+    sub.add_parser('self-test')
+    return parser
+
+
+COMMANDS = {'apps': cmd_apps, 'doctor': cmd_doctor, 'url': cmd_url, 'public': cmd_public, 'self-test': cmd_self_test}
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv or argv[0] in ('-h', '--help', 'help'):
+        stream = sys.stdout if argv else sys.stderr
+        stream.write(__doc__.strip() + '\n')
+        return output.OK if argv else output.USAGE
+    args = build_parser().parse_args(argv)
+    if args.command == 'self-test':
+        return cmd_self_test(args, None) or 0   # needs no configuration: it never reads the machine's
+    cfg, problem = load_config()
+    if problem:
+        sys.stderr.write(f'{PIECE}: {" ".join(problem.split())}\n')   # the file name is the point: never cut
+    if getattr(args, 'limit', 1) is None:
+        args.limit = int(cfg['defaults']['limit'])
+    if getattr(args, 'limit', 1) < 1:
+        die(output.USAGE, '--limit must be at least 1')
+    handler = COMMANDS.get(args.command, cmd_read)
+    return handler(args, cfg) or 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

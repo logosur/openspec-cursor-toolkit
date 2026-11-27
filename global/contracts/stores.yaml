@@ -1,0 +1,33 @@
+piece: stores
+dest: scripts/stores
+kind: cli
+probes:
+  - name: help lists the subcommands
+    args: [--help]
+    exit: [0]
+    stdout: any
+    contains: "stores doctor"
+  - name: self-test passes from the installed copy
+    args: [self-test]
+    exit: [0]
+    stdout: any
+    contains: "self-test: ok"
+    timeout: 120
+  - name: a corrupt config does not crash
+    args: [apps]
+    corrupt_config: true
+    exit: [0]
+    stdout: any
+    contains: "no app is configured"
+  - name: apps runs with whatever the machine configures
+    args: [apps]
+    exit: [0]
+    stdout: any
+  - name: doctor without --live sends nothing and does not crash
+    args: [doctor]
+    exit: [0, 3]
+    stdout: any
+  - name: an unknown app is a usage error
+    args: [public, no-such-app]
+    exit: [2]
+    stdout: empty

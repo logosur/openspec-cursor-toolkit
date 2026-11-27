@@ -23,12 +23,12 @@ The `stores` command SHALL take each provider's settings (ids, key file path, co
 
 ### Requirement: Doctor names exactly what is missing
 
-`stores doctor [PROVIDER]` SHALL check every prerequisite of a provider in order, print each as `ok` or `missing` with the single action that fixes it, and exit 3 if any is missing.
+`stores doctor [PROVIDER]` SHALL check every prerequisite of a provider in order, print each as `ok` or `missing` with the single action that fixes it, and exit 3 if any is missing. A check that can only hold if an earlier one does (the key file's existence, privacy and form after its path) SHALL NOT be printed once that earlier one is missing.
 
 #### Scenario: No key file
 
 - **WHEN** the provider's key file path is empty or the file does not exist
-- **THEN** that line says `missing`, names the setting to fill, and no network call is made
+- **THEN** that line says `missing`, names the setting to fill, no later line about that key file is printed, and no network call is made
 
 #### Scenario: Key file readable by others
 
@@ -143,6 +143,11 @@ The command SHALL never print a private key, a client secret or a token, in any 
 
 - **WHEN** every subcommand runs against the simulated services, in text and in JSON mode, with and without errors
 - **THEN** neither the token returned by the simulated service nor any line of the key file appears in what is printed
+
+#### Scenario: A redirect never carries a token
+
+- **WHEN** a request that carries credentials (a bearer token or a signed assertion) is answered with a redirect
+- **THEN** the redirect is not followed, the target never receives the credentials, and the command prints one error line and exits 1
 
 #### Scenario: Not connected
 

@@ -1,0 +1,27 @@
+name: access
+summary: >-
+  Read-only access to what a developer keeps outside every repository. `mailbox` reads the mailboxes named in
+  its config piece through live IMAP, the local store of a desktop mail client or the session's mail connector;
+  `stores` reads Google Play and App Store Connect (what is missing to connect, releases, reviews, the public
+  listing, the console address of an app). One short skill routes sessions to both, so projects stop carrying
+  their own mail and store tooling.
+depends: [core]
+requires:
+  python: "3.10"
+  os: linux
+  binaries: [python3]
+optional:
+  binaries:
+    openssl: "`stores` signs its API tokens with it; without it `stores doctor` says so, and `mailbox` is unaffected"
+notes:
+  - "Opt-in. It ships with no account, no app and no key: name yours in the config pieces `mailbox` and `stores` of your override."
+  - "Both commands only read: nothing sends or changes mail, and nothing uploads, releases or edits anything in a store."
+  - "`mailbox` keeps a header index of a local mail store under ~/.cache/claude-toolkit/mailbox (0700). It is correspondence metadata: it never goes inside a repository or a notes folder."
+  - "An IMAP password or a store key is read from the file your config names, which must be 0600. The toolkit stores neither."
+  - "A mail connector belongs to the Claude account that is signed in: `mailbox whoami` checks whose mailbox it is before a session trusts it."
+files:
+  - {src: global/scripts/mailbox, dest: scripts/mailbox, mode: "0755"}
+  - {src: global/scripts/stores, dest: scripts/stores, mode: "0755"}
+  - {src: global/scripts/lib/access/, dest: scripts/lib/access/}
+  - {src: global/skills/cuentas-externas/SKILL.md, dest: skills/cuentas-externas/SKILL.md}
+config: [mailbox, stores]

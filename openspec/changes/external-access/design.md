@@ -10,11 +10,11 @@ Marks: **FACT** (read or run), **INFERENCE**, **HYPOTHESIS** (to be proven by a 
 - One skill because every skill description is loaded in every session. A second description would cost tokens everywhere to save none.
 - The skill names commands, never mechanisms. A new backend or provider changes a script and its help, not the skill (open for extension, closed for edits).
 
-## D2 — Layout: thin entry scripts over a small package
+## D2 — Layout: entry scripts that own the commands, a small package that owns the backends
 
 ```
-global/scripts/mailbox                 entry point: argument parsing and dispatch only
-global/scripts/stores                  entry point
+global/scripts/mailbox                 entry point: argument parsing, account configuration, the commands, backend order and fallback
+global/scripts/stores                  entry point: argument parsing, configuration, the commands
 global/scripts/lib/access/
   output.py        bounded text and JSON output, exit codes
   settings.py      config piece loading and validation (toolkit_config), account lookup
@@ -29,7 +29,7 @@ global/scripts/lib/access/
   http.py          one GET/POST helper over urllib with timeouts
 ```
 
-Each backend and provider implements the same small interface (`search`, `fetch`, `folders`, `status` for mail; `doctor`, `apps`, the read commands, `public`, `url` for stores). The entry script holds a table from name to module; adding one is a new file and a table line.
+Each backend and provider implements the same small interface (`search`, `fetch`, `thread`, `folders`, `status` for mail; `read_checks`, `live_checks`, the read commands, `public`, `console_url` for stores). What the entry scripts hold is the command logic (which backend answers, in what order, what is printed) and the configuration of accounts and apps; what the library holds is everything that knows how one backend or provider works. Adding a backend is a new file plus a line in `make_backend`; adding a provider is a new file plus a line in the provider table. The entry scripts are not "dispatch only": the command logic lives there on purpose, because it is the one place that sees all backends at once (fallback, the line that names the answering backend), and splitting it from the argument parser would only add a module that every command change has to touch as well.
 
 ## D3 — Mail backends and their order
 
@@ -51,7 +51,7 @@ The path of a local store is derived on every run from the mail client's own fil
 1. Profile root: the first existing of the client's standard locations (overridable in config).
 2. Profile: among the profiles that define the account, the installation's default if it is one of them, else the one whose preferences file changed last.
 3. Account folder: from the preferences, matching the server's user name or an identity's address to the configured address, then that server's relative directory.
-4. Role folders (`inbox`, `sent`, `drafts`): the non-empty file whose base name matches the role's known names, ignoring a numeric suffix, with the latest modification time. Config may pin a role to a name.
+4. Role folders (`inbox`, `sent`, `drafts`): every non-empty file whose base name matches one of the role's known names, ignoring a numeric suffix, plus the folder the identity's preferences name for sent copies and drafts; most recently changed first. Config may pin a role to one name or a list. **FACT (one real account):** a role is not one folder. Sent mail was split between the server's own sent folder, written by webmail and phones, and the folder where the desktop client files its copies; a resolver that picked one of them hid most of the sent mail. Results are de-duplicated by `Message-ID` across the folders of a role.
 
 Only the Thunderbird layout (mbox files, `.sbd` subfolders) is implemented. Another client is a new `local` resolver behind the same interface.
 
@@ -63,6 +63,7 @@ Only the Thunderbird layout (mbox files, `.sbd` subfolders) is implemented. Anot
 - The mbox is opened read-only, without any lock, so a running mail client is never blocked.
 - **FACT (two real folders of one client, sampled):** the format is not uniform. One folder separates messages with `From - <date>` and a line feed, followed by `X-Mozilla-Status` and `X-Mozilla-Status2` lines; another, written by a newer version, uses carriage return plus line feed throughout and carries **no status lines at all**. The parser accepts both, and the test fixtures contain both.
 - The date on the separator line is when the client stored the message, not when it was sent: dates come from the `Date` header, falling back to the newest `Received` header.
+- **Date filters are one thing on every backend:** `--since` and `--until` compare that message date (the `Date` header, else the newest `Received`); a message with no date is outside any window. `imap` cannot ask the server for that date, only for the arrival date, so the server search is a pre-selection widened by one day before and two days after the window and every fetched message is then checked locally against its own date. Known limit: a message whose own date is in the window but that arrived more than that outside it (an import, a restored backup) is not found on `imap`; `local` finds it. `mailbox --help` says so.
 - Deleted mail: where status lines exist, a message with the deleted flag is not indexed, and the flag is read again from the file when a result is about to be printed (the client changes it in place, without changing the file's size). Where they do not exist the file cannot tell, so the folder may still hold mail that was deleted or moved on the server since its last compaction. The `local` backend says so next to its freshness, and that is one reason `imap` goes first where both exist.
 - The same message stored twice (same `Message-ID` in one folder) is listed once.
 
@@ -70,6 +71,8 @@ Only the Thunderbird layout (mbox files, `.sbd` subfolders) is implemented. Anot
 
 - `EXAMINE` (read-only select) and `BODY.PEEK` only. The module has no code path that issues `STORE`, `COPY`, `MOVE`, `APPEND`, `EXPUNGE`, `CREATE`, `DELETE` or `SUBSCRIBE`; a test asserts it on the command stream.
 - The password comes from an env-style file named in config, read at run time. The file must not be readable by group or others, or the backend refuses it. The value is never printed, logged or put in an argument list.
+- **Roles on a large server:** a folder is taken for the `sent` or `drafts` role by its name only within two levels of the tree (`Sent`, `INBOX.Sent`, `[Gmail]/Sent Mail`); the server's special-use flag always counts. An archive tree can hold hundreds of folders called `Sent`, and a role that opened each of them made every `search` and `thread` scan them all.
+- **Thread lookups are bounded (FACT, from a real run):** on a server with more than 200 folders an unbounded thread lookup (every folder a role matched, three rounds, an `OR` over every identifier) ended in a timeout and "no backend available". `thread` therefore reads the message as headers only, opens at most four folders (its own, the inbox, two sent folders), runs at most two rounds of header searches over at most six identifiers each, and says when a long thread was cut. **A second real-run FACT:** the same server answered `BAD` ("Command Argument Error") to one search that joined nine header alternatives with `OR` (it accepted six), so every thread lookup fell back to `local` even though the server was healthy. The alternatives are therefore sent in searches of at most four (`THREAD_OR`) and their results are united. If the lookup still fails after the message was read, the `local` backend of the same account answers from the message's Message-ID and the first output line says it is a fallback; with no `local` backend, or none holding the message, the command exits 3 naming both reasons.
 - An authentication failure is never retried and is remembered for 30 minutes: during that time the backend reports itself unavailable. **INFERENCE:** hosted mail services lock a mailbox after a few bad logins; a retry loop would lock the owner out.
 
 ## D7 — Connector accounts
@@ -84,10 +87,11 @@ The session, not the script, holds the connector. `mailbox search` on such an ac
 - `openssl` returns an elliptic-curve signature in DER form, and a token needs the raw form (r and s, 32 bytes each, concatenated). The conversion is tested on its own: a test that only asks `openssl` to verify what `openssl` signed would pass on a token the service rejects.
 - **FACT:** the Play API cannot list the apps of a developer account, so apps are listed from config. **FACT:** reading tracks needs an edit; the provider opens one, reads and deletes it, and never commits.
 - Endpoints are config values with the public defaults, so tests point them at a local server.
+- A request that carries credentials never follows a redirect (`urllib` would forward the `Authorization` header to the new host, **FACT** probed with two loopback servers); the 3xx is returned and printed as an error. Only the unauthenticated public-page check follows redirects.
 
 ## D9 — What the store commands print when nothing is connected
 
-`doctor` lists every prerequisite as `ok` or `missing`, with the one action that fixes each, and exits 3 if any is missing. API commands exit 3 with one line that points to `doctor`. `apps` and `url` work without credentials, because the console address needs only ids.
+`doctor` lists every prerequisite as `ok` or `missing`, with the one action that fixes each, and exits 3 if any is missing. A prerequisite that depends on an earlier missing one (the key file's existence, privacy and form after a missing path) is not printed: it would only say "fix the earlier one first". API commands exit 3 with one line that points to `doctor`. `apps` and `url` work without credentials, because the console address needs only ids.
 
 Three levels of access exist per app, and the command is useful at each:
 
@@ -137,7 +141,7 @@ def expand(path: str) -> "Path"                     # ~ and environment variable
 ## D12 — Tests
 
 - All tests build their own fixtures in a temporary home: a mail-client profile tree with small mbox files in both observed formats, a fake IMAP class that records every command, a local HTTP server that plays the two store APIs, and key pairs generated with `openssl` at test time.
-- `self-test` in each script runs the offline subset; the contract probes call it.
+- `self-test` in each script runs the offline subset; the contract probes call it. The probes must hold on any machine, whatever its override configures (accounts, apps), so they test `self-test`, a corrupt configuration (the `corrupt_config` probe), a usage error and that `accounts`, `apps` and `doctor` run; that the *shipped defaults* hold no account or app is proven by unit tests of the shipped config pieces, not by a probe.
 
 ## Unknowns
 

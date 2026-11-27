@@ -21,6 +21,11 @@ The `mailbox` command SHALL take every account (name, address, ordered backends 
 - **WHEN** the config piece is not valid JSON
 - **THEN** the command names the file in one line, prints no traceback and behaves as if no account were configured
 
+#### Scenario: Mistyped setting
+
+- **WHEN** an account's `imap.port` is not a port number or its `local.folders` is not an object
+- **THEN** the account is listed as unusable with the setting named, every command on it exits 2 with one line and no traceback, and the other accounts keep working
+
 ### Requirement: The mailbox is never modified
 
 The `mailbox` command SHALL only read. It SHALL offer no subcommand that sends, replies, drafts, moves, flags or deletes a message, and no backend SHALL change the state of a mailbox, including the "seen" flag.
@@ -68,6 +73,11 @@ The `local` backend SHALL derive the profile, the account folder and the folder 
 - **WHEN** the inbox file carries a numeric suffix and an older, empty file with the plain name also exists
 - **THEN** the role `inbox` resolves to the non-empty file that changed last
 
+#### Scenario: Several folders in one role
+
+- **WHEN** two non-empty folders hold sent mail (the server's own sent folder and the folder where the client files its copies)
+- **THEN** the role `sent` covers both, a message present in both is listed once, and `mailbox where ACCOUNT sent` prints both paths, the most recently changed first
+
 #### Scenario: Account not present locally
 
 - **WHEN** no profile defines the account
@@ -76,7 +86,7 @@ The `local` backend SHALL derive the profile, the account folder and the folder 
 #### Scenario: Path for a project script
 
 - **WHEN** `mailbox where ACCOUNT inbox` runs
-- **THEN** it prints the absolute path of the resolved file and nothing else, and exits 0
+- **THEN** it prints the absolute path of each resolved file, one per line and nothing else, and exits 0
 
 ### Requirement: Local folders are indexed incrementally
 
@@ -117,6 +127,11 @@ The `local` backend SHALL keep a header index per folder file in a private cache
 - **WHEN** the separator line and the message's date header differ
 - **THEN** the date header is used
 
+#### Scenario: Unusable index
+
+- **WHEN** the index file of a folder is damaged
+- **THEN** the command prints one line saying the index could not be used and how to rebuild it, prints no traceback and exits 1
+
 #### Scenario: Index privacy
 
 - **WHEN** the index is created
@@ -141,6 +156,11 @@ The `local` backend SHALL keep a header index per folder file in a private cache
 - **WHEN** `--folder all` (the default) is used with `--to ADDRESS` or `--from ADDRESS`
 - **THEN** inbox and sent folders are both searched
 
+#### Scenario: Sent folders on a large server
+
+- **WHEN** an `imap` server holds hundreds of folders named like a sent folder deep inside an archive tree
+- **THEN** only the server's special-use sent folder and folders named like one at the top of the tree (up to two levels) form the `sent` role, and `--folder sent` or `all` opens no folder from the archive tree
+
 #### Scenario: Broken or missing date
 
 - **WHEN** a message has no parsable date
@@ -150,6 +170,22 @@ The `local` backend SHALL keep a header index per folder file in a private cache
 
 - **WHEN** `--json` is given
 - **THEN** the output is one JSON document with the backend, the freshness, the total and the items
+
+#### Scenario: Folder listing
+
+- **WHEN** `mailbox folders ACCOUNT` runs on an account with more folders than the limit (default 20)
+- **THEN** the folders that carry a role come first, then the most recently changed, at most the limit are printed, and the total is stated
+
+#### Scenario: Scan caps are stated
+
+- **WHEN** `--text` on `local` has more candidate messages left by the other filters than `text_scan_max` (default 1 000), or a search on `imap` has more candidates on the server than `imap_scan_max` (default 2 000)
+- **THEN** only the newest messages up to that cap are checked, and a note on the first lines of the output says how many were checked and how many there were
+
+#### Scenario: Date window
+
+- **WHEN** `--since` or `--until` is given
+- **THEN** the window is applied to each message's own date (its date header, else its newest received header) on every backend, and a message with no date is outside any window
+- **AND** on `imap` the server's arrival date only pre-selects, one day before and two days after the window, so a message whose own date lies in the window but that arrived further outside it is not found there; `--help` and the design state this
 
 ### Requirement: Messages are shown in a bounded, readable form
 
@@ -170,6 +206,11 @@ The `local` backend SHALL keep a header index per folder file in a private cache
 - **WHEN** no length is given and the body has 10 000 characters
 - **THEN** 1 500 are printed, followed by how many were left out
 
+#### Scenario: Control characters removed
+
+- **WHEN** a body contains terminal control characters, including the 8-bit control range
+- **THEN** none of them reaches the output
+
 #### Scenario: Stale id
 
 - **WHEN** the id no longer resolves
@@ -183,6 +224,27 @@ The `local` backend SHALL keep a header index per folder file in a private cache
 
 - **WHEN** a received message was answered from the account
 - **THEN** both appear, oldest first, in the thread listing
+
+#### Scenario: Thread lookup is bounded
+
+- **WHEN** `mailbox thread` runs on the `imap` backend of a server with hundreds of folders, many of them named like a sent folder
+- **THEN** the message is read as headers only, at most four folders are opened (the message's own, the inbox and two sent folders), at most two rounds of header searches are made, and a long thread that was cut says so
+
+#### Scenario: Server refuses a long search
+
+- **WHEN** the `imap` server refuses a search that joins many alternatives with `OR`
+- **THEN** `thread` sends its header alternatives in short searches (at most four each), united, and the answer still comes from `imap`, not from the fallback
+
+#### Scenario: Live lookup fails, the local copy answers
+
+- **WHEN** the `imap` lookup of a thread fails after the message was read (a timeout or a dropped connection) and the account also lists `local`
+- **THEN** the local copy answers from the message's Message-ID, and the first output line says the answer is a fallback from `imap`
+- **AND** if the local copy holds no message with that identifier, the command exits 3 naming both reasons
+
+#### Scenario: Live lookup fails, nothing to fall back to
+
+- **WHEN** the `imap` lookup of a thread fails and the account lists no `local` backend
+- **THEN** the command exits 3 with the reason on one line and no traceback
 
 #### Scenario: Existing file
 

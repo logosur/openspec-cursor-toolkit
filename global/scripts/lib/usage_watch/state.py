@@ -12,13 +12,15 @@ def ensure_dir(path: str) -> str:
     return path
 
 
-def write_json(path: str, data) -> None:
+def write_text(path: str, text: str, mode: int | None = None) -> None:
+    """Atomic write through a temporary file of its own in the same directory, so two writers never share one."""
     ensure_dir(os.path.dirname(path))
     fd, tmp = tempfile.mkstemp(prefix='.tmp-', dir=os.path.dirname(path))
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as fh:
-            json.dump(data, fh, ensure_ascii=False, indent=1, sort_keys=True)
-            fh.write('\n')
+            fh.write(text)
+        if mode is not None:
+            os.chmod(tmp, mode)
         os.replace(tmp, path)
     except BaseException:
         try:
@@ -26,6 +28,10 @@ def write_json(path: str, data) -> None:
         except OSError:
             pass
         raise
+
+
+def write_json(path: str, data) -> None:
+    write_text(path, json.dumps(data, ensure_ascii=False, indent=1, sort_keys=True) + '\n')
 
 
 def move_aside(path: str) -> str:

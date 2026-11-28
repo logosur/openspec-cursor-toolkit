@@ -64,7 +64,7 @@ def project_of(cwd, cache: dict) -> tuple[str, str]:
 
 
 def sessions_info(cfg: dict, sessions_meta: dict) -> dict[str, dict]:
-    """CLI session id -> {project, project_root, role, app_id, cwd, routine, open}; `open` means an app record that is not archived."""
+    """CLI session id -> {project, project_root, role, app_id, title, cwd, routine, open}; `open` means an app record that is not archived."""
     records = app_records(cfg)
     by_cli = {}
     for rec in records:
@@ -99,5 +99,6 @@ def sessions_info(cfg: dict, sessions_meta: dict) -> dict[str, dict]:
         role = roles.get(cli) or ('routine' if routine else 'worker')
         out[cli] = {'project': name, 'project_root': root, 'role': role, 'cwd': cwd, 'routine': routine,
                     'app_id': rec.get('sessionId') if rec else None,
+                    'title': rec['title'].strip() if isinstance(rec.get('title'), str) and rec['title'].strip() else None,
                     'open': bool(rec) and not rec.get('isArchived')}
     return out

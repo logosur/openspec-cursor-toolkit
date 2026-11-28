@@ -217,6 +217,20 @@ differently; what changes is what is stored as work and what is asked.
 - **Observation, not a task:** the first `collect` on a machine with a large transcript history is a one-off long pass
   (it reads everything once); later passes are incremental.
 
+### D17. Three fixes after D16 (no new requirement)
+
+- **Concurrent page writes.** Two passes at once (the timer and a manual one) shared the temporary file `<page>.tmp`:
+  the second `os.replace` failed and `tick` exited 1. The page is now written through a temporary file of its own in
+  the same directory (`state.write_text`, the same atomic write `write_json` uses), removed on error. Each pass leaves a
+  whole page; the last one wins.
+- **Session titles on the page.** The ranking by session showed the start of each CLI id. Where the app has a record
+  with a title (the same reader as D4: `attribution.app_records`), the page shows that title next to the role,
+  HTML-escaped like every other cell; without a record or a title it keeps the start of the id. Rows stay keyed by
+  session, so two sessions with the same title are two rows.
+- **Proposal texts follow the configuration.** A stored finding kept the proposal and undo texts it was born with.
+  `store.merge` now refreshes them, with the evidence and the saving, while the finding is `new` or `minor`; from
+  `asked` on they stay exactly as asked (D6, D7).
+
 ## Configuration (`global/config/usage-watch.json`, all defaults generic)
 
 `projects_dir`, `app_sessions_dir`, `supervisor_home`, `state_dir`, `page_path`, `page_refresh_s`, `retention_days`, `prices`, `unit_label`, `expensive_model_pattern` (`opus|fable`, like `agent-model-gate`), `escalation_mark_pattern`, `panel_pattern`, `cheap_roles` (`questions`, `closer`, `usage`, `routine`, after the rule table of `modelo-por-rol.md`), `cheap_model` (the value a `session-model` proposal sets; empty turns those proposals into notes), `origin_text_prefixes` (text prefixes that mark an automatic turn, e.g. `<task-notification>` → `task`), every threshold of D5, `measure_window_h`, `weekly_budget_units` (0), `week_start_weekday`, `week_start_hour`, `pace_amber_ratio`, `timer_interval_min`, `order_text` (empty), `no_default`, `authorize_answers`, `authorize_hint`, `ticket_ttl_s`, `proposals` (the six grouped notes are `<rule>-group`), `labels`, and the keys of D16: `min_saving_units_per_day` (0), `min_saving_share` (0.01), `session_active_window_h` (48), `group_min_sessions` (3), `pace_dedupe_share` (0.8), `max_open_questions` (4). The exact default values are written in task 1.1 and are provisional; none is a figure observed on any machine.

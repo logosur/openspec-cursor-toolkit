@@ -13,11 +13,12 @@ import configparser
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from access import settings
+from access import output, settings
 from access.mail_message import NotFound, Unavailable, mutf7_decode
 
 DEFAULT_ROOTS = ['~/.thunderbird', '~/snap/thunderbird/common/.thunderbird',
@@ -302,6 +303,7 @@ def folder_info(name: str, path: Path, roles: dict[str, list[str]]) -> dict:
 
 CHUNK = 8 << 20
 HEADER_SCAN_MAX = 50000       # default of the setting `header_scan_max`: never below the cut this replaced
+INDEX_HEADERS = ('list-id',)  # default of the setting `index_headers`
 HEADER_START_READ = 16 << 10
 HEADER_MAX = 4 << 20
 _NEEDLE = b'\nFrom - '
@@ -429,13 +431,35 @@ class LocalBackend:
             return [found]
         raise Unavailable(f'the local store has no folder named {selector!r}')
 
+    def index_headers(self) -> tuple:
+        return tuple(self.defaults.get('index_headers', INDEX_HEADERS))
+
+    def _progress(self, folder: str):
+        """The reporter of one folder's index: lines on stderr (folder name and counts only), never on stdout."""
+        shown = output.clip(folder, 80)
+
+        def say(event: str, done: int, total: int):
+            if event == 'build':
+                text = f'index of {shown}: {done} messages so far' if done else f'building the index of {shown}'
+            elif done:
+                text = f'header index of {shown}: {done} of {total} messages'
+            else:
+                text = f'building the header index of {shown}: {total} messages to read'
+            try:
+                sys.stderr.write(f'mailbox: {text}\n')
+                sys.stderr.flush()
+            except (OSError, ValueError, AttributeError):
+                pass          # a closed or missing stderr never stops the search
+        return say
+
     def index(self, name: str):
         from access import mail_index
         if name not in self._indexes:
             store = self.store()
             if name not in store.folders:
                 raise Unavailable(f'the local store has no folder named {name!r}')
-            index = mail_index.FolderIndex(store.folders[name], settings.cache_dir('mailbox') / 'index')
+            index = mail_index.FolderIndex(store.folders[name], settings.cache_dir('mailbox') / 'index',
+                                           self.index_headers(), self._progress(name))
             index.refresh(self.chunk)
             if index.stats.rebuilt and index.count():
                 self._builds[name] = index.count()
@@ -503,7 +527,8 @@ class LocalBackend:
                 # the header is read before the status pass, on the newest candidates only, so that `live` reads the
                 # matches and not the whole folder; the cut is the one setting `header_scan_max`, and it is stated
                 candidates = len(rows)
-                rows, scanned = index.header_filter(rows[:cap], pair[0], pair[1])
+                lookup = index.header_lookup if pair[0] in index.headers else index.header_filter
+                rows, scanned = lookup(rows[:cap], pair[0], pair[1])
                 if scanned < candidates:
                     notes.append(f'--header checked the newest {scanned} of {candidates} messages of {name} left by the '
                                  'other filters; narrow the search or raise header_scan_max')

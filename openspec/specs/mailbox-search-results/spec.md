@@ -6,8 +6,9 @@ Closes two gaps a first consumer of `mailbox` found after `external-access` was 
 message's identifier, and a header filter on the `local` backend did its status pass over a whole folder before looking at
 the header, with a cut that was never reported. Related: `external-access` (capability `mailbox-access`, not archived yet).
 These requirements only add behaviour: the existing JSON fields, exit codes, opaque ids and the default text line stay as
-`mailbox-access` states them. A header index and a per-result header option were designed and are deliberately not part of
-this delta (`design.md`, "Deferred").
+`mailbox-access` states them. A header filter on the `local` backend may be answered from a header index of the configured
+names, with the same answer as reading the folder file. A per-result header option was designed and is deliberately not
+part of this capability.
 
 ## Requirements
 

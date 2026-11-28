@@ -17,6 +17,11 @@ probes:
     exit: [0]
     stdout: any
     contains: "header_scan_max"
+  - name: help documents the header index setting
+    args: [--help]
+    exit: [0]
+    stdout: any
+    contains: "index_headers"
   - name: help documents the connector page-size setting
     args: [--help]
     exit: [0]

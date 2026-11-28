@@ -26,6 +26,11 @@ What happens on a switch (claude-sessions-sync calls `detect` on every pass; it 
      cut. So such a session, with a lock heartbeat within LOOKBACK, is listed with the kind "watcher" even when
      it is not cut, and gets resume_text() plus a sentence telling it to re-arm its watcher. It stays pending
      only until it receives the resume or runs a turn after the switch.
+  4c. The questions session of a supervision (the `mailbox` of a lock with a heartbeat within MAILBOX_LOOKBACK) loses
+     the dialog it had open, and its questions stay `asked` in the ask queue. While at least one is addressed to it, it
+     is listed with the kind "questions", whatever its transcript shows, and gets questions_text(): present those
+     questions again, unchanged. It stays pending until it receives that, is archived, or the queue shows none of them
+     still asked to it (a queue that cannot be read keeps it). An owner or closer is never listed this way.
   5. Nothing starts a session by itself after a switch, so `arm` leaves the app's own scheduled task
      `account-switch-resume` ready in the scheduled-tasks.json of every account/org folder except the active one:
      one-shot, enabled, never run, fireAt already past, saved in Bypass permissions. The app loads the new
@@ -126,6 +131,10 @@ API = "https://api.anthropic.com"
 
 MARKER = _SWITCH["account_switch_marker"]   # cross-project-message-gate lets a resume message with it through
 LOOKBACK = 6 * 3600            # a session counts as stopped by the old account if it moved this recently
+# A quiet, unreleased lock still supervises this long (STALE_LOCK_SUPERVISED_S in lib/supervisor/lock.py, repeated here
+# because this script works without the supervision module): the window in which its questions session still matters.
+MAILBOX_LOOKBACK = 24 * 3600
+QUEUE_TIMEOUT = 5              # an ask-queue listing; `claim` runs it under the event lock inside a 10 s hook
 EVENT_TTL = _SWITCH["account_switch_ttl_s"]   # after this an unclaimed event is stale and no session is asked to act
 CLAIM_TTL = 15 * 60            # a claim not finished in this time can be taken by another session
 CLAIM_WINDOW = _SWITCH["account_switch_claim_window_s"]   # the gate refuses the resume messages after this; steps() prints it
@@ -335,24 +344,32 @@ def paused_project(cwd):
         return False
 
 
-def lock_roles():
-    """{local session id: "owner" | "closer"} of the supervisor locks whose heartbeat is within LOOKBACK. The locks are
-    the JSON files of <SUPERVISOR_LOCK_HOME or ~/.claude/supervisor>/locks. Never raises: without the folder or with
-    unreadable files the result is empty, so the selection behaves as if the supervision piece were absent."""
+def supervisor_locks():
+    """The supervisor lock files, the JSON files of <SUPERVISOR_LOCK_HOME or ~/.claude/supervisor>/locks. Never raises:
+    without the folder or with unreadable files they are left out."""
     base = os.path.expanduser(os.environ.get("SUPERVISOR_LOCK_HOME") or os.path.join(HOME, ".claude", "supervisor"))
+    found = (load(path, None) for path in sorted(glob.glob(os.path.join(base, "locks", "*.json"))))
+    return [lock for lock in found if isinstance(lock, dict)]
+
+
+def beat_within(lock, window):
+    """True when the lock's heartbeat is at most `window` seconds old (and at most 300 s in the future)."""
+    try:
+        beat = datetime.datetime.fromisoformat(lock["heartbeat"])
+        if beat.tzinfo is None:
+            beat = beat.astimezone()
+        age = now() - beat.timestamp()
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    return -300 <= age <= window
+
+
+def lock_roles():
+    """{local session id: "owner" | "closer"} of the supervisor locks whose heartbeat is within LOOKBACK. Without
+    locks the result is empty, so the selection behaves as if the supervision piece were absent."""
     roles = {}
-    for path in sorted(glob.glob(os.path.join(base, "locks", "*.json"))):
-        lock = load(path, None)
-        if not isinstance(lock, dict):
-            continue
-        try:
-            beat = datetime.datetime.fromisoformat(lock["heartbeat"])
-            if beat.tzinfo is None:
-                beat = beat.astimezone()
-            age = now() - beat.timestamp()
-        except (KeyError, TypeError, ValueError, OverflowError):
-            continue
-        if not -300 <= age <= LOOKBACK:
+    for lock in supervisor_locks():
+        if not beat_within(lock, LOOKBACK):
             continue
         for key, role in (("closer", "closer"), ("session_id", "owner")):   # an owner wins over a closer
             if isinstance(lock.get(key), str) and lock[key]:
@@ -360,9 +377,52 @@ def lock_roles():
     return roles
 
 
+def mailbox_ids():
+    """The questions sessions (`mailbox`, a local session id) of the locks within MAILBOX_LOOKBACK."""
+    return {lock["mailbox"] for lock in supervisor_locks()
+            if isinstance(lock.get("mailbox"), str) and lock["mailbox"] and beat_within(lock, MAILBOX_LOOKBACK)}
+
+
+def queue_items():
+    """{id: item} of what can be read of the ask queue (the optional `ask-queue list --json`), every status. Never
+    raises; possibly empty. ask-queue skips a garbage line or a file it cannot open without saying so, hence the rule
+    of every caller: an id that is not here is unknown, never answered (items change status, they are not deleted).
+    One file that is not UTF-8 makes the whole listing fail: then each locked project is asked for on its own."""
+    script = os.path.expanduser(os.environ.get("ASK_QUEUE_BIN") or "~/.claude/scripts/ask-queue")
+    if not os.path.isfile(script):
+        return {}
+
+    def listing(*args):
+        """The listed items, [] when it cannot be told, or None when the command failed."""
+        try:
+            out = subprocess.run([sys.executable, script, "list", "--json", *args], capture_output=True, text=True,
+                                 timeout=QUEUE_TIMEOUT)
+            if out.returncode:
+                return None
+            data = json.loads(out.stdout)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return []   # a timeout is not retried
+        return data if isinstance(data, list) else []
+
+    items = listing()
+    if items is None:
+        checkouts = {lock["checkout"] for lock in supervisor_locks()
+                     if isinstance(lock.get("checkout"), str) and lock["checkout"]}
+        items = [item for checkout in sorted(checkouts) for item in listing("--project", checkout) or []]
+    return {item["id"]: item for item in items if isinstance(item, dict) and isinstance(item.get("id"), str)}
+
+
+def asked_ids(queue, session):
+    """The ids of the `asked` items addressed to this session (by its local or its CLI id)."""
+    ids = (session.get("sessionId"), session.get("cliSessionId"))
+    return [key for key, item in queue.items() if item.get("status") == "asked" and item.get("asked_to") in ids]
+
+
 def stopped_sessions(folder, own_session=None):
     out = []
     roles = lock_roles()
+    mailboxes = mailbox_ids()
+    queue = None
     for path in glob.glob(os.path.join(folder, "local_*.json")):
         rec = load(path, {})
         if rec.get("isArchived") or rec.get("sessionId") == own_session or not rec.get("cliSessionId"):
@@ -370,17 +430,29 @@ def stopped_sessions(folder, own_session=None):
         if rec.get("scheduledTaskId") == TASK_ID:
             continue  # 2026-11-14: a run of the resume task cut by the limit is not work; the next run does its job
         role = roles.get(rec.get("sessionId"))
+        asked = []   # unanswered questions of a questions session; an owner or closer keeps its own handling
+        if not role and rec.get("sessionId") in mailboxes:
+            queue = queue_items() if queue is None else queue
+            asked = asked_ids(queue, rec)
         quiet = now() - (rec.get("lastActivityAt") or 0) / 1000 > LOOKBACK
-        if quiet and not role:
+        if quiet and not role and not asked:
             continue  # a supervisor on guard may be quiet for hours: its lock heartbeat says it is alive
         if paused_project(rec.get("cwd")):
             continue  # 2026-11-13: a project the developer paused is resumed only by his order (project-pause)
-        kind = None if quiet else stop_kind(transcript_tail(rec["cliSessionId"]))
-        if not kind and role:
-            kind = "watcher"   # idle between turns on a background watcher the switch killed
+        if asked:
+            # an open dialog moves neither the activity time nor the transcript, and a cut one needs this kind too:
+            # only questions_text() asks it to present the questions again
+            kind = "questions"
+        else:
+            kind = None if quiet else stop_kind(transcript_tail(rec["cliSessionId"]))
+            if not kind and role:
+                kind = "watcher"   # idle between turns on a background watcher the switch killed
         if kind:
-            out.append({"sessionId": rec["sessionId"], "cliSessionId": rec["cliSessionId"],
-                        "title": rec.get("title") or "?", "cwd": rec.get("cwd"), "kind": kind})
+            row = {"sessionId": rec["sessionId"], "cliSessionId": rec["cliSessionId"],
+                   "title": rec.get("title") or "?", "cwd": rec.get("cwd"), "kind": kind}
+            if asked:
+                row["asked"] = asked
+            out.append(row)
     return sorted(out, key=lambda s: (s["kind"], s["title"]))
 
 
@@ -759,6 +831,7 @@ def cmd_on_switch(args):
     hard = [s for s in event["sessions"] if s["kind"] == "hard"]
     soft = [s for s in event["sessions"] if s["kind"] == "soft"]
     watchers = [s for s in event["sessions"] if s["kind"] == "watcher"]
+    questions = [s for s in event["sessions"] if s["kind"] == "questions"]
     lines = []
     if limit:
         lines.append(f"La cuenta nueva también está sin uso ({limit_text(limit['what'])}) hasta {until_text(limit['until'])}: "
@@ -774,6 +847,9 @@ def cmd_on_switch(args):
     if watchers and not limit:
         lines.append(f"{len(watchers)} sesiones de supervisión perdieron su vigilante con el cambio: se les avisará "
                      "para que lo rearmen.")
+    if questions and not limit:
+        lines.append(f"Sesiones de preguntas con preguntas sin contestar: {len(questions)}. Se les pedirá que vuelvan "
+                     "a presentarlas.")
     if not need:
         lines.append(plan_warning())
         missing = missing_connectors(org)
@@ -962,15 +1038,38 @@ def watcher_text():
             "cierre) y sigue donde estabas.")
 
 
+def questions_text(ids):
+    """What a questions session receives: its own ids, so each one has its own text. resume_text() is left out on
+    purpose: «sin repetir lo hecho» would contradict the request."""
+    return (f"{MARKER} La cuenta de Claude cambió y tu proceso se cerró: el diálogo de preguntas que tuvieras abierto "
+            "quedó sin contestar y nadie lo está viendo. Ejecuta "
+            f"`~/.claude/scripts/ask-queue pending {' '.join(ids)}` y vuelve a presentar ahora las que sigan `asked`, "
+            "en diálogos de hasta cuatro por diálogo y encadenados hasta la última, con las mismas preguntas y opciones "
+            "que te mandó la supervisora, sin cambiar una palabra, y con `ask-queue:<id>,<id>` (los ids de ese diálogo) "
+            "en `metadata.source`. Si alguna ya la contestó el desarrollador en un diálogo y no quedó anotada, "
+            "anótala con `~/.claude/scripts/ask-queue answer` y no la repitas. Si de alguna no tienes la pregunta con "
+            "sus opciones en tu conversación, o sale `missing`, no la presentes ni la inventes: di sus ids al terminar "
+            "tu turno. Si el comando falla, presenta las que en tu conversación no tengan respuesta del desarrollador.")
+
+
 def pending_sessions(event):
     """The sessions of the event still stopped now: a second claimer must not resume twice what the first one did,
     a session that wrote to its transcript in the last two minutes is working, not cut mid-turn, and one that
     already holds the resume in its transcript got it from an earlier claimer or a send before a compaction.
-    A "watcher" session was not cut: it stays while it holds no resume and has run no turn since the switch."""
+    A "watcher" session was not cut: it stays while it holds no resume and has run no turn since the switch.
+    A "questions" session stays while it holds no resume and a question is not known to be answered, whatever turn it
+    ran (a turn does not bring the dialog back)."""
     out = []
+    queue = None
     for s in event["sessions"]:
         cli = s["cliSessionId"]
         if leave_alone(s["sessionId"]) or delivered_at(cli, event["at"]) is not None:
+            continue
+        if s.get("kind") == "questions":
+            queue = queue_items() if queue is None else queue
+            ids = unanswered_ids(queue, s)
+            if ids:
+                out.append(dict(s, asked=ids))
             continue
         if s.get("kind") == "watcher":
             if not ran_turn_since(cli, event["at"]):
@@ -980,6 +1079,13 @@ def pending_sessions(event):
         if k and not (k == "soft" and (transcript_age(cli) or 1e9) < 120):
             out.append(dict(s, kind=k))
     return out
+
+
+def unanswered_ids(queue, row):
+    """The ids a questions row still waits on: its own that are unknown (not listed) or still `asked` to it, plus any
+    other `asked` to it by now."""
+    stored, current = row.get("asked") or [], asked_ids(queue, row)
+    return [i for i in stored if i not in queue or i in current] + [i for i in current if i not in stored]
 
 
 def ran_turn_since(cli_session_id, since):
@@ -1045,6 +1151,8 @@ def connectors_step(missing):
 def session_line(s):
     """One listed session: its id and title, and what sets it apart when it needs different handling."""
     note = {"hard": " (se cortó con el error del límite)",
+            "questions": " (sesión de preguntas: lleva su propio texto; preguntas sin contestar: "
+                         + ", ".join(s.get("asked") or []) + ")",
             "watcher": " (vigilante: lleva el texto con la frase del vigilante)"}.get(s["kind"], "")
     return f"{s['sessionId']} · {s['title']}{note}"
 
@@ -1060,10 +1168,17 @@ def steps(event):
              "desarrollador (rules/cambio-de-cuenta.md) y cross-project-message-gate deja pasar exactamente estos "
              "mensajes; si de verdad no puedes enviarlos, ejecuta `~/.claude/scripts/account-switch release` para que "
              "los envíe otra sesión y sigue con tu tarea."]
-    normal = [x for x in event["sessions"] if x["kind"] != "watcher"]
+    normal = [x for x in event["sessions"] if x["kind"] not in ("watcher", "questions")]
     watchers = [x for x in event["sessions"] if x["kind"] == "watcher"]
+    # (text, sessions, how it is introduced when it is not the first block)
+    blocks = [(resume_text(), normal, ""),
+              (watcher_text(), watchers, "Y a estas otras, que no se cortaron pero perdieron su vigilante en segundo "
+                                         "plano, exactamente este otro texto, no el anterior")]
+    blocks += [(questions_text(x.get("asked") or []), [x], "Y a esta sesión de preguntas, exactamente su propio texto, "
+                                                           "no el de otra")
+               for x in event["sessions"] if x["kind"] == "questions"]
     first = True
-    for text, group in ((resume_text(), normal), (watcher_text(), watchers)):
+    for text, group, intro in blocks:
         if not group:
             continue
         if first:
@@ -1072,8 +1187,7 @@ def steps(event):
                          "`~/.claude/scripts/account-switch mine`: si dice «No», no envíes nada; si dice «Sí», envía "
                          "solo a las que liste, porque una sesión no recibe el aviso dos veces): «" + text + "»")
         else:
-            lines.append("   Y a estas otras, que no se cortaron pero perdieron su vigilante en segundo plano, exactamente "
-                         "este otro texto, no el anterior: «" + text + "»")
+            lines.append(f"   {intro}: «{text}»")
         first = False
         lines += [f"   - {session_line(x)}" for x in group]
     lines.append("2. Las que se cortaron con el error del límite rechazan el mensaje («refused» o «undelivered») si tu "
@@ -1159,6 +1273,8 @@ def cmd_mine(args):
     print(head + " Faltan:")
     for s in left:
         print(f"   - {session_line(s)}")
+        if s["kind"] == "questions":   # its text is its own: a claimant that was compacted rebuilds it from here
+            print(f"     «{questions_text(s.get('asked') or [])}»")
     return 0
 
 

@@ -4,6 +4,8 @@ Every path is redirected into a temp dir (HOME included) and the projects are te
 state, locks, app records and switch event are never touched. The exception tests switch the exceptions on through a
 temp config piece; DefaultsTest covers what a fresh install does.
 """
+import importlib.machinery
+import importlib.util
 import json
 import os
 import shutil
@@ -12,10 +14,12 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from scripts.toolkit.paths import REPO_ROOT
 
 HOOK = str(REPO_ROOT / 'global/hooks/cross-project-message-gate')
+ACCOUNT_SWITCH = str(REPO_ROOT / 'global/scripts/account-switch')
 EVERY_EXCEPTION = ['account_switch', 'project_resume', 'skill_reload', 'supervisor_revive']
 
 
@@ -124,6 +128,27 @@ class CrossProjectGateTest(unittest.TestCase):
         with open(os.path.join(self.switch, 'event.json'), 'w') as fh:
             json.dump(data, fh)
         text = RESUME + ' Rearma tu vigilante (`supervisor-lock wait`) y sigue donde estabas.'
+        self.assertAllowed(self.send(text=text))
+        out = self.send(to=SIBLING, text=text)   # not listed: still refused
+        self.assertEqual(out['permissionDecision'], 'deny')
+        self.assertIn('ya no está en la lista', out['permissionDecisionReason'])
+
+    def questions_text(self, ids):
+        """The text account-switch itself builds for a questions session, with the gate's own config and HOME."""
+        loader = importlib.machinery.SourceFileLoader('account_switch_for_gate', ACCOUNT_SWITCH)
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        with mock.patch.dict(os.environ, gate_env(self.tmp), clear=True):
+            loader.exec_module(module)
+        return module.questions_text(ids)
+
+    def test_a_questions_session_listed_by_the_event_may_receive_its_own_text(self):
+        self.event(listed=(TARGET,))
+        with open(os.path.join(self.switch, 'event.json')) as fh:
+            data = json.load(fh)
+        data['sessions'][0].update(kind='questions', asked=['q1'])
+        with open(os.path.join(self.switch, 'event.json'), 'w') as fh:
+            json.dump(data, fh)
+        text = self.questions_text(['q1'])
         self.assertAllowed(self.send(text=text))
         out = self.send(to=SIBLING, text=text)   # not listed: still refused
         self.assertEqual(out['permissionDecision'], 'deny')

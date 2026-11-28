@@ -1,0 +1,18 @@
+{
+  "exempt_paths": [],
+  "extra_commands": [],
+  "drafts": false,
+  "send_tools": [
+    "^(send_message|send_email|send_mail|send_draft)$",
+    "^(reply|reply_all|forward)$",
+    "^(create_draft|update_draft|delete_draft)$",
+    "^(trash|untrash|delete)_(message|thread)$",
+    "^(mark|unmark)_(message|thread)_spam$",
+    "^(label|unlabel)_(message|thread)$",
+    "^(update_message_labels|apply_sensitive_message_label|apply_sensitive_thread_label)$",
+    "^(create|update|delete)_label$"
+  ],
+  "draft_tools": ["^(create_draft|update_draft)$"],
+  "read_tools": ["^(search|get|list|read|download|fetch)_"],
+  "ignore_servers": ["^ccd_"]
+}

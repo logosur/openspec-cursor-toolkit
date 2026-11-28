@@ -40,7 +40,8 @@ def _move(f: dict, state: str, stamp: str, **extra) -> None:
 
 
 def merge(cfg: dict, candidates: list[dict], now_ts: float, floor: float = 0.0, retire=None) -> tuple[list[str], list[str]]:
-    """Add each candidate whose id is not stored, whatever the stored state; refresh evidence only while `new` or `minor`.
+    """Add each candidate whose id is not stored, whatever the stored state; refresh evidence, saving and the proposal
+    and undo texts (which follow the configuration) only while `new` or `minor`.
 
     A finding whose saving is under `floor` is stored as `minor` (never reported, never asked); each run re-evaluates it:
     a `minor` one at or over the floor becomes `new`, a `new` one under it becomes `minor`. Any other state is never
@@ -64,7 +65,9 @@ def merge(cfg: dict, candidates: list[dict], now_ts: float, floor: float = 0.0, 
                 if state == 'new':
                     added.append(cand['id'])
             elif old.get('state') in ('new', 'minor'):
-                old.update(last_seen=stamp, evidence=cand['evidence'], saving_units_per_day=cand['saving_units_per_day'])
+                # the texts follow the configuration until the finding is asked about; after that they stay as asked
+                old.update(last_seen=stamp, evidence=cand['evidence'], saving_units_per_day=cand['saving_units_per_day'],
+                           proposal=cand.get('proposal', old.get('proposal')), undo=cand.get('undo', old.get('undo')))
                 if old['state'] == 'new' and below:
                     _move(old, 'minor', stamp)
                 elif old['state'] == 'minor' and not below:

@@ -13,7 +13,7 @@ from . import config as C
 from . import store
 from .collect import skipped_lines
 from .data import Data
-from .state import ensure_dir
+from .state import write_text
 
 WEEK = 7 * 86400
 
@@ -93,11 +93,20 @@ def ranking(d: Data, calls) -> dict:
            'origin': defaultdict(float)}
     for c in calls:
         info = d.session(c['session'])
-        out['session'][f'{c["session"][:8]} ({info["role"]})'] += c['units']
+        out['session'][c['session']] += c['units']
         out['project'][info['project']] += c['units']
         out['model'][c['model']] += c['units']
         out['origin'][c['origin']] += c['units']
-    return {k: sorted(v.items(), key=lambda kv: -kv[1]) for k, v in out.items()}
+    ranked = {k: sorted(v.items(), key=lambda kv: -kv[1]) for k, v in out.items()}
+    ranked['session'] = [(session_label(d, sid), units) for sid, units in ranked['session']]
+    return ranked
+
+
+def session_label(d: Data, sid: str) -> str:
+    """The app's title of the session next to its role; the start of its id when the app has no record (or no title)."""
+    info = d.session(sid)
+    title = info.get('title')
+    return f'{title} ({info["role"]})' if title else f'{sid[:8]} ({info["role"]})'
 
 
 PAGE_CSS = """
@@ -169,12 +178,9 @@ def render_page(cfg: dict, now_ts: float) -> str:
 
 
 def write_page(cfg: dict, now_ts: float) -> str:
+    """Two passes at once (the timer and a manual one) each write through their own temporary file: one whole page wins."""
     path = C.path(cfg, 'page_path')
-    ensure_dir(os.path.dirname(path))
-    tmp = path + '.tmp'
-    with open(tmp, 'w', encoding='utf-8') as fh:
-        fh.write(render_page(cfg, now_ts))
-    os.replace(tmp, path)
+    write_text(path, render_page(cfg, now_ts), mode=0o644)
     return path
 
 

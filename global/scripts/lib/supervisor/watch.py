@@ -6,8 +6,8 @@ import traceback
 
 from . import (
     askdue, backlog, census, closable, cloud, human_turns, interrupted,
-    lint, lock as lock_mod, machine_queue, projects, providers, transcripts,
-    settings, util, verdicts, wakes,
+    lint, lock as lock_mod, machine_queue, projects, providers, questions_wake,
+    transcripts, settings, util, verdicts, wakes,
 )
 
 
@@ -103,7 +103,8 @@ def hold_while_paused(project, interval):
 # Only what needs it wakes it: a turn ending or a status flip in one of a dozen sessions the developer drives would wake
 # it hundreds of times a day.
 GUARD_EVENTS = ('NEW', 'GONE', 'AWAITING', 'CRASH', 'HUNG', 'MODE', 'WAITING', 'MODELSTALL', 'HANDOFF', 'IDLE',
-                'CLOSABLE', 'CUT', 'SUBAGENT_SILENT', 'REF', 'CLOUD', 'QUEUED', 'SLOTHELD', 'BACKLOG', 'ASKDUE')
+                'CLOSABLE', 'CUT', 'SUBAGENT_SILENT', 'REF', 'CLOUD', 'QUEUED', 'SLOTHELD', 'BACKLOG', 'ASKDUE',
+                'ANSWERED')
 
 
 ALLIDLE_ACTIVITY_TOLERANCE_S = 5   # idle_s is an integer: the same last activity reads a second apart between polls
@@ -356,6 +357,29 @@ def wait_events(args):
             except Exception:
                 util.hook_log('wait-errors.log', traceback.format_exc().rstrip())
         return out
+    answer_source = (None, None)
+    if args.owner:
+        try:  # the queue file is resolved once per wait: project_root runs git
+            answer_source = questions_wake.queue_source(project)
+        except Exception:
+            util.hook_log('wait-errors.log', traceback.format_exc().rstrip())
+
+    def answered_events(rows):
+        """The ANSWERED line of this poll (one at most), from the unfiltered census: the questions session is usually
+        in --exclude, and only this event sees past it. Nothing while the project is paused or when reading fails."""
+        if not args.owner:
+            return []
+        try:
+            if providers.pause_of(project.get('checkout')):
+                return []
+            lock = lock_mod.Store().read(project['key']) or {}
+            if lock.get('session_id') != args.owner:
+                return []  # a watcher left over from a former owner must not use up the current owner's announcements
+            line = questions_wake.answered_line(project['key'], lock.get('mailbox'), rows, answer_source, time.time())
+            return [line] if line else []
+        except Exception:
+            util.hook_log('wait-errors.log', traceback.format_exc().rstrip())
+            return []
     ready = os.environ.get('SUPERVISOR_WAIT_READY')
     if ready:  # tests: the first snapshot is taken, so a change made from now on is an event
         open(ready, 'w').close()
@@ -427,6 +451,7 @@ def wait_events(args):
         for name in refs:
             if heads_now[name] != heads_before[name]:
                 events.append(f'REF {name} {(heads_before[name] or "-")[:8]}->{(heads_now[name] or "-")[:8]}')
+        events.extend(answered_events(rows))
         if args.guard:
             events = [e for e in events if e.split(' ', 1)[0] in GUARD_EVENTS]
         if events:

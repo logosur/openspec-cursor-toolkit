@@ -1,4 +1,5 @@
 """The question gate: may this session open a dialog to the developer now."""
+import json
 import os
 import re
 import time
@@ -212,6 +213,60 @@ def present_verdict(payload, session, now, minutes):
     return None
 
 
+DETACH_MARKER_KEEP_DAYS = 30   # a deny-once marker older than this is pruned when a new one is written
+
+
+def detach_marker_dir():
+    return os.path.join(ask_gate_dir(), 'detach-asked')
+
+
+def prune_detach_markers(now):
+    """Remove the deny-once markers older than DETACH_MARKER_KEEP_DAYS. Never raises."""
+    try:
+        for name in os.listdir(detach_marker_dir()):
+            path = os.path.join(detach_marker_dir(), name)
+            try:
+                if now - os.path.getmtime(path) > DETACH_MARKER_KEEP_DAYS * 86400:
+                    os.remove(path)
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
+def mailbox_lineage_decision(session, tool):
+    """'' (allow) or the deny json for the questions session. A questions session that still hangs from another session
+    in the app's sidebar shows its dialogs in that session's window: it is denied once, told to detach itself and retry;
+    every later question of the same session is allowed (the app may refuse the detach). Only the marker's existence
+    counts, whatever it holds. Fail open: no record, an unreadable one, or a marker that cannot be written allows."""
+    try:
+        record = session_roles.app_record_of_cli(session)
+        parent = session_roles.hangs_from(record)
+    except Exception:
+        ask_gate_error(f'{session[:8]} {tool} lineage\n' + traceback.format_exc().rstrip())
+        record, parent = None, None
+    if parent is None:
+        ask_gate_log(session, 'allow-mailbox', tool, 'question mailbox')
+        return ''
+    local = record.get('sessionId') if isinstance(record.get('sessionId'), str) and record.get('sessionId') else session
+    marker = os.path.join(detach_marker_dir(), os.path.basename(local))
+    if os.path.lexists(marker):
+        ask_gate_log(session, 'allow-mailbox-attached', tool, f'still hangs from {parent}; denied once already')
+        return ''
+    try:
+        now = time.time()
+        os.makedirs(detach_marker_dir(), exist_ok=True)
+        prune_detach_markers(now)
+        with open(marker, 'w') as fh:
+            json.dump({'parent': parent, 'at': int(now)}, fh)
+    except Exception:
+        ask_gate_error(f'{session[:8]} {tool} detach marker\n' + traceback.format_exc().rstrip())
+        ask_gate_log(session, 'allow-mailbox-attached', tool, f'hangs from {parent}; marker not written, failing open')
+        return ''
+    ask_gate_log(session, 'deny-mailbox-attached', tool, f'hangs from {parent}')
+    return deny.deny_attached_mailbox(parent)
+
+
 def ask_gate_decide(payload, locks):
     """'' (allow) or the deny json for a developer question from a session that owns no supervisor lock."""
     session, tool = str(payload.get('session_id') or ''), payload.get('tool_name')
@@ -237,8 +292,7 @@ def ask_gate_decide(payload, locks):
             ask_gate_log(session, f'allow-{parked}', tool, f'{role} session')
             return ''
         if role == 'mailbox':
-            ask_gate_log(session, 'allow-mailbox', tool, 'question mailbox')
-            return ''
+            return mailbox_lineage_decision(session, tool)
         if role == 'supervised':
             # A supervisor stays on guard after the final batch, so every session of the project stays supervised.
             # One the developer is driving in person may ask exactly as a free session may (no more): their message

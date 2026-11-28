@@ -20,7 +20,9 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from unittest import mock
 
 from scripts.toolkit.paths import REPO_ROOT
 
@@ -31,7 +33,7 @@ if LIB not in sys.path:
 
 from usage_watch import collect as collect_mod  # noqa: E402
 from usage_watch import config as C  # noqa: E402
-from usage_watch import flow, rules, scenarios, store  # noqa: E402
+from usage_watch import flow, report, rules, scenarios, store  # noqa: E402
 from usage_watch.data import Data  # noqa: E402
 from usage_watch.selftest import NOW, Sandbox  # noqa: E402
 
@@ -1784,6 +1786,106 @@ class OldStateTest(RoleBase):
             self.assertEqual((after[fid]['state'], after[fid]['folded_into']), ('minor', group['id']))
         self.assertEqual(after[group['id']]['state'], 'new')
         self.assertEqual([h['state'] for h in after['role-model-0000000001']['history']], ['new', 'minor'])
+
+
+class ConcurrentPageTest(Base):
+    """Two passes at once (the timer and a manual one) both write the page: neither fails and the page is whole."""
+
+    def test_two_concurrent_writes_neither_fails_and_the_page_is_whole(self):
+        contents = {name: name * 400000 for name in ('A', 'B')}   # large, so the two writes overlap
+        errors = []
+        with self.sandbox:
+            cfg = C.load()
+            path = C.path(cfg, 'page_path')
+            for _ in range(15):
+                barrier = threading.Barrier(2)
+
+                def render(_cfg, _now):
+                    barrier.wait()
+                    return contents[threading.current_thread().name]
+
+                def write():
+                    try:
+                        report.write_page(cfg, NOW)
+                    except Exception as exc:   # noqa: BLE001 - any failure of either writer fails the test
+                        errors.append(repr(exc))
+
+                with mock.patch.object(report, 'render_page', render):
+                    threads = [threading.Thread(target=write, name=name) for name in contents]
+                    for t in threads:
+                        t.start()
+                    for t in threads:
+                        t.join(60)
+                self.assertEqual(errors, [])
+                self.assertIn(read(path), contents.values())
+            self.assertEqual([n for n in os.listdir(os.path.dirname(path)) if 'tmp' in n], [])
+
+
+class SessionTitleTest(Base):
+    """The page names a session by the app's title next to its role; without a record, by the start of its id."""
+
+    def page_rows(self):
+        with self.sandbox:
+            cfg = C.load()
+            collect_mod.collect(cfg, NOW)
+            d = Data(cfg, NOW)
+            return [k for k, _ in report.ranking(d, d.calls)['session']], report.render_page(cfg, NOW)
+
+    def test_title_is_shown_and_escaped(self):
+        self.home.live('s-titled', title='Fix <script>alert(1)</script> & tidy')
+        self.home.transcript('s-titled').user(NOW - H, 'x').assistant(NOW - 600)
+        labels, page = self.page_rows()
+        self.assertEqual(labels, ['Fix <script>alert(1)</script> & tidy (worker)'])
+        self.assertIn('Fix &lt;script&gt;alert(1)&lt;/script&gt; &amp; tidy (worker)', page)
+        self.assertNotIn('<script>', page)
+        self.assertNotIn('s-titled', page)
+
+    def test_without_a_record_or_a_title_the_id_start_stays(self):
+        self.home.live('s-untitled-1')
+        for sid in ('s-norecord-1', 's-untitled-1'):
+            self.home.transcript(sid).user(NOW - H, 'x').assistant(NOW - 600)
+        labels, page = self.page_rows()
+        self.assertEqual(sorted(labels), ['s-noreco (worker)', 's-untitl (worker)'])
+        self.assertIn('s-noreco (worker)', page)
+
+
+class ProposalTextRefreshTest(Planned):
+    """A stored finding follows the configured texts while `new` or `minor`; once asked, it keeps what was asked."""
+
+    TEXTS = {'large-context': {'proposal': 'Edited proposal text.', 'undo': 'Edited undo text.'}}
+
+    def test_new_and_minor_take_the_edited_texts(self):
+        scenarios.large_fire(self.home, NOW)
+        cfg, plan = self.plan()
+        added, _ = self.merge(cfg, plan, floor=0)
+        fid = added[0]
+        self.assertNotEqual(self.stored(cfg)[fid]['proposal']['text'], 'Edited proposal text.')
+        cfg, plan = self.plan(proposals=self.TEXTS)
+        self.merge(cfg, plan, floor=0, now=NOW + 60)
+        f = self.stored(cfg)[fid]
+        self.assertEqual((f['state'], f['proposal']['text'], f['undo']), ('new', 'Edited proposal text.', 'Edited undo text.'))
+        cfg, plan = self.plan(proposals={'large-context': {'proposal': 'Minor text.', 'undo': 'Minor undo.'}})
+        self.merge(cfg, plan, floor=10 ** 9, now=NOW + 120)   # under the floor: the finding becomes minor
+        f = self.stored(cfg)[fid]
+        self.assertEqual((f['state'], f['proposal']['text'], f['undo']), ('minor', 'Minor text.', 'Minor undo.'))
+        cfg, plan = self.plan(proposals=self.TEXTS)
+        self.merge(cfg, plan, floor=10 ** 9, now=NOW + 180)
+        f = self.stored(cfg)[fid]
+        self.assertEqual((f['state'], f['proposal']['text'], f['undo']), ('minor', 'Edited proposal text.', 'Edited undo text.'))
+
+    def test_asked_and_later_states_keep_their_texts(self):
+        scenarios.large_fire(self.home, NOW)
+        cfg, plan = self.plan()
+        fid = self.merge(cfg, plan, floor=0)[0][0]
+        for state in ('asked', 'authorized', 'rejected', 'applied', 'measured'):
+            with self.sandbox:
+                findings = store.read(cfg)
+                findings[fid]['state'] = state
+                store.write(cfg, findings)
+                before = json.dumps(store.read(cfg)[fid], sort_keys=True)
+            cfg2, plan2 = self.plan(proposals=self.TEXTS)
+            self.merge(cfg2, plan2, floor=0, now=NOW + 60)
+            self.assertEqual(json.dumps(self.stored(cfg2)[fid], sort_keys=True), before, state)
 
 
 class RoleSelfTestTest(RoleBase):

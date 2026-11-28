@@ -86,7 +86,7 @@ class Data:
 
     def session(self, sid: str) -> dict:
         return self.info.get(sid) or {'project': 'unknown', 'project_root': '', 'role': 'worker', 'app_id': None,
-                                      'cwd': None, 'routine': False, 'open': False}
+                                      'title': None, 'cwd': None, 'routine': False, 'open': False}
 
     def since(self, start: float, end: float | None = None):
         end = self.now if end is None else end

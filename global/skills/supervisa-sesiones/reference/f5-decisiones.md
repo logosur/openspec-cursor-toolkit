@@ -146,6 +146,9 @@ autorice ahí.
      del proyecto. La pregunta lo explica en su opción: «para que se haga, escríbelo en la sesión supervisora»;
    - nunca usas `ask-queue answer` con una decisión tuya; lo que dejó de hacer falta se cierra con `ask-queue close`.
 6. No se cierra ni se archiva: sirve para el ciclo siguiente.
+7. **Tras un cambio de cuenta** en la app, el diálogo que tuviera abierto se pierde: si le quedan preguntas en `asked`,
+   `account-switch` (si está instalado) le pide que las vuelva a presentar sin cambiarlas. No se las reenvíes: manda de
+   nuevo solo las de los ids que ella diga que no tiene.
 
 Sin herramientas para abrir sesiones (modo manual), la tanda la abre la supervisora al final, cuando ya no queda nada que
 hacer.

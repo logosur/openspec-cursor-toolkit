@@ -16,6 +16,10 @@ tener que reanudarlas una a una.
   transcripción. `account-switch` la anota como «vigilante» si el latido de su cerrojo es reciente, y le envía el aviso
   de reanudación con una frase más: rearmar su vigilante (`supervisor-lock wait`, o `wait-closer` la sesión de cierre).
   Deja de estar pendiente en cuanto recibe el aviso o ejecuta un turno después del cambio.
+- La sesión de preguntas de una supervisión (el `mailbox` de su cerrojo) pierde con el cambio el diálogo que tuviera
+  abierto. Si `ask-queue` tiene alguna pregunta en `asked` dirigida a ella, `account-switch` la anota como «questions»,
+  con su propio texto: volver a presentar esas preguntas sin cambiarlas. Sigue pendiente hasta que recibe ese texto, se
+  archiva o ya no queda ninguna sin contestar; haber ejecutado un turno no basta.
 - Si la cuenta nueva tampoco tiene uso, el cambio espera a que vuelva (`not_before`) y nadie lo reclama antes.
 
 ## Lo que hace el agente

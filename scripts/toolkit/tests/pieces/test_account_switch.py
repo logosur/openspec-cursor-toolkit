@@ -27,6 +27,7 @@ from unittest import mock
 from scripts.toolkit.paths import REPO_ROOT
 
 SCRIPT = os.environ.get('ACCOUNT_SWITCH_SCRIPT') or str(REPO_ROOT / 'global/scripts/account-switch')
+ASK_QUEUE = str(REPO_ROOT / 'global/scripts/ask-queue')
 ROUTINES_SCRIPT = os.environ.get('ROUTINES_SCRIPT') or str(REPO_ROOT / 'global/scripts/routines')
 LIMIT = "You've hit your weekly limit · resets Nov 5, 2am (Europe/Madrid)"
 
@@ -72,6 +73,11 @@ class AccountSwitchTest(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tasks, True)
         self.locks_home = tempfile.mkdtemp(prefix='account-switch-locks-')   # no real supervisor lock is ever read
         self.addCleanup(shutil.rmtree, self.locks_home, True)
+        self.home = tempfile.mkdtemp(prefix='account-switch-home-')   # nothing of the real HOME is read
+        self.queue = tempfile.mkdtemp(prefix='account-switch-queue-')   # nor the real ask queue
+        for d in (self.home, self.queue):
+            self.addCleanup(shutil.rmtree, d, True)
+        self.queue_bin = ASK_QUEUE
         for name in ('resume.md', 'revive.md'):
             with open(os.path.join(self.tasks, name), 'w') as fh:
                 fh.write('prompt\n')
@@ -102,6 +108,7 @@ class AccountSwitchTest(unittest.TestCase):
                    ACCOUNT_SWITCH_APP_SESSIONS=self.app,
                    ACCOUNT_SWITCH_CLI_CREDENTIALS=os.path.join(self.state, 'no-credentials.json'),   # no token: no network
                    SUPERVISOR_LOCK_HOME=self.locks_home,
+                   HOME=self.home, ASK_QUEUE_DIR=self.queue, ASK_QUEUE_BIN=self.queue_bin,
                    ACCOUNT_SWITCH_TASK_FILE=os.path.join(self.tasks, 'resume.md'),
                    ACCOUNT_SWITCH_REVIVE_TASK_FILE=os.path.join(self.tasks, 'revive.md'))
         env.update(extra)
@@ -825,6 +832,382 @@ class AccountSwitchTest(unittest.TestCase):
         self.assertIn('hard     local_hard1', out)
 
 
+    # --- the questions session of a supervision, with questions nobody answered -------------------------------------
+
+    def ask(self, *args):
+        out = subprocess.run([sys.executable, ASK_QUEUE, *args], capture_output=True, text=True, env=self.env(),
+                             timeout=30)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return out.stdout.strip()
+
+    def project(self, name='demo'):
+        path = os.path.join(self.home, name)
+        os.makedirs(path, exist_ok=True)
+        return os.path.realpath(path)
+
+    def item(self, to='local_box', project='demo', question=None, status='asked'):
+        """A real queue item of `project`, asked to `to`, then left as `status`. Returns its id."""
+        question = question or f'{project} {to} {status} {time.time()}'
+        item = self.ask('add', '--project', self.project(project), '--question', question, '--default', 'No',
+                        '--why', 'w', '--blocks', 'b')
+        if status != 'open':
+            self.ask('asked', item, '--to', to)
+        if status == 'answered':
+            self.ask('answer', item, '--text', 'si')
+        if status == 'closed':
+            self.ask('close', item)
+        return item
+
+    def queue_file(self, project='demo'):
+        found = [n for n in os.listdir(self.queue) if n.startswith(project + '-') and n.endswith('.jsonl')]
+        self.assertEqual(len(found), 1, found)
+        return os.path.join(self.queue, found[0])
+
+    def module(self):
+        loader = importlib.machinery.SourceFileLoader('account_switch_questions', SCRIPT)
+        mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        with mock.patch.dict(os.environ, self.env()):
+            loader.exec_module(mod)
+        return mod
+
+    def read_queue(self, mod):
+        with mock.patch.dict(os.environ, self.env()):
+            return mod.queue_items()
+
+    def script_file(self, name, body):
+        path = os.path.join(self.home, name)
+        with open(path, 'w') as fh:
+            fh.write(body)
+        return path
+
+    def broken_queues(self):
+        """The ways the whole queue cannot be read: no script, a failing one, output that is not a JSON list."""
+        return (os.path.join(self.home, 'missing'),
+                self.script_file('fails', 'raise SystemExit(3)\n'),
+                self.script_file('noise', 'print("not json")\n'),
+                self.script_file('object', 'print("{}")\n'))
+
+    def test_asked_reader_returns_the_items_of_every_status_by_id(self):
+        mod = self.module()
+        ids = {status: self.item(status=status) for status in ('open', 'asked', 'answered', 'closed')}
+        found = self.read_queue(mod)
+        self.assertEqual({found[i]['status']: i for i in found}, ids)
+        self.assertEqual(found[ids['asked']]['asked_to'], 'local_box')
+
+    def test_asked_reader_gives_nothing_when_the_queue_cannot_be_read_and_never_raises(self):
+        self.item()
+        for broken in self.broken_queues():
+            self.queue_bin = broken
+            self.assertEqual(self.read_queue(self.module()), {}, broken)
+
+    def test_asked_reader_keeps_the_other_projects_when_one_queue_file_breaks_the_listing(self):
+        mod = self.module()
+        mine = self.item(project='demo')
+        other = self.item(project='other')
+        self.lock(key='demo', mailbox='local_box', checkout=self.project('demo'))
+        self.lock(key='other', mailbox='local_other', checkout=self.project('other'))
+        with open(self.queue_file('demo'), 'ab') as fh:
+            fh.write(b'\xff\xfe broken\n')
+        self.assertEqual(set(self.read_queue(mod)), {other})
+        self.assertNotIn(mine, self.read_queue(mod))
+
+
+    def rows(self, folder, paused=(), own=None):
+        """{session id: row} of stopped_sessions, with the queue and the locks of this test."""
+        mod = self.module()
+        with mock.patch.dict(os.environ, self.env()), \
+                mock.patch.object(mod, 'paused_project', lambda cwd: cwd in paused):
+            found = mod.stopped_sessions(folder, own)
+        self.assertEqual(len(found), len({s['sessionId'] for s in found}), 'a session is listed once')
+        return {s['sessionId']: s for s in found}
+
+    def dialog_open(self, cli, ago=9 * 3600):
+        """A session waiting inside a question dialog: a tool call with no result."""
+        call = {"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "toolu_1", "name": "AskUserQuestion", "input": {}}]}}
+        self.transcript(cli, [user('x'), self.stamped(call, ago)], age=ago)
+
+    def box(self, cli='box', quiet=False):
+        """The record of the session local_<cli>, idle for 30 minutes (quiet: for 9 hours)."""
+        self.idle(cli)
+        extra = {'lastActivityAt': (time.time() - 9 * 3600) * 1000} if quiet else {}
+        return self.record(cli, **extra)
+
+    def demo_lock(self, key='demo', mailbox='local_box', **fields):
+        self.lock(key=key, mailbox=mailbox, checkout=self.project(key), **fields)
+
+    def test_questions_selection_lists_a_dialog_open_and_quiet_for_hours(self):
+        self.dialog_open('box')
+        folder = self.record('box', lastActivityAt=(time.time() - 9 * 3600) * 1000)
+        self.demo_lock()
+        item = self.item()
+        row = self.rows(folder)['local_box']
+        self.assertEqual((row['kind'], row['asked']), ('questions', [item]))
+
+    def test_questions_selection_wins_over_a_cut_by_the_limit(self):
+        self.transcript('box', [user('x'), answer(LIMIT, error=True)])
+        folder = self.record('box')
+        self.demo_lock()
+        item = self.item(to='box')   # addressed by its CLI id
+        row = self.rows(folder)['local_box']
+        self.assertEqual((row['kind'], row['asked']), ('questions', [item]))
+
+    def test_questions_selection_gives_no_row_when_nothing_is_asked_to_it(self):
+        folder = self.box()
+        self.demo_lock()
+        self.assertEqual(self.rows(folder), {})   # no item at all
+        self.item(status='open')
+        self.item(to='local_elsewhere')
+        self.assertEqual(self.rows(folder), {})
+
+    def test_questions_selection_gives_no_row_for_answered_or_dismissed_items(self):
+        folder = self.box()
+        self.demo_lock()
+        self.item(status='answered')
+        self.item(status='closed')
+        self.assertEqual(self.rows(folder), {})
+
+    def test_questions_selection_gives_one_row_per_project(self):
+        self.box('box')
+        folder = self.box('other')
+        self.demo_lock()
+        self.demo_lock(key='second', mailbox='local_other')
+        mine, theirs = self.item(), self.item(to='local_other', project='second')
+        self.assertEqual({k: (v['kind'], v['asked']) for k, v in self.rows(folder).items()},
+                         {'local_box': ('questions', [mine]), 'local_other': ('questions', [theirs])})
+
+    def test_questions_selection_lists_a_mailbox_of_two_locks_once_with_both_ids(self):
+        folder = self.box()
+        self.demo_lock()
+        self.demo_lock(key='second')
+        ids = {self.item(), self.item(project='second')}
+        rows = self.rows(folder)
+        self.assertEqual(list(rows), ['local_box'])
+        self.assertEqual(set(rows['local_box']['asked']), ids)
+
+    def test_questions_selection_keeps_the_exclusions_and_drops_a_stale_lock(self):
+        folder = self.box(quiet=True)
+        self.item()
+        self.demo_lock(ago=25 * 3600)
+        self.assertEqual(self.rows(folder), {})
+        self.demo_lock(heartbeat='yesterday')
+        self.assertEqual(self.rows(folder), {})
+        self.demo_lock(ago=20 * 3600)
+        self.assertEqual(self.rows(folder)['local_box']['kind'], 'questions')
+        self.assertEqual(self.rows(folder, paused=('/work/demo',)), {})
+        self.assertEqual(self.rows(folder, own='local_box'), {})
+        self.assertEqual(self.rows(self.record('box', isArchived=True)), {})
+        self.assertEqual(self.rows(self.record('box', scheduledTaskId='account-switch-resume')), {})
+
+    def test_questions_selection_leaves_the_rest_as_before_when_the_queue_cannot_be_read(self):
+        self.box('box')
+        self.transcript('hard1', [user('x'), answer(LIMIT, error=True)])
+        folder = self.record('hard1')
+        self.demo_lock()
+        self.item()
+        for broken in self.broken_queues():
+            self.queue_bin = broken
+            self.assertEqual({k: v['kind'] for k, v in self.rows(folder).items()}, {'local_hard1': 'hard'}, broken)
+
+    def test_questions_selection_survives_a_corrupt_queue_of_another_project(self):
+        self.box('box')
+        self.box('other')
+        self.box('boss')
+        self.transcript('hard1', [user('x'), answer(LIMIT, error=True)])
+        folder = self.record('hard1')
+        self.demo_lock(session_id='local_boss')
+        self.demo_lock(key='second', mailbox='local_other')
+        self.item()
+        theirs = self.item(to='local_other', project='second')
+        with open(self.queue_file('demo'), 'ab') as fh:
+            fh.write(b'\xff\xfe broken\n')
+        rows = self.rows(folder)
+        self.assertEqual({k: v['kind'] for k, v in rows.items()},
+                         {'local_boss': 'watcher', 'local_hard1': 'hard', 'local_other': 'questions'})
+        self.assertEqual(rows['local_other']['asked'], [theirs])
+
+    def test_questions_selection_leaves_an_owner_or_closer_as_it_was(self):
+        self.box('boss')
+        folder = self.box('closer')
+        self.demo_lock(session_id='local_boss', closer='local_closer', mailbox=None)
+        self.demo_lock(key='second', mailbox='local_boss')
+        self.demo_lock(key='third', mailbox='local_closer')
+        self.item(to='local_boss', project='second')
+        self.item(to='local_closer', project='third')
+        rows = self.rows(folder)
+        self.assertEqual({k: v['kind'] for k, v in rows.items()}, {'local_boss': 'watcher', 'local_closer': 'watcher'})
+        self.assertNotIn('asked', rows['local_boss'])
+
+
+    def questions_event(self, ids, others=(), **extra):
+        """An event with the questions row of local_box (its dialog still open) and `others` [(cli, kind)]."""
+        self.dialog_open('box')
+        rows = [{"sessionId": f"local_{c}", "cliSessionId": c, "title": c, "cwd": "/tmp", "kind": k}
+                for c, k in [*others, ('box', 'questions')]]
+        rows[-1]['asked'] = list(ids)
+        self.event([], at=time.time() - 300, **extra)
+        data = self.saved_event()
+        data['sessions'] = rows
+        with open(os.path.join(self.state, 'event.json'), 'w') as fh:
+            json.dump(data, fh)
+
+    def pending(self):
+        """{cli id: (kind, asked)} of what is still pending."""
+        mod = self.module()
+        with mock.patch.dict(os.environ, self.env()):
+            return {s['cliSessionId']: (s['kind'], s.get('asked')) for s in mod.pending_sessions(self.saved_event())}
+
+    def test_questions_pending_answered_before_the_claim_closes_the_event(self):
+        self.questions_event([self.item(status='answered'), self.item(status='closed')])
+        self.assertEqual(self.hook(mode='bypassPermissions'), '')
+        self.assertTrue(self.saved_event()['done'])
+
+    def test_questions_pending_partly_answered_keeps_only_the_unanswered_id(self):
+        first, second = self.item(status='answered'), self.item()
+        self.questions_event([first, second])
+        text = self.hook(mode='bypassPermissions')
+        self.assertEqual(self.saved_event()['sessions'][0]['asked'], [second])
+        self.assertIn(second, text)
+        self.assertNotIn(first, text)
+
+    def test_questions_pending_adds_what_was_asked_since_and_drops_what_moved_to_another_session(self):
+        first, second = self.item(), self.item()
+        self.questions_event([first])
+        self.assertEqual(self.pending(), {'box': ('questions', [first, second])})
+        self.ask('asked', first, second, '--to', 'local_elsewhere')
+        self.assertEqual(self.pending(), {})
+
+    def test_questions_pending_keeps_a_session_that_ran_a_turn_without_the_delivery(self):
+        item = self.item()
+        self.questions_event([item])
+        self.transcript('box', [user('x'), self.stamped(answer('Sigo.'), 100)])
+        self.assertEqual(self.pending(), {'box': ('questions', [item])})
+
+    def test_questions_pending_drops_a_delivered_or_archived_session(self):
+        self.questions_event([self.item()])
+        self.transcript('box', [user('x'), self.delivery()])
+        self.assertEqual(self.pending(), {})
+        self.dialog_open('box')
+        self.record('box', isArchived=True)
+        self.assertEqual(self.pending(), {})
+
+    def test_questions_pending_keeps_the_row_when_the_queue_cannot_be_read_at_claim_time(self):
+        item = self.item()
+        self.questions_event([item])
+        self.queue_bin = self.broken_queues()[1]
+        self.assertIn(item, self.hook(mode='bypassPermissions'))
+        event = self.saved_event()
+        self.assertEqual((event['done'], event['sessions'][0]['asked']), (False, [item]))
+
+    def test_questions_pending_keeps_an_id_the_listing_does_not_show(self):
+        item = self.item()
+        self.questions_event([item])
+        path = self.queue_file()
+        with open(path, 'w') as fh:
+            fh.write('garbage{\n')   # the listing succeeds without the item
+        self.assertEqual(self.pending(), {'box': ('questions', [item])})
+        os.chmod(path, 0)
+        self.addCleanup(os.chmod, path, 0o600)
+        self.assertEqual(self.pending(), {'box': ('questions', [item])})
+        os.chmod(path, 0o600)
+        os.remove(path)
+        with open(path, 'wb') as fh:
+            fh.write(b'\xff\xfe broken\n')   # the listing fails
+        self.assertEqual(self.pending(), {'box': ('questions', [item])})
+
+    def test_questions_pending_does_not_keep_a_watcher_that_ran_a_turn(self):
+        item = self.item()
+        self.questions_event([item], others=[('boss', 'watcher')])
+        for cli in ('box', 'boss'):
+            self.transcript(cli, [user('x'), self.stamped(answer('Sigo.'), 100)])
+        self.assertEqual(self.pending(), {'box': ('questions', [item])})
+
+
+    @staticmethod
+    def sent_text(lines, session):
+        """The text between «» of the block that lists `session` in the claim steps."""
+        at = next(i for i, line in enumerate(lines) if line.startswith(f'   - {session} '))
+        while lines[at].startswith('   - '):
+            at -= 1
+        return lines[at][lines[at].index('«[cambio de cuenta] ') + 1:lines[at].rindex('»')]
+
+    def test_questions_steps_give_each_questions_session_its_own_text(self):
+        one, two, three = self.item(), self.item(), self.item(to='local_other')
+        self.transcript('hard1', [user('x'), answer(LIMIT, error=True)])
+        self.dialog_open('other')
+        self.questions_event([one, two], others=[('hard1', 'hard'), ('other', 'questions')])
+        data = self.saved_event()
+        data['sessions'][1]['asked'] = [three]
+        with open(os.path.join(self.state, 'event.json'), 'w') as fh:
+            json.dump(data, fh)
+        lines = self.hook(mode='bypassPermissions').splitlines()
+        mod = self.module()
+        self.assertEqual(self.sent_text(lines, 'local_hard1'), mod.resume_text())
+        self.assertEqual(self.sent_text(lines, 'local_box'), mod.questions_text([one, two]))
+        self.assertEqual(self.sent_text(lines, 'local_other'), mod.questions_text([three]))
+        self.assertIn(f'ask-queue pending {one} {two}`', self.sent_text(lines, 'local_box'))
+        self.assertIn(f'preguntas sin contestar: {one}, {two}', '\n'.join(lines))
+
+    def test_questions_steps_with_only_a_questions_session_carry_the_mine_instruction(self):
+        item = self.item()
+        self.questions_event([item])
+        text = self.hook(mode='bypassPermissions')
+        first = next(line for line in text.splitlines() if line.startswith('1. Envía'))
+        self.assertIn('account-switch mine', first)
+        self.assertIn(self.module().questions_text([item]), first)
+        self.assertEqual(text.count('«[cambio de cuenta] '), 1)
+        self.assertNotIn('Sigue exactamente donde lo dejaste', text)
+
+    def test_questions_steps_text_has_the_marker_asks_for_the_same_questions_and_is_no_limit_text(self):
+        mod = self.module()
+        text = mod.questions_text(['q1', 'q2'])
+        self.assertTrue(text.startswith('[cambio de cuenta] '))
+        for part in ('`~/.claude/scripts/ask-queue pending q1 q2`', 'sin cambiar una palabra', 'las mismas preguntas y opciones',
+                     'metadata.source', 'ask-queue answer', 'missing',
+                     # the ask gate's repeat backstop only reads this form; a batch can hold more than one dialog
+                     '`ask-queue:<id>,<id>`', 'hasta cuatro por diálogo', 'encadenados hasta la última'):
+            self.assertIn(part, text)
+        self.assertNotIn('Sigue exactamente donde lo dejaste', text)
+        self.assertIsNone(mod.LIMIT_TEXT.search(text))
+
+    def test_questions_steps_leave_supervisor_closer_and_cut_sessions_as_they_were(self):
+        for cli in ('boss', 'closer', 'box'):
+            self.idle(cli)
+            self.record(cli)
+        self.transcript('hard1', [user('x'), answer(LIMIT, error=True)])
+        folder = self.record('hard1')
+        self.demo_lock(session_id='local_boss', closer='local_closer')
+        item = self.item()
+        found = list(self.rows(folder).values())
+        self.assertEqual({s['sessionId']: s['kind'] for s in found},
+                         {'local_boss': 'watcher', 'local_closer': 'watcher', 'local_hard1': 'hard',
+                          'local_box': 'questions'})
+        self.event([], at=time.time() - 300)
+        data = self.saved_event()
+        data['sessions'] = found
+        with open(os.path.join(self.state, 'event.json'), 'w') as fh:
+            json.dump(data, fh)
+        lines = self.hook(mode='bypassPermissions').splitlines()
+        mod = self.module()
+        self.assertEqual(self.sent_text(lines, 'local_boss'), mod.watcher_text())
+        self.assertEqual(self.sent_text(lines, 'local_closer'), mod.watcher_text())
+        self.assertEqual(self.sent_text(lines, 'local_hard1'), mod.resume_text())
+        self.assertEqual(self.sent_text(lines, 'local_box'), mod.questions_text([item]))
+        self.assertEqual(sum(line.startswith('   - local_box ') for line in lines), 1)
+
+    def test_questions_mine_repeats_the_text_and_writes_nothing(self):
+        item = self.item()
+        self.questions_event([item], claimed_by='me', claimed_at=time.time() - 60)
+        before = self.saved_event()
+        rc, out = self.run_rc('mine', sid='me')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('local_box · box (sesión de preguntas', out)
+        self.assertIn(f'«{self.module().questions_text([item])}»', out)
+        self.assertEqual(self.saved_event(), before)
+        rc, out = self.run_rc('status')
+        self.assertIn('questions  local_box', out)
+
+
 class ModuleTest(unittest.TestCase):
     """The script loaded as a module, with the network, notifications, systemd and sleeps replaced."""
 
@@ -1230,6 +1613,24 @@ class ModuleTest(unittest.TestCase):
         head = notes[0][1].splitlines()[0]
         self.assertIn('límite semanal', head)
         self.assertIn(time.strftime('el %d-%m a las %H:%M', time.localtime(until)), head)
+
+    def questions_rows(self):
+        row = {"sessionId": "local_q", "cliSessionId": "q", "title": "q", "cwd": "/tmp", "kind": "questions",
+               "asked": ["q1"]}
+        self.write_event(sessions=[row])
+
+    def test_questions_notice_counts_the_questions_sessions(self):
+        self.questions_rows()
+        notes, _ = self.on_switch([None, None])   # the switch and the watchdog
+        text = notes[0][1]
+        self.assertIn('Sesiones de preguntas con preguntas sin contestar: 1. Se les pedirá que vuelvan a presentarlas.', text)
+        self.assertNotIn('se reanudarán solas', text)
+        self.assertNotIn('vigilante', text)
+
+    def test_questions_notice_is_left_out_while_the_new_account_has_no_usage(self):
+        self.questions_rows()
+        notes, _ = self.on_switch([{"until": time.time() + 3600, "what": "five_hour", "source": "usage"}, None])
+        self.assertNotIn('Sesiones de preguntas', notes[0][1])
 
     def test_on_switch_without_a_limit_keeps_the_old_text_and_schedules_nothing(self):
         self.write_event()

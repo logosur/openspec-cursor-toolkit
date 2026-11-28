@@ -236,6 +236,8 @@ def run(main) -> int:
         (tmp / 'home').mkdir()
         (tmp / 'config').mkdir()
         layout = build_thunderbird(tmp / 'profiles')
+        listed = list_messages()                       # a folder of no role: only a search that names it reads it
+        (layout['account_dir'] / 'Lists').write_bytes(mbox_format_b([listed['alpha1'], listed['plain']]))
         document = account_config(tmp / 'profiles')
         document['accounts']['remote'] = {'address': ADDRESS, 'backends': ['imap'],
                                           'imap': {'host': HOST, 'credentials_file': str(tmp / 'absent.env')}}
@@ -264,6 +266,12 @@ def run(main) -> int:
         check('the no-status note is given for the newer format',
               any('deleted or moved' in n for n in found.get('notes', [])))
         ids = {item['subject']: item['id'] for item in found.get('items', [])}
+        header = ('search', 'work', '--folder', 'Lists', '--header', 'List-ID: alpha', '--json')
+        first, again = invoke(*header), invoke(*header)
+        listing = [json.loads(out).get('items') if code == 0 else None for code, out, _ in (first, again)]
+        check('a repeated header search answers the same from the header index', listing[0] == listing[1]
+              and [item['subject'] for item in listing[0] or []] == ['Digest alpha 1']
+              and 'building the index of Lists' in first[2] and again[2] == '', str(listing) + again[2])
         code, out, _ = invoke('search', 'work', '--from', 'other@', '--subject', 'invoice', '--folder', 'inbox')
         check('filters combine', code == 0 and out.count('\nl:') == 1, out)
         code, out, _ = invoke('search', 'work', '--text', 'paid')

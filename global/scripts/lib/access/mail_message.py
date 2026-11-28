@@ -129,7 +129,8 @@ def mutf7_encode(name: str) -> str:
 # ---------------------------------------------------------------- headers, addresses, dates
 
 def decode_words(value) -> str:
-    """RFC 2047 words decoded; an unknown charset or broken encoding never raises."""
+    """RFC 2047 words decoded; an unknown charset or broken encoding never raises, and the result can always be encoded
+    as UTF-8 (a charset can name a codec that raises, or that yields lone surrogates)."""
     if isinstance(value, bytes):
         value = value.decode('utf-8', 'replace')
     value = str(value or '')
@@ -144,11 +145,11 @@ def decode_words(value) -> str:
         if isinstance(chunk, bytes):
             try:
                 out.append(chunk.decode(charset or 'utf-8', 'replace'))
-            except LookupError:
+            except Exception:  # noqa: BLE001 - not only LookupError: some codecs reject 'replace' or the bytes
                 out.append(chunk.decode('utf-8', 'replace'))
         else:
             out.append(chunk)
-    return ''.join(out).strip()
+    return ''.join(out).encode('utf-8', 'replace').decode('utf-8').strip()
 
 
 def parse_addresses(raw) -> list[tuple[str, str]]:

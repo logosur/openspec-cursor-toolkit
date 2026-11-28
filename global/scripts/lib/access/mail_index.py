@@ -8,6 +8,10 @@
   cache directory, never in a repository or a notes folder.
 * A message whose status flags carry the client's "deleted" bit is not indexed, and the bit is read again from the file
   for every result, because the client rewrites that line in place without changing the file's size.
+* Header index: the decoded, case-folded values of a few configured headers (`hdrs`). A row of `hdr_cov` says that every
+  value of that name of that message is there (possibly none); it is committed in the same transaction as the values,
+  and a trigger stored in the file removes both with the message row, also for a copy of this code that does not know
+  these tables. A message without that row is read from the file, so a missing or partial index never changes an answer.
 """
 from __future__ import annotations
 
@@ -22,6 +26,7 @@ from access.mail_message import Filters, Unavailable, decode_words, split_header
 
 VERSION = '3'
 BATCH = 2000
+PROGRESS_EVERY = BATCH       # messages between two progress reports of a build
 SIGNATURE_BYTES = 256
 DELETED = 0x0008
 
@@ -38,6 +43,19 @@ CREATE INDEX IF NOT EXISTS msgs_date ON msgs(date);
 CREATE INDEX IF NOT EXISTS msgs_start ON msgs(start);
 CREATE INDEX IF NOT EXISTS refs_ref ON refs(ref);
 CREATE INDEX IF NOT EXISTS refs_rid ON refs(rid);
+"""
+# apart from SCHEMA because a file written before it has to be written to take it; the trigger stays last, so no value
+# is ever kept in a file that lacks it
+HEADER_SCHEMA = """
+CREATE TABLE IF NOT EXISTS hdrs (rid INTEGER, name TEXT, value TEXT);
+CREATE INDEX IF NOT EXISTS hdrs_name ON hdrs(name, rid);
+CREATE INDEX IF NOT EXISTS hdrs_rid ON hdrs(rid);
+CREATE TABLE IF NOT EXISTS hdr_cov (rid INTEGER, name TEXT, PRIMARY KEY (name, rid));
+CREATE INDEX IF NOT EXISTS hdr_cov_rid ON hdr_cov(rid);
+CREATE TRIGGER IF NOT EXISTS msgs_headers_delete AFTER DELETE ON msgs BEGIN
+  DELETE FROM hdrs WHERE rid = old.rid;
+  DELETE FROM hdr_cov WHERE rid = old.rid;
+END;
 """
 COLUMNS = ('start, hstart, hend, mend, idh, mid, date, from_text, from_addr, from_party, rcpt, to_first, subject, att, '
            'st_off, st_len, has_status')
@@ -56,6 +74,26 @@ def _cf(value):
     return value.casefold() if isinstance(value, str) else ''
 
 
+def header_values(headers, name: str):
+    """The values of every occurrence of NAME in a parsed header list, as a header filter compares them."""
+    return (decode_words(value).casefold() for found, value, _ in headers if found == name)
+
+
+def any_contains(values, needle: str) -> bool:
+    """The one match of a header filter, on the file and on the index: NEEDLE in any value (an empty one: presence)."""
+    return any(needle in value for value in values)
+
+
+def _identity(row) -> tuple:
+    """What must be equal, besides the row id (ids are reused), for two rows to be the same message."""
+    return row['start'], row['hstart'], row['hend'], row['idh']
+
+
+def _state(info) -> tuple[str, str]:
+    """A file's size and modification time, as `meta` records them."""
+    return str(info.st_size), str(info.st_mtime_ns)
+
+
 def _signature(fh, start: int, limit: int) -> str:
     """Hash of the separator line and the first header bytes of the message at START, without the client's own
     status lines (they are rewritten in place)."""
@@ -66,9 +104,10 @@ def _signature(fh, start: int, limit: int) -> str:
 
 
 def message_row(fh, start: int, end: int):
-    """(row values as a tuple for COLUMNS, deleted?, reference ids) of the message at START."""
+    """(row values as a tuple for COLUMNS, deleted?, reference ids, parsed headers) of the message at START."""
     hstart, hend, block = mail_local.read_header_block(fh, start, end)
-    info = summarize(split_headers(block))
+    headers = split_headers(block)
+    info = summarize(headers)
     status = info['status']
     if info['mid']:
         idh = hashlib.sha1(info['mid'].encode('utf-8', 'replace')).hexdigest()[:12]
@@ -79,12 +118,16 @@ def message_row(fh, start: int, end: int):
     values = (start, hstart, hend, end, idh, info['mid'], info['date'], info['from_text'], info['from_addr'],
               info['from_party'], info['rcpt'], info['to_first'], info['subject'], 1 if info['att'] else 0,
               hstart + status[1] if status else -1, status[2] if status else 0, 1 if status else 0)
-    return values, deleted, info['refs']
+    return values, deleted, info['refs'], headers
 
 
 class FolderIndex:
-    def __init__(self, mbox: Path, directory: Path):
+    def __init__(self, mbox: Path, directory: Path, headers=(), progress=None):
+        """HEADERS: the lowercase names the header index keeps. PROGRESS(event, done, total) is told while an index is
+        being built (events `build`, `headers`; DONE 0 is the start)."""
         self.mbox = Path(mbox)
+        self.headers = tuple(sorted(set(headers)))
+        self.progress = progress or (lambda event, done, total: None)
         directory = Path(directory)
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(directory, 0o700)
@@ -96,6 +139,10 @@ class FolderIndex:
         self.db.row_factory = sqlite3.Row
         self.db.create_function('cf', 1, _cf, deterministic=True)
         self.db.executescript(SCHEMA)
+        try:
+            self.db.executescript(HEADER_SCHEMA)
+        except sqlite3.OperationalError:      # held by another run, read only or full: this run scans the file
+            self.headers = ()
         self.stats = RefreshStats()
 
     def close(self):
@@ -118,6 +165,7 @@ class FolderIndex:
         except OSError as exc:
             raise Unavailable(f'{self.mbox.name}: cannot be read ({type(exc).__name__})') from None
         meta = self.meta()
+        self._purge_headers(meta)
         if (meta.get('version') == VERSION and meta.get('size') == str(info.st_size)
                 and meta.get('mtime_ns') == str(info.st_mtime_ns)):
             return stats
@@ -155,6 +203,8 @@ class FolderIndex:
                 else:
                     self.db.execute('DELETE FROM refs WHERE rid IN (SELECT rid FROM msgs WHERE start >= ?)', (begin,))
                     self.db.execute('DELETE FROM msgs WHERE start >= ?', (begin,))
+                if rebuild and size:
+                    self.progress('build', 0, 0)
                 self._scan(fh, begin, size, chunk, stats)
                 self._put_meta(version=VERSION, size=size, mtime_ns=fstat.st_mtime_ns,
                                last_start=self._last_scanned, first_sig=self._first_sig(fh, size),
@@ -167,6 +217,32 @@ class FolderIndex:
 
     _last_scanned = -1
 
+    def _purge_headers(self, meta: dict):
+        """Forget the header names no longer configured, in one transaction. A database that refuses (locked by another
+        run) leaves it for the next one: rows that stay are still true."""
+        wanted = ','.join(self.headers)
+        if meta.get('hdr_names', '') == wanted:
+            return
+        marks = ','.join('?' * len(self.headers))
+        try:
+            self.db.execute('BEGIN IMMEDIATE')
+            try:
+                for table in ('hdrs', 'hdr_cov'):
+                    self.db.execute(f'DELETE FROM {table} WHERE name NOT IN ({marks})', self.headers)
+                self._put_meta(hdr_names=wanted)
+                self.db.execute('COMMIT')
+            except BaseException:
+                self.db.execute('ROLLBACK')
+                raise
+        except sqlite3.OperationalError:
+            pass
+
+    def _cover(self, rid: int, headers, name: str):
+        """Keep the values of NAME of one message, once, with the row saying they are all there. Inside a transaction."""
+        if self.db.execute('INSERT OR IGNORE INTO hdr_cov(rid, name) VALUES (?, ?)', (rid, name)).rowcount == 1:
+            self.db.executemany('INSERT INTO hdrs(rid, name, value) VALUES (?, ?, ?)',
+                                [(rid, name, value) for value in header_values(headers, name)])
+
     def _first_sig(self, fh, size: int) -> str:
         return _signature(fh, 0, size) if size and mail_local.first_separator_ok(fh, 0) else ''
 
@@ -174,28 +250,35 @@ class FolderIndex:
         stats.bytes_scanned = max(size - begin, 0)
         batch: list[tuple] = []
         refs_batch: list[tuple] = []
+        kept_batch: list[list] = []
         self._last_scanned = begin if begin > 0 else -1
         pending = None
 
         def flush():
-            nonlocal batch, refs_batch
+            nonlocal batch, refs_batch, kept_batch
             if not batch:
                 return
-            for values, refs in zip(batch, refs_batch):
+            for values, refs, kept in zip(batch, refs_batch, kept_batch):
                 cursor = self.db.execute(f'INSERT INTO msgs({COLUMNS}) VALUES ({",".join("?" * 17)})', values)
                 if refs:
                     self.db.executemany('INSERT INTO refs(rid, ref) VALUES (?, ?)', [(cursor.lastrowid, r) for r in refs])
-            batch, refs_batch = [], []
+                rid = cursor.lastrowid
+                for name in self.headers:
+                    self._cover(rid, kept, name)
+            batch, refs_batch, kept_batch = [], [], []
 
         def finish(start: int, end: int):
-            values, deleted, refs = message_row(fh, start, end)
+            values, deleted, refs, headers = message_row(fh, start, end)
             self._last_scanned = start
             if deleted:
                 stats.deleted_skipped += 1
                 return
             batch.append(values)
             refs_batch.append(refs)
+            kept_batch.append([header for header in headers if header[0] in self.headers])
             stats.messages += 1
+            if stats.rebuilt and stats.messages % PROGRESS_EVERY == 0:
+                self.progress('build', stats.messages, 0)
             if len(batch) >= BATCH:
                 flush()
 
@@ -263,6 +346,78 @@ class FolderIndex:
         live = self.live(rows)
         return live[0] if live else None
 
+    def header_lookup(self, rows, name: str, needle: str):
+        """`header_filter` for a name in `headers`: the same (matches, scanned), answering the messages the header index
+        covers from it, reading only the others from the file and keeping what was read for the next search."""
+        covered: dict[int, list] = {}      # rid -> [identity, matches]; one statement, so one snapshot
+        for row in self.db.execute(
+                'SELECT m.rid, m.start, m.hstart, m.hend, m.idh, h.value FROM hdr_cov c JOIN msgs m ON m.rid = c.rid '
+                'LEFT JOIN hdrs h ON h.rid = c.rid AND h.name = c.name WHERE c.name = ?', (name,)):
+            entry = covered.setdefault(row['rid'], [_identity(row), False])
+            if row['value'] is not None and any_contains((row['value'],), needle):
+                entry[1] = True
+        known = [covered.get(row['rid']) for row in rows]
+        known = [entry if entry and entry[0] == _identity(row) else None for row, entry in zip(rows, known)]
+        total = known.count(None)
+
+        out, scanned, reads = [], 0, 0
+        fh, opened_as, read, storing = None, None, [], True
+        try:
+            try:
+                for row, entry in zip(rows, known):
+                    if entry is not None:
+                        matched = entry[1]
+                    else:
+                        if fh is None:
+                            self.progress('headers', 0, total)
+                            fh = mail_local.open_mbox(self.mbox)
+                            opened_as = _state(os.fstat(fh.fileno()))
+                        fh.seek(row['hstart'])
+                        length = max(row['hend'] - row['hstart'], 0)
+                        block = fh.read(length)
+                        headers = split_headers(block)
+                        matched = any_contains(header_values(headers, name), needle)
+                        reads += 1
+                        if reads % PROGRESS_EVERY == 0:
+                            self.progress('headers', reads, total)
+                        if storing and len(block) == length:      # a short block is not the message's header
+                            read.append((row, [header for header in headers if header[0] in self.headers]))
+                            if len(read) >= BATCH:
+                                storing, read = self._store_headers(fh, opened_as, read), []
+                    scanned += 1
+                    if matched:
+                        out.append(row)
+            except OSError:
+                pass
+            if read and storing:
+                self._store_headers(fh, opened_as, read)
+        finally:
+            if fh is not None:
+                fh.close()
+        return out, scanned
+
+    def _store_headers(self, fh, opened_as: tuple, read: list) -> bool:
+        """Keep the headers READ [(row, parsed headers)] through FH, only while the file is the one the index describes:
+        as it was when opened, as `meta` records it and as it is now. False: keep nothing more in this run. A database
+        that cannot be written never fails the search."""
+        try:
+            self.db.execute('BEGIN IMMEDIATE')
+            try:
+                meta = self.meta()
+                same = (meta.get('size'), meta.get('mtime_ns')) == opened_as == _state(os.fstat(fh.fileno()))
+                for row, headers in read if same else ():
+                    if self.db.execute('SELECT 1 FROM msgs WHERE rid = ? AND start = ? AND hstart = ? AND hend = ? '
+                                       'AND idh = ?', (row['rid'], *_identity(row))).fetchone():
+                        for name in self.headers:
+                            self._cover(row['rid'], headers, name)
+                self.db.execute('COMMIT')
+            except BaseException:
+                self.db.execute('ROLLBACK')
+                raise
+        except (sqlite3.Error, OSError):
+            return False
+        return same
+
     def header_pairs(self, row) -> list[tuple[str, str]]:
         with mail_local.open_mbox(self.mbox) as fh:
             fh.seek(row['hstart'])
@@ -279,7 +434,7 @@ class FolderIndex:
                     fh.seek(row['hstart'])
                     block = fh.read(max(row['hend'] - row['hstart'], 0))
                     scanned += 1                      # counted once its header was read: a failed read is not a check
-                    if any(n == name and needle in decode_words(v).casefold() for n, v, _ in split_headers(block)):
+                    if any_contains(header_values(split_headers(block), name), needle):
                         out.append(row)
         except OSError:
             pass

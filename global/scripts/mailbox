@@ -42,10 +42,18 @@ Searching
   `--json` items (of `search` and of `thread`) carry `message_id`: the first Message-ID of the message, lowercase and
   without angle brackets, `null` when it has none. It is the same string on imap and on local, so compare it with other
   `message_id` values, not with the raw header that `show` prints; the text line does not show it.
-  --header 'Name: text' on `local` reads the header of at most `header_scan_max` messages per folder (default 50000; a key
+  --header 'Name: text' on `local` checks the header of at most `header_scan_max` messages per folder (default 50000; a key
   of `defaults` in the config piece), the newest left by the other filters, before the deleted-message check, and says so
   in a note when it stops there: narrow the search or raise the setting. A search that has to build a folder's index from
   scratch (the first one, or after the client compacted the folder) says so in a note with the message count.
+  The folder index also keeps the headers named by `index_headers` (a key of `defaults`: a list of header names, default
+  ["list-id"], [] turns it off; the client's X-Mozilla-* lines are never kept). A --header search on one of them is
+  answered from that header index, any other name is read from the folder file. The answer and the cut are the same either
+  way, except that a message the index already holds needs no read, so it is answered even when the file cannot be read.
+  Messages the index does not cover yet (an index built by an earlier version, a newly named header) are read by the first
+  such search, which gives the complete answer and keeps what it read.
+  While an index is being built, a folder from scratch or the header part of an existing one, progress lines (folder name
+  and counts) go to stderr; stdout and the --json document are not changed by them.
   `thread` follows Message-ID, In-Reply-To and References across the inbox and sent folders. On imap the lookup is
   bounded (the message's folder, the inbox and two sent folders, two rounds of header searches, and it says when a long
   thread was cut); when it fails after the message was read (a timeout, a dropped connection) and the account also has a
@@ -105,7 +113,7 @@ KNOWN_BACKENDS = ('imap', 'local', 'connector')
 DEFAULTS = {
     'accounts': {},
     'defaults': {'limit': 20, 'body_chars': 1500, 'line_width': 160, 'auth_cooldown_minutes': 30,
-                 'text_scan_max': 1000, 'imap_scan_max': 2000, 'header_scan_max': 50000},
+                 'text_scan_max': 1000, 'imap_scan_max': 2000, 'header_scan_max': 50000, 'index_headers': ['list-id']},
 }
 MINIMUM = {'header_scan_max': 1}      # a bound of 0 would turn every header search into an empty answer
 ACCOUNT_DEFAULTS = {
@@ -170,6 +178,14 @@ def _usable_number(value, minimum) -> bool:
         return False
 
 
+def _header_names(value, default) -> list:
+    """`index_headers` cleaned: lowercase names without repeats, the client's own status lines dropped (it rewrites them
+    in place, so a kept value would go stale); `[]` turns the header index off. Anything else is DEFAULT."""
+    if not isinstance(value, list) or not all(isinstance(n, str) and re.fullmatch(r'[A-Za-z0-9-]+', n) for n in value):
+        return list(default)
+    return [name for name in dict.fromkeys(n.lower() for n in value) if not name.startswith('x-mozilla-')]
+
+
 class Config:
     def __init__(self):
         raw, self.problem = settings.load(PIECE, DEFAULTS)
@@ -179,7 +195,10 @@ class Config:
         self.defaults = {}
         for key, default in DEFAULTS['defaults'].items():
             value = given.get(key, default)
-            self.defaults[key] = value if _usable_number(value, MINIMUM.get(key, 0)) else default
+            if isinstance(default, list):
+                self.defaults[key] = _header_names(value, default)
+            else:
+                self.defaults[key] = value if _usable_number(value, MINIMUM.get(key, 0)) else default
 
     def limit(self, given):
         return max(int(given if given is not None else self.defaults['limit']), 1)

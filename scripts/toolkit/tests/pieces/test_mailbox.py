@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import socket
+import sqlite3
 import ssl
 import stat
 import subprocess
@@ -2599,14 +2600,15 @@ class HeaderScanSetting(CliBase):
     def test_help_documents_the_identifier_the_bound_and_the_build_note(self):
         code, out, _ = self.run_cli('--help')
         self.assertEqual(code, 0)
-        for text in ('message_id', 'header_scan_max', 'from scratch', 'before the deleted-message check'):
+        for text in ('message_id', 'header_scan_max', 'from scratch', 'before the deleted-message check', 'index_headers',
+                     'go to stderr'):
             self.assertIn(text, ' '.join(out.split()), text)
 
     def test_the_contract_probes_the_help(self):
         import yaml
         contract = yaml.safe_load(Path(REPO_ROOT, 'global/contracts/mailbox.yaml').read_text())
         probed = {probe['contains'] for probe in contract['probes'] if probe['args'] == ['--help']}
-        self.assertLessEqual({'message_id', 'header_scan_max'}, probed)
+        self.assertLessEqual({'message_id', 'header_scan_max', 'index_headers'}, probed)
 
     def test_the_old_cut_is_not_hidden_in_the_index_module(self):
         text = Path(REPO_ROOT, 'global/scripts/lib/access/mail_index.py').read_text()
@@ -2658,7 +2660,7 @@ class HeaderFilterBase(CliBase):
             given['header'].append(len(rows))
             return header(index, rows, *rest)
 
-        backend = mail_local.LocalBackend(self.account(), {fx.ADDRESS}, defaults)
+        backend = mail_local.LocalBackend(self.account(), {fx.ADDRESS}, dict(defaults, index_headers=[]))
         try:
             with mock.patch.object(mail_index.FolderIndex, 'live', spy_live), \
                     mock.patch.object(mail_index.FolderIndex, 'header_filter', spy_header):
@@ -2727,7 +2729,7 @@ class HeaderFilterOrder(HeaderFilterBase):
                     raise OSError('read failed')
                 return self.handle.read(size)
 
-        backend = mail_local.LocalBackend(self.account(), {fx.ADDRESS}, {})
+        backend = mail_local.LocalBackend(self.account(), {fx.ADDRESS}, {'index_headers': []})
         wanted = mail_message.Filters(folder='inbox', header='List-ID: example')
         try:
             backend.search(wanted, 20)                       # builds the index: the next search opens the file only to read headers
@@ -2867,6 +2869,855 @@ class HeaderFilterSemantics(HeaderFilterBase):
         self.assertEqual(self.run_cli('search', 'work', '--header', 'no colon')[0], 2)               # malformed
         self.assertEqual(self.run_cli('search', 'work', '--backend', 'imap')[0], 3)                  # no such backend here
         self.assertEqual(self.run_cli('show', 'work', 'l:INBOX-1:000000000000')[0], 4)               # stale id
+
+
+# ---------------------------------------------------------------- the header index (mail_index)
+
+def forget_header_index(db_path):
+    """Leave the index file as the code before the header index writes it."""
+    db = sqlite3.connect(db_path)
+    db.executescript('DROP TRIGGER msgs_headers_delete; DROP TABLE hdrs; DROP TABLE hdr_cov;'
+                     "DELETE FROM meta WHERE key = 'hdr_names';")
+    db.commit()
+    db.close()
+
+
+def reinsert_as_the_earlier_code(db_path):
+    """Delete every message row and insert it again, with the statements of a copy that does not know the header
+    tables: the row ids are used again."""
+    db = sqlite3.connect(db_path)
+    columns = mail_index.COLUMNS
+    rows = db.execute(f'SELECT {columns} FROM msgs ORDER BY rid').fetchall()
+    db.execute('DELETE FROM msgs')
+    db.executemany(f'INSERT INTO msgs({columns}) VALUES ({",".join("?" * 17)})', rows)
+    db.commit()
+    db.close()
+
+
+def stored(db_path):
+    """(covered (rid, name) pairs, (rid, name, value) rows) of an index file."""
+    db = sqlite3.connect(db_path)
+    try:
+        return (sorted(db.execute('SELECT rid, name FROM hdr_cov')),
+                sorted(db.execute('SELECT rid, name, value FROM hdrs')))
+    finally:
+        db.close()
+
+
+class Handle:
+    """A folder file that counts the header reads, runs HOOK(number) before each and fails from read FAIL_AT on."""
+
+    def __init__(self, path, log, hook=None, fail_at=None):
+        self.handle, self.log, self.hook, self.fail_at = open(path, 'rb'), log, hook, fail_at
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def close(self):
+        self.handle.close()
+
+    def fileno(self):
+        return self.handle.fileno()
+
+    def seek(self, at):
+        return self.handle.seek(at)
+
+    def read(self, size=-1):
+        number = len(self.log) + 1
+        self.log.append('read')
+        if self.hook:
+            self.hook(number)
+        if self.fail_at and number >= self.fail_at:
+            raise OSError('read failed')
+        return self.handle.read(size)
+
+
+@contextlib.contextmanager
+def watched_files(**handle):
+    """Replace the one way the local backend opens a store file; yields (opened paths, reads)."""
+    opened, log = [], []
+
+    def open_mbox(path):
+        opened.append(path)
+        return Handle(path, log, **handle)
+
+    with mock.patch.object(mail_local, 'open_mbox', open_mbox):
+        yield opened, log
+
+
+class HeaderIndexBase(Base):
+    NEEDLES = ('alpha', 'beta', 'second', '', 'nothing like this', '.example.org')
+    KEYS = ('alpha1', 'alpha2', 'beta1', 'twice', 'plain', 'noid', 'mixed')
+
+    def setUp(self):
+        super().setUp()
+        self.extra = fx.list_messages()
+        self.box = Path(self.tmp, 'box')
+        self.write_box(*self.KEYS)
+
+    def write_box(self, *keys):
+        self.box.write_bytes(fx.mbox_format_b([self.extra[k] for k in keys]))
+
+    def index(self, headers=('list-id',), refresh=True):
+        index = mail_index.FolderIndex(self.box, Path(self.tmp, 'index'), headers)
+        self.addCleanup(index.close)
+        if refresh:
+            index.refresh()
+        return index
+
+    def old_index(self):
+        index = self.index()
+        index.close()
+        forget_header_index(index.db_path)
+        return self.index()
+
+    def rows(self, index):
+        return index.select(mail_message.Filters())
+
+    def ask(self, index, method, needle, rows=None):
+        rows = self.rows(index) if rows is None else rows
+        matches, scanned = getattr(index, method)(rows, 'list-id', needle)
+        return [row['subject'] for row in matches], scanned
+
+    def assert_as_the_scan(self, index):
+        for needle in self.NEEDLES:
+            self.assertEqual(self.ask(index, 'header_lookup', needle), self.ask(index, 'header_filter', needle), needle)
+
+    def assert_stored_once(self, index):
+        covered, values = stored(index.db_path)
+        self.assertEqual(len(covered), index.count())
+        self.assertEqual(len(values), 5)               # four messages have the header, one of them twice
+
+
+class HeaderIndexSchema(HeaderIndexBase):
+    def test_an_older_index_file_gains_the_tables_without_a_rebuild_and_deletes_cascade(self):
+        index = self.old_index()
+        self.assertEqual((index.stats.rebuilt, index.stats.opened), (False, False))
+        self.assertEqual(stored(index.db_path), ([], []))
+        self.ask(index, 'header_lookup', '')
+        self.assert_stored_once(index)
+        db = sqlite3.connect(index.db_path)
+        self.addCleanup(db.close)
+        db.execute('DELETE FROM msgs WHERE rid = 1')
+        db.commit()
+        self.assertNotIn(1, [rid for rid, _ in stored(index.db_path)[0]])
+        self.assertNotIn(1, [rid for rid, _, _ in stored(index.db_path)[1]])
+        db.execute('DELETE FROM msgs')
+        db.commit()
+        self.assertEqual(stored(index.db_path), ([], []))
+
+    def test_a_build_keeps_every_occurrence_decoded_and_case_folded(self):
+        self.box.write_bytes(fx.mbox_format_b([self.extra['twice'],
+                                               with_raw_header('List-ID', b'=?utf-8?q?Caf=C3=89?= <C.example.org>', 1),
+                                               self.extra['plain']]))
+        index = self.index()
+        covered, values = stored(index.db_path)
+        self.assertEqual(len(covered), 3)
+        self.assertEqual([v for _, _, v in values], ['<first.example.org>', '<second.example.org>', 'café <c.example.org>'])
+
+    def test_appended_mail_and_a_compaction_keep_the_rows_with_their_messages(self):
+        index = self.index()
+        with open(self.box, 'ab') as handle:
+            handle.write(fx.mbox_format_b([self.extra['alpha1'].replace(b'alpha-1@', b'alpha-3@')]))
+        self.assertFalse(index.refresh().rebuilt)
+        self.assertEqual(len(stored(index.db_path)[0]), 8)
+        self.assertEqual(len(stored(index.db_path)[1]), 6)
+        self.write_box('beta1', 'plain')
+        self.assertTrue(index.refresh().rebuilt)
+        self.assertEqual(stored(index.db_path), ([(1, 'list-id'), (2, 'list-id')],
+                                                 [(1, 'list-id', 'beta list <beta.example.org>')]))
+        with watched_files() as (opened, _):
+            self.assertEqual(self.ask(index, 'header_lookup', 'beta'), (['Digest beta 1'], 2))
+        self.assertEqual(opened, [])
+
+    def test_names_no_longer_configured_are_purged_even_for_an_unchanged_folder(self):
+        first = self.index(('list-id', 'message-id'))
+        self.assertEqual({name for _, name in stored(first.db_path)[0]}, {'list-id', 'message-id'})
+        second = self.index()
+        self.assertFalse(second.stats.opened)
+        self.assertEqual({name for _, name in stored(second.db_path)[0]}, {'list-id'})
+        self.assertEqual({name for _, name, _ in stored(second.db_path)[1]}, {'list-id'})
+        self.index(())
+        self.assertEqual(stored(second.db_path), ([], []))
+        again = self.index()                                   # added back: no coverage until a search completes it
+        self.assertEqual(stored(again.db_path), ([], []))
+        self.assert_as_the_scan(again)
+        self.assert_stored_once(again)
+
+
+class HeaderLookup(HeaderIndexBase):
+    def test_covered_rows_answer_as_the_scan_without_opening_the_file(self):
+        index = self.index()
+        self.assert_as_the_scan(index)
+        with watched_files() as (opened, _):
+            for needle in self.NEEDLES:
+                self.ask(index, 'header_lookup', needle)
+        self.assertEqual(opened, [])
+
+    def test_uncovered_and_mixed_rows_answer_as_the_scan(self):
+        index = self.old_index()
+        rows = self.rows(index)
+        for needle in self.NEEDLES:
+            db = sqlite3.connect(index.db_path)
+            db.executescript('DELETE FROM hdrs; DELETE FROM hdr_cov;')
+            db.close()
+            self.assertEqual(self.ask(index, 'header_lookup', needle), self.ask(index, 'header_filter', needle), needle)
+            index.db.execute('DELETE FROM hdr_cov WHERE rid IN (2, 5)')      # mixed: some covered, some not
+            index.db.execute('DELETE FROM hdrs WHERE rid IN (2, 5)')
+            with watched_files() as (_, reads):
+                answered = self.ask(index, 'header_lookup', needle, rows)
+            self.assertEqual(len(reads), 2)
+            self.assertEqual(answered, self.ask(index, 'header_filter', needle), needle)
+
+    def test_a_failed_read_stops_the_pass_as_in_the_scan(self):
+        index = self.old_index()
+        for needle in self.NEEDLES:
+            index.db.execute('DELETE FROM hdr_cov')
+            index.db.execute('DELETE FROM hdrs')
+            with watched_files(fail_at=3):
+                scan = self.ask(index, 'header_filter', needle)
+            with watched_files(fail_at=3):
+                lookup = self.ask(index, 'header_lookup', needle)
+            self.assertEqual(lookup, scan, needle)
+            self.assertEqual(lookup[1], 2)
+
+    def test_a_file_that_cannot_be_opened_checks_nothing_uncovered(self):
+        index = self.old_index()
+        with mock.patch.object(mail_local, 'open_mbox', side_effect=OSError('gone')):
+            self.assertEqual(self.ask(index, 'header_lookup', ''), ([], 0))
+
+    def test_an_old_index_is_completed_once(self):
+        index = self.old_index()
+        with watched_files() as (opened, reads):
+            first = self.ask(index, 'header_lookup', 'alpha')
+        self.assertEqual((first[1], len(opened), len(reads)), (7, 1, 7))
+        self.assert_stored_once(index)
+        with watched_files() as (opened, _):
+            self.assertEqual(self.ask(index, 'header_lookup', 'alpha'), first)
+        self.assertEqual(opened, [])
+
+    def test_an_interrupted_completion_keeps_whole_batches_only(self):
+        index = self.old_index()
+
+        def interrupt(number):
+            if number == 6:
+                raise KeyboardInterrupt
+
+        with mock.patch.object(mail_index, 'BATCH', 2), watched_files(hook=interrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.ask(index, 'header_lookup', 'alpha')
+        self.assertFalse(index.db.in_transaction)
+        self.assertEqual(len(stored(index.db_path)[0]), 4)
+        with watched_files() as (_, reads):
+            self.ask(index, 'header_lookup', 'alpha')
+        self.assertEqual(len(reads), 3)
+        self.assert_stored_once(index)
+        self.assert_as_the_scan(index)
+
+    def test_a_file_that_changed_since_the_refresh_gets_nothing_stored(self):
+        index = self.old_index()
+
+        def append(number):
+            if number == 3:
+                with open(self.box, 'ab') as handle:
+                    handle.write(fx.mbox_format_b([self.extra['long']]))
+
+        expected = self.ask(index, 'header_filter', 'alpha')
+        with mock.patch.object(mail_index, 'BATCH', 4), watched_files(hook=append):
+            self.assertEqual(self.ask(index, 'header_lookup', 'alpha'), expected)
+        self.assertEqual(stored(index.db_path), ([], []))
+
+    def test_rows_rewritten_by_a_copy_that_does_not_know_the_tables(self):
+        index = self.index()
+        before = [row['rid'] for row in self.rows(index)]
+        reinsert_as_the_earlier_code(index.db_path)
+        self.assertEqual([row['rid'] for row in self.rows(index)], before)           # the ids are used again
+        self.assertEqual(stored(index.db_path), ([], []))
+        with watched_files() as (_, reads):
+            self.ask(index, 'header_lookup', 'alpha')
+        self.assertEqual(len(reads), 7)
+        self.assert_as_the_scan(index)
+
+
+class HeaderIndexInterruptedAndConcurrent(HeaderIndexBase):
+    def test_a_second_run_completing_the_same_messages_doubles_nothing(self):
+        first = self.old_index()
+        second = self.index()
+        answers = []
+
+        def overtake(number):
+            if number == 3 and not answers:
+                answers.append(None)                          # once: the second run reads through this handle too
+                answers.append(self.ask(second, 'header_lookup', 'alpha'))
+
+        expected = self.ask(first, 'header_filter', 'alpha')
+        with watched_files(hook=overtake):
+            self.assertEqual(self.ask(first, 'header_lookup', 'alpha'), expected)
+        self.assertEqual(answers[1], expected)
+        self.assert_stored_once(first)
+
+    def test_a_rewrite_and_refresh_while_reading_stores_nothing_of_the_old_content(self):
+        # two copies of one message with different list headers of the same length: after the swap the same row id,
+        # offsets and identifier belong to the other copy, so only the state of the file tells them apart
+        one = self.extra['alpha1']
+        two = one.replace(b'Alpha list <alpha.', b'Gamma list <gamma.')
+        self.assertEqual(len(one), len(two))
+        plain = self.extra['plain']
+        self.box.write_bytes(fx.mbox_format_b([plain, one, two, plain.replace(b'plain-1@', b'plain-2@')]))
+        index = self.old_index()
+        other = self.index(())          # a run that keeps no header: only the first run could write one
+        for at in (1, 2, 4):
+            index.db.execute('DELETE FROM hdr_cov')
+            index.db.execute('DELETE FROM hdrs')
+            done = []
+
+            def swap(number):
+                if number == at and not done:
+                    done.append(True)
+                    self.box.write_bytes(fx.mbox_format_b(
+                        [plain.replace(b'plain-1@', b'plain-3@'), two, one, plain.replace(b'plain-1@', b'plain-4@')]))
+                    stamp = time.time() + 30 * at
+                    os.utime(self.box, (stamp, stamp))
+                    self.assertTrue(other.refresh().rebuilt)
+
+            rows = self.rows(index)
+            with mock.patch.object(mail_index, 'BATCH', 100), watched_files(hook=swap):
+                index.header_lookup(rows, 'list-id', 'alpha')
+            self.assertEqual(stored(index.db_path), ([], []), at)
+            self.assert_as_the_scan(index)
+            self.box.write_bytes(fx.mbox_format_b([plain, one, two, plain.replace(b'plain-1@', b'plain-2@')]))
+            other.refresh()
+
+    def test_rows_selected_before_another_run_rebuilt_are_not_answered_from_the_new_ones(self):
+        one = self.extra['alpha1']
+        two = one.replace(b'alpha-1@', b'gamma-1@').replace(b'Alpha list <alpha.', b'Gamma list <gamma.')
+        self.box.write_bytes(fx.mbox_format_b([one, two]))
+        index = self.index()
+        rows = self.rows(index)
+        self.box.write_bytes(fx.mbox_format_b([two, one]))
+        stamp = time.time() + 30
+        os.utime(self.box, (stamp, stamp))
+        self.assertTrue(self.index().stats.rebuilt)
+        with watched_files() as (_, reads):
+            index.header_lookup(rows, 'list-id', 'alpha')
+        self.assertEqual(len(reads), 2)
+
+    def test_a_database_another_process_holds_does_not_fail_the_search(self):
+        index = self.old_index()
+        holder = sqlite3.connect(index.db_path, isolation_level=None)
+        self.addCleanup(holder.close)
+        holder.execute('BEGIN IMMEDIATE')
+        index.db.execute('PRAGMA busy_timeout = 20')
+        expected = self.ask(index, 'header_filter', 'alpha')
+        with mock.patch.object(mail_index, 'BATCH', 2):
+            self.assertEqual(self.ask(index, 'header_lookup', 'alpha'), expected)
+        self.assertFalse(index.db.in_transaction)
+        holder.execute('ROLLBACK')
+        self.assertEqual(stored(index.db_path), ([], []))
+        self.assert_as_the_scan(index)
+
+    def test_an_interrupted_build_leaves_nothing_and_the_next_run_builds_it_whole(self):
+        real, seen = mail_index.message_row, []
+
+        def interrupted(*args):
+            seen.append(True)
+            if len(seen) == 5:
+                raise KeyboardInterrupt
+            return real(*args)
+
+        index = self.index(refresh=False)
+        with mock.patch.object(mail_index, 'BATCH', 2), mock.patch.object(mail_index, 'message_row', interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                index.refresh()
+        self.assertEqual((index.count(), stored(index.db_path)), (0, ([], [])))
+        self.assertTrue(index.refresh().rebuilt)
+        self.assertEqual(index.count(), 7)
+        self.assert_stored_once(index)
+        self.assert_as_the_scan(index)
+
+
+class HeaderIndexTwoProcesses(CliBase):
+    def test_two_searches_at_once_on_the_same_old_index(self):
+        entries = [fx.message(f'Digest {n:04d}', fx.OTHER, fx.ADDRESS, 'Mon, 02 Nov 2026 10:00:00 +0000',
+                              f'bulk-{n}@example.org', extra=[('List-ID', f'<{"odd" if n % 2 else "even"}.example.org>')])
+                   for n in range(600)]
+        self.lay['inbox'].write_bytes(fx.mbox_format_b(entries))
+        args = ('search', 'work', '--folder', 'inbox', '--json', '--header', 'List-ID: odd', '--limit', '600')
+        self.assertEqual(self.run_cli(*args)[0], 0)
+        [db_path] = Path(self.cache).rglob('index-*.sqlite')
+        full = {k: v for k, v in os.environ.items() if not k.startswith(('CLAUDE_', 'MAILBOX'))}
+        full.update(self.env)
+        for _ in range(3):
+            forget_header_index(db_path)
+            running = [subprocess.Popen([sys.executable, SCRIPT, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                        text=True, env=full, cwd=self.home) for _ in range(2)]
+            for process in running:
+                out, err = process.communicate(timeout=300)
+                self.assertEqual(process.returncode, 0, err)
+                self.assertEqual(json.loads(out)['total'], 300)
+            covered, values = stored(db_path)
+            self.assertEqual((len(covered), len(values)), (600, 600))
+
+
+# ---------------------------------------------------------------- undecodable values
+
+UNDECODABLE = (b'=?idna?q?alpha?=', b'=?undefined?q?alpha?=', b'=?utf-7?q?+2AA-?=', b'=?unicode_escape?q?=5Cud800?=')
+
+
+def with_raw_header(name: str, word: bytes, number: int, subject: str = 'Raw header') -> bytes:
+    """A message whose header NAME is the bytes WORD as written (the email library would re-encode an encoded word)."""
+    marker = b'PLACEHOLDER'
+    if name == 'Subject':
+        raw = fx.message(marker.decode(), fx.OTHER, fx.ADDRESS, 'Tue, 17 Nov 2026 08:00:00 +0000', f'raw-{number}@example.org')
+    else:
+        raw = fx.message(subject, fx.OTHER, fx.ADDRESS, 'Tue, 17 Nov 2026 08:00:00 +0000', f'raw-{number}@example.org',
+                         extra=[(name, marker.decode())])
+    return raw.replace(marker, word)
+
+
+class Undecodable(Base):
+    def test_a_decoder_that_raises_or_yields_surrogates_gives_storable_text(self):
+        for word in UNDECODABLE:
+            value = mail_message.decode_words(word)
+            self.assertIsInstance(value.encode('utf-8'), bytes, word)
+        self.assertEqual(mail_message.decode_words(b'=?idna?q?alpha?='), 'alpha')
+        self.assertEqual(mail_message.decode_words(b'=?utf-8?q?Caf=C3=A9?= one'), 'Café one')
+
+    def test_a_folder_holding_them_as_subject_and_list_id_is_indexed(self):
+        box = Path(self.tmp, 'box')
+        entries = [with_raw_header('Subject', word, n) for n, word in enumerate(UNDECODABLE)]
+        entries += [with_raw_header('List-ID', word, n + 10) for n, word in enumerate(UNDECODABLE)]
+        box.write_bytes(fx.mbox_format_b(entries))
+        index = mail_index.FolderIndex(box, Path(self.tmp, 'index'))
+        self.addCleanup(index.close)
+        index.refresh()
+        self.assertEqual(index.count(), 8)
+
+
+# ---------------------------------------------------------------- the header index: the setting
+
+class IndexHeadersSetting(CliBase):
+    def kept(self, value):
+        config = fx.account_config(self.root)
+        config['defaults'] = {'index_headers': value}
+        self.write_config(config)
+        return load_cli().Config().defaults['index_headers']
+
+    def test_the_shipped_default_is_the_code_default(self):
+        shipped = json.loads(Path(REPO_ROOT, 'global/config/mailbox.json').read_text())['defaults']
+        self.assertEqual(shipped['index_headers'], ['list-id'])
+        self.assertEqual(load_cli().DEFAULTS['defaults']['index_headers'], ['list-id'])
+        self.assertEqual(load_cli().Config().defaults['index_headers'], ['list-id'])       # the key left out
+
+    def test_names_are_lowercased_deduplicated_and_the_status_lines_dropped(self):
+        self.assertEqual(self.kept(['List-ID', 'list-id', 'X-Mozilla-Status', 'Reply-To']), ['list-id', 'reply-to'])
+        self.assertEqual(self.kept([]), [])
+        self.assertEqual(self.kept(['x-mozilla-keys']), [])
+
+    def test_a_mistyped_value_is_the_default_without_a_traceback(self):
+        for bad in ('list-id', 3, None, {}, True, [3], [''], ['list id'], ['list-id', 'a:b'], ['list-id\n'], [None]):
+            self.assertEqual(self.kept(bad), ['list-id'], repr(bad))
+            code, out, err = self.run_cli('search', 'work', '--header', 'Message-ID: lunch')
+            self.assertEqual(code, 0, (bad, err))
+            self.assertNotIn('Traceback', err)
+            self.assertEqual(len(self.lines(out)), 1, repr(bad))
+
+
+# ---------------------------------------------------------------- the header index: the same answer on both paths
+
+ENCODED_ID = b'=?utf-8?B?Q2Fmw6kgTGlzdGEgPGNhZmUuZXhhbXBsZS5vcmc+?='       # "Caf\u00e9 Lista <cafe.example.org>"
+
+
+class TwoPaths(CliBase):
+    """Every search runs with `index_headers` `[]` (the scan) and `["list-id"]` (the index), each with a cache of its
+    own, and both documents must be equal apart from the age of the copy and the build note."""
+
+    FILTERS = (
+        ('--header', 'List-ID: ALPHA'),
+        ('--header', 'list-id: caf\u00c9 LISTA'),
+        ('--header', 'List-ID: second'),
+        ('--header', 'List-ID:'),
+        ('--header', 'List-ID: nothing like this'),
+        ('--header', 'List-ID: example', '--since', '2026-11-10'),
+        ('--header', 'List-ID: list', '--from', 'LIST@'),
+        ('--header', 'List-ID: list', '--limit', '1'),
+        ('--header', 'List-ID: list', '--text', 'Hello'),
+        ('--header', 'Message-ID: alpha'),                 # a header that is not in `index_headers`
+        ('--header', 'X-Absent: x'),
+        ('--header', 'X-Absent:'),
+        (),
+    )
+
+    def setUp(self):
+        super().setUp()
+        self.cli = load_cli()
+        self.extra = fx.list_messages()
+        encoded = fx.message('Encoded list', 'List <list@example.org>', fx.ADDRESS, 'Sun, 08 Nov 2026 08:00:00 +0000',
+                             'encoded-1@example.org', extra=[('List-ID', 'PLACEHOLDER')])
+        self.extra['encoded_id'] = encoded.replace(b'PLACEHOLDER', ENCODED_ID)
+        bare = fx.message('Stored twice', 'List <list@example.org>', fx.ADDRESS, 'Sat, 07 Nov 2026 08:00:00 +0000',
+                          'dup-1@example.org')
+        self.extra['dup_with'] = bare.replace(b'Subject:', b'List-ID: <dup.example.org>\r\nSubject:', 1)
+        self.extra['dup_without'] = bare
+        self.write_inbox('dup_with', 'alpha1', 'alpha2', 'beta1', 'twice', 'plain', 'noid', 'mixed', 'encoded_id',
+                         'dup_without')
+        self.lay['sent'].write_bytes(fx.mbox_format_a([(self.extra[k], 0x0001) for k in ('alpha1', 'beta1', 'plain')]))
+
+    def write_inbox(self, *keys):
+        self.lay['inbox'].write_bytes(fx.mbox_format_b([self.extra[k] for k in keys]))
+
+    def configure(self, headers, **defaults):
+        config = fx.account_config(self.root)
+        config['defaults'] = dict(defaults, index_headers=headers)
+        self.write_config(config)
+
+    def cache_of(self, path):
+        return str(Path(self.tmp, f'cache-{path}'))
+
+    def run_path(self, path, *args, **defaults):
+        self.configure([] if path == 'scan' else ['list-id'], **defaults)
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {'XDG_CACHE_HOME': self.cache_of(path)}), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = self.cli.main(['search', 'work', '--json', *args])
+        document = json.loads(out.getvalue())
+        document['freshness'] = _no_age(document['freshness'])
+        document['notes'] = [n for n in document['notes'] if 'was built from scratch' not in n]
+        return code, document
+
+    def same(self, *args, **defaults):
+        scan, index = self.run_path('scan', *args, **defaults), self.run_path('index', *args, **defaults)
+        self.assertEqual(scan, index, args)
+        self.assertEqual(scan[0], 0, args)
+        return scan[1]
+
+    def all_filters(self):
+        return {args: self.same(*args) for args in self.FILTERS}
+
+    def flag_deleted(self, subject: bytes):
+        data = self.lay['sent'].read_bytes()
+        status = data.rindex(b'X-Mozilla-Status: 0001', 0, data.index(subject))
+        with open(self.lay['sent'], 'r+b') as handle:
+            handle.seek(status + len(b'X-Mozilla-Status: '))
+            handle.write(b'0009')
+        stamp = time.time() + 30
+        os.utime(self.lay['sent'], (stamp, stamp))
+
+    def test_the_same_documents_on_a_fresh_build_and_on_a_second_run(self):
+        first = self.all_filters()
+        subjects = lambda args: sorted(i['subject'] for i in first[args]['items'])
+        # the fixtures do exercise what they claim to
+        self.assertEqual(subjects(('--header', 'list-id: caf\u00c9 LISTA')), ['Encoded list'])
+        self.assertEqual(subjects(('--header', 'List-ID: second')), ['Two list headers'])
+        self.assertIn('Stored twice', subjects(('--header', 'List-ID:')))
+        self.assertNotIn('Plain note', subjects(('--header', 'List-ID:')))
+        self.assertEqual(subjects(('--header', 'List-ID: nothing like this')), [])
+        self.assertTrue(subjects(('--header', 'Message-ID: alpha')))
+        self.assertEqual(self.all_filters(), first)
+
+    def test_a_message_flagged_deleted_since_indexing(self):
+        self.all_filters()
+        self.flag_deleted(b'Digest beta 1')
+        document = self.same('--folder', 'sent', '--header', 'List-ID:')
+        self.assertEqual([i['subject'] for i in document['items']], ['Digest alpha 1'])
+        self.all_filters()
+
+    def test_the_cut_and_its_note_are_the_same(self):
+        # just built, covered, then an index of the earlier code (partly covered as the searches go)
+        for state in ('built', 'covered', 'earlier'):
+            for db_path in self.index_files() if state == 'earlier' else ():
+                forget_header_index(db_path)
+            for cut in (1, 2, 5):
+                for args in (('--header', 'List-ID: alpha'), ('--header', 'List-ID:'),
+                             ('--header', 'List-ID: list', '--since', '2026-11-10')):
+                    document = self.same(*args, header_scan_max=cut)
+                    self.assertTrue([n for n in document['notes'] if f'--header checked the newest {cut} of' in n],
+                                    (state, cut, args))
+
+
+    def index_files(self):
+        return sorted(Path(self.cache_of('index')).rglob('index-*.sqlite'))
+
+    def test_appended_mail_and_a_compaction(self):
+        self.all_filters()
+        with open(self.lay['inbox'], 'ab') as handle:
+            handle.write(fx.mbox_format_b([self.extra['alpha1'].replace(b'alpha-1@', b'alpha-9@')]))
+        appended = self.all_filters()
+        self.assertEqual(appended[('--header', 'List-ID: ALPHA')]['total'], 3)
+        self.write_inbox('alpha2', 'twice', 'encoded_id')                      # compacted: shorter
+        compacted = self.all_filters()
+        self.assertEqual(compacted[('--header', 'List-ID: second')]['total'], 1)
+
+    def test_an_index_written_by_the_earlier_code_and_one_rewritten_by_an_older_copy(self):
+        first = self.all_filters()
+        for change in (forget_header_index, reinsert_as_the_earlier_code):
+            for db_path in self.index_files():
+                change(db_path)
+            self.assertEqual(self.all_filters(), first, change.__name__)
+
+    def test_values_that_cannot_be_decoded(self):
+        entries = [with_raw_header('List-ID', word, n, f'Raw list {n}') for n, word in enumerate(UNDECODABLE)]
+        entries.append(with_raw_header('Subject', UNDECODABLE[0], 9))
+        self.lay['inbox'].write_bytes(fx.mbox_format_b(entries))
+        for _ in range(2):
+            self.assertEqual(self.same('--folder', 'inbox', '--header', 'List-ID:')['total'], 4)
+            self.assertEqual(self.same('--folder', 'inbox', '--header', 'List-ID: alpha')['total'], 2)
+
+    def test_a_failed_read_while_completing(self):
+        self.all_filters()
+        results = []
+        for headers, cache in (([], 'scan'), (['list-id'], 'index')):
+            if headers:
+                for db_path in self.index_files():
+                    forget_header_index(db_path)
+            with mock.patch.dict(os.environ, {'XDG_CACHE_HOME': self.cache_of(cache)}):
+                backend = mail_local.LocalBackend(self.account(), {fx.ADDRESS}, {'index_headers': headers})
+                try:
+                    backend.search(mail_message.Filters(folder='inbox'), 20)      # refreshed: only header reads follow
+                    with watched_files(fail_at=4):
+                        result = backend.search(mail_message.Filters(folder='inbox', header='List-ID:'), 20)
+                finally:
+                    backend.close()
+            results.append(([i.subject for i in result.items], result.total, result.notes))
+        self.assertEqual(results[0], results[1])
+        self.assertTrue([n for n in results[0][2] if 'checked the newest 3 of' in n], results[0][2])
+
+
+# ---------------------------------------------------------------- the header index: the search
+
+class HeaderIndexSearch(HeaderFilterBase):
+    def searched(self, header, headers=('list-id',), folder='inbox'):
+        """Run the local backend in-process; return (result, opens, header reads, calls of `header_filter`)."""
+        calls = []
+        real = mail_index.FolderIndex.header_filter
+
+        def spy(index, rows, *rest):
+            calls.append(len(rows))
+            return real(index, rows, *rest)
+
+        backend = mail_local.LocalBackend(self.account(), {fx.ADDRESS}, {'index_headers': list(headers)})
+        try:
+            with watched_files() as (opened, reads), mock.patch.object(mail_index.FolderIndex, 'header_filter', spy):
+                result = backend.search(mail_message.Filters(folder=folder, header=header), 20)
+        finally:
+            backend.close()
+        return result, len(opened), len(reads), calls
+
+    def build(self, headers=('list-id',), folder='inbox'):
+        backend = mail_local.LocalBackend(self.account(), {fx.ADDRESS}, {'index_headers': list(headers)})
+        try:
+            backend.search(mail_message.Filters(folder=folder), 20)
+            return backend.index('INBOX-1').db_path
+        finally:
+            backend.close()
+
+    def test_a_covered_search_opens_no_folder_file_and_runs_no_scan(self):
+        self.build()
+        result, opened, _, calls = self.searched('List-ID: alpha')
+        self.assertEqual((result.total, opened, calls), (2, 0, []))
+
+    def test_without_a_setting_the_default_name_is_indexed(self):
+        backend = mail_local.LocalBackend(self.account(), {fx.ADDRESS}, {})
+        self.addCleanup(backend.close)
+        self.assertEqual(backend.index('INBOX-1').headers, ('list-id',))
+
+    def test_a_name_that_is_not_configured_is_scanned_and_nothing_is_stored_for_it(self):
+        db_path = self.build()
+        before = stored(db_path)
+        result, _, _, calls = self.searched('Message-ID: alpha')
+        self.assertEqual((result.total, calls), (2, [7]))
+        self.assertEqual(stored(db_path), before)
+
+    def test_the_index_turned_off(self):
+        db_path = self.build(headers=())
+        result, _, _, calls = self.searched('List-ID: alpha', headers=())
+        self.assertEqual((result.total, calls), (2, [7]))
+        self.assertEqual(stored(db_path), ([], []))
+
+    def test_a_search_without_a_header_reads_nothing_for_the_index(self):
+        db_path = self.build()
+        forget_header_index(db_path)
+        backend = mail_local.LocalBackend(self.account(), {fx.ADDRESS}, {})
+        try:
+            with watched_files() as (opened, _):
+                backend.search(mail_message.Filters(folder='inbox', subject='digest'), 20)
+        finally:
+            backend.close()
+        self.assertEqual((opened, stored(db_path)), ([], ([], [])))
+
+    def test_an_old_index_gives_the_whole_answer_at_once_without_a_build_note(self):
+        forget_header_index(self.build())
+        result, _, reads, calls = self.searched('List-ID: alpha')
+        self.assertEqual((result.total, reads, calls), (2, 7, []))
+        self.assertFalse([n for n in result.notes if 'built from scratch' in n])
+        self.assertEqual(self.searched('List-ID: alpha')[1], 0)
+
+    def test_after_appended_mail_the_search_reads_no_header(self):
+        self.build()
+        with open(self.lay['inbox'], 'ab') as handle:
+            handle.write(fx.mbox_format_b([self.extra['alpha1'].replace(b'alpha-1@', b'alpha-9@')]))
+        backend = mail_local.LocalBackend(self.account(), {fx.ADDRESS}, {})
+        try:
+            self.assertFalse(backend.index('INBOX-1').stats.rebuilt)            # the refresh reads, here
+            with watched_files() as (opened, _):
+                result = backend.search(mail_message.Filters(folder='inbox', header='List-ID: alpha'), 20)
+        finally:
+            backend.close()
+        self.assertEqual((result.total, opened), (3, []))
+
+    def test_a_search_answers_while_another_process_holds_the_index(self):
+        db_path = self.build()
+        forget_header_index(db_path)
+        self.build(headers=())                                       # the tables are back, nothing covered
+        db = sqlite3.connect(db_path, isolation_level=None)
+        self.addCleanup(db.close)
+        backend = mail_local.LocalBackend(self.account(), {fx.ADDRESS}, {})
+        self.addCleanup(backend.close)
+        backend.index('INBOX-1').db.execute('PRAGMA busy_timeout = 20')
+        db.execute('BEGIN IMMEDIATE')
+        result = backend.search(mail_message.Filters(folder='inbox', header='List-ID: alpha'), 20)
+        db.execute('ROLLBACK')
+        self.assertEqual(result.total, 2)
+        self.assertEqual(stored(db_path), ([], []))
+
+    def test_an_older_index_that_cannot_take_the_tables_is_scanned_and_the_search_answers(self):
+        db_path = self.build()
+        forget_header_index(db_path)
+        connect = sqlite3.connect
+
+        def impatient(*args, **kwargs):
+            return connect(*args, **dict(kwargs, timeout=0.05))
+
+        for case in ('held by another process', 'read only'):
+            holder = connect(db_path, isolation_level=None)
+            self.addCleanup(holder.close)
+            if case == 'held by another process':
+                holder.execute('BEGIN IMMEDIATE')
+            else:
+                os.chmod(db_path, 0o400)
+            try:
+                with mock.patch.object(mail_index.sqlite3, 'connect', impatient):
+                    result, _, _, calls = self.searched('List-ID: alpha')
+            finally:
+                os.chmod(db_path, 0o600)
+                if holder.in_transaction:
+                    holder.execute('ROLLBACK')
+            self.assertEqual((result.total, calls), (2, [7]), case)
+            tables = {name for (name,) in holder.execute('SELECT name FROM sqlite_master')}
+            self.assertFalse(tables & {'hdrs', 'hdr_cov', 'msgs_headers_delete'}, case)
+        self.assertEqual(self.searched('List-ID: alpha')[0].total, 2)        # writable again: completed
+        self.assertEqual(self.searched('List-ID: alpha')[1], 0)
+
+    def test_the_status_pass_gets_only_the_matches_on_the_index_path(self):
+        given, live = [], mail_index.FolderIndex.live
+
+        def spy(index, rows):
+            given.append(len(rows))
+            return live(index, rows)
+
+        with mock.patch.object(mail_index.FolderIndex, 'live', spy):
+            self.assertEqual(self.searched('List-ID: alpha')[0].total, 2)
+        self.assertEqual(given, [2])
+
+
+# ---------------------------------------------------------------- the header index: progress on stderr
+
+class HeaderIndexProgress(HeaderFilterBase):
+    WORDS = ('building the', 'header index of', 'messages so far')
+
+    def in_process(self, *args, log=None):
+        """The command in this process: (exit code, stdout, stderr). LOG gets every stderr line in order."""
+        out = io.StringIO()
+
+        class Errors(io.StringIO):
+            def write(self, text):
+                if log is not None:
+                    log.append(text)
+                return super().write(text)
+
+        err = Errors()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = load_cli().main(['search', 'work', '--folder', 'inbox', '--json', *args])
+        return code, out.getvalue(), err.getvalue()
+
+    def assert_clean(self, out):
+        json.loads(out)
+        self.assertEqual(len(out.splitlines()), 1)
+        for words in self.WORDS:
+            self.assertNotIn(words, out)
+
+    def test_completing_is_announced_before_the_first_read_and_stdout_stays_one_document(self):
+        self.assertEqual(self.in_process()[0], 0)
+        [db_path] = Path(self.cache).rglob('index-*.sqlite')
+        forget_header_index(db_path)
+        log = []
+
+        class Reads(Handle):
+            def read(self, size=-1):
+                log.append('read')
+                return self.handle.read(size)
+
+        with mock.patch.object(mail_index, 'PROGRESS_EVERY', 3), \
+                mock.patch.object(mail_local, 'open_mbox', lambda path: Reads(path, [])):
+            code, out, err = self.in_process('--header', 'List-ID: alpha', log=log)
+        self.assertEqual(code, 0, err)
+        self.assert_clean(out)
+        self.assertEqual(err.splitlines(), ['mailbox: building the header index of INBOX-1: 7 messages to read',
+                                            'mailbox: header index of INBOX-1: 3 of 7 messages',
+                                            'mailbox: header index of INBOX-1: 6 of 7 messages'])
+        self.assertLess(log.index('mailbox: building the header index of INBOX-1: 7 messages to read\n'), log.index('read'))
+        self.assertNotIn('alpha', err)
+        self.assertNotIn('list-id', err.lower())
+        self.assertEqual(self.in_process('--header', 'List-ID: alpha')[2], '')          # covered: silent
+
+    def test_a_build_from_scratch_is_announced_before_the_parse(self):
+        real, log = mail_index.message_row, []
+
+        def parsed(*args):
+            log.append('parse')
+            return real(*args)
+
+        with mock.patch.object(mail_index, 'PROGRESS_EVERY', 3), mock.patch.object(mail_index, 'BATCH', 3), \
+                mock.patch.object(mail_index, 'message_row', parsed):
+            code, out, err = self.in_process(log=log)
+        self.assertEqual(code, 0, err)
+        json.loads(out)
+        self.assertNotIn('building the', out)
+        self.assertEqual(err.splitlines(), ['mailbox: building the index of INBOX-1',
+                                            'mailbox: index of INBOX-1: 3 messages so far',
+                                            'mailbox: index of INBOX-1: 6 messages so far'])
+        self.assertLess(log.index('mailbox: building the index of INBOX-1\n'), log.index('parse'))
+        self.assertIn('the index of INBOX-1 was built from scratch (7 messages)', json.loads(out)['notes'])
+
+    def test_the_real_command_keeps_progress_off_stdout(self):
+        code, out, err = self.run_cli('search', 'work', '--folder', 'inbox', '--json', '--header', 'List-ID: alpha')
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)['total'], 2)
+        self.assertEqual(err, 'mailbox: building the index of INBOX-1\n')
+
+    def test_silent_when_nothing_is_built(self):
+        self.assertEqual(self.in_process()[0], 0)
+        self.assertEqual(self.in_process('--header', 'List-ID: alpha')[2], '')
+        with open(self.lay['inbox'], 'ab') as handle:
+            handle.write(fx.mbox_format_b([self.extra['long']]))
+        self.assertEqual(self.in_process('--header', 'List-ID: alpha')[2], '')          # appended mail
+        shutil.rmtree(self.cache)
+        self.lay['inbox'].write_bytes(b'')
+        self.assertEqual(self.in_process('--header', 'List-ID: alpha')[2], '')          # an empty folder file
+
+    def test_a_closed_stderr_does_not_stop_the_search(self):
+        broken = mock.Mock()
+        broken.write.side_effect = BrokenPipeError
+        backend = mail_local.LocalBackend(self.account(), {fx.ADDRESS}, {})
+        try:
+            with mock.patch.object(sys, 'stderr', broken):
+                result = backend.search(mail_message.Filters(folder='inbox', header='List-ID: alpha'), 20)
+        finally:
+            backend.close()
+        self.assertEqual(result.total, 2)
 
 
 # ---------------------------------------------------------------- the build announcement (task 5.1)

@@ -39,6 +39,16 @@
           "timeout": 10
         }
       ]
+    },
+    {
+      "matcher": "Bash|Monitor|mcp__.*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 ~/.claude/hooks/mail-send-gate",
+          "timeout": 10
+        }
+      ]
     }
   ],
   "WorktreeCreate": [

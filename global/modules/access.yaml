@@ -16,6 +16,7 @@ optional:
 notes:
   - "Opt-in. It ships with no account, no app and no key: name yours in the config pieces `mailbox` and `stores` of your override."
   - "Both commands only read: nothing sends or changes mail, and nothing uploads, releases or edits anything in a store."
+  - "Sending is denied for every session, with or without this module: core's `mail-send-gate` blocks a mail connector's write tools and Bash commands that send."
   - "`mailbox` keeps a header index of a local mail store under ~/.cache/claude-toolkit/mailbox (0700). It is correspondence metadata: it never goes inside a repository or a notes folder."
   - "An IMAP password or a store key is read from the file your config names, which must be 0600. The toolkit stores neither."
   - "A mail connector belongs to the Claude account that is signed in: `mailbox whoami` checks whose mailbox it is before a session trusts it."

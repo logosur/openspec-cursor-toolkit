@@ -1,0 +1,50 @@
+piece: mail-send-gate
+dest: hooks/mail-send-gate
+kind: hook
+event: PreToolUse
+probes:
+  - name: unrelated tool passes silently
+    stdin: {tool_name: Read, tool_input: {file_path: x}}
+    exit: [0]
+    stdout: empty
+  - name: a connector send is denied with a JSON decision
+    stdin: {tool_name: mcp__mailsrv__send_message, session_id: probe, tool_input: {}}
+    exit: [0]
+    stdout: json
+    contains: '"deny"'
+  - name: a connector read passes
+    stdin: {tool_name: mcp__mailsrv__get_message, session_id: probe, tool_input: {}}
+    exit: [0]
+    stdout: empty
+  - name: session messaging of the app is not mail
+    stdin: {tool_name: mcp__ccd_session_mgmt__send_message, session_id: probe, tool_input: {}}
+    exit: [0]
+    stdout: empty
+  - name: sendmail is denied
+    stdin: {tool_name: Bash, session_id: probe, tool_input: {command: "sendmail -t < m"}}
+    exit: [0]
+    stdout: json
+    contains: '"deny"'
+  - name: a send through Monitor is denied
+    stdin: {tool_name: Monitor, session_id: probe, tool_input: {command: "sendmail -t < m"}}
+    exit: [0]
+    stdout: json
+    contains: '"deny"'
+  - name: the local test mailer passes
+    stdin: {tool_name: Bash, session_id: probe, tool_input: {command: "curl smtp://localhost:1025 --mail-rcpt a@example.test -T m"}}
+    exit: [0]
+    stdout: empty
+  - name: a word outside command position passes
+    stdin: {tool_name: Bash, session_id: probe, tool_input: {command: "grep -r sendmail ."}}
+    exit: [0]
+    stdout: empty
+  - name: a corrupt config still denies a send
+    stdin: {tool_name: mcp__mailsrv__send_message, session_id: probe, tool_input: {}}
+    corrupt_config: true
+    exit: [0]
+    stdout: json
+    contains: '"deny"'
+  - name: unparseable stdin fails open
+    stdin_raw: "{not json"
+    exit: [0]
+    stdout: empty

@@ -14,6 +14,7 @@ Se cargan en todas las sesiones, así que son breves. Las políticas de cada pro
 - Matar solo procesos propios (`~/.claude/rules/matar-procesos-solo-propios.md`).
 - Subagentes y sesiones nuevas con modelo explícito y barato; Opus o Fable solo con motivo escrito
   (`~/.claude/rules/subagentes-con-modelo-explicito.md`).
+- Correo de solo lectura: el agente lee y redacta, el desarrollador envía (`~/.claude/rules/correo-solo-lectura.md`).
 
 ## Git
 - Consultas de solo lectura (`status`, `diff`, `log`) siempre permitidas.
